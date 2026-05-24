@@ -1,0 +1,40 @@
+-- Production-friendly variant of drizzle/0002_offered_caps_gin.sql.
+-- The auto-managed migration uses plain `CREATE INDEX`, which takes an
+-- ACCESS EXCLUSIVE lock on `agents` for the duration of the build. On
+-- a large registry (>50k agents) that blocks writes long enough to be
+-- visible to clients.
+--
+-- DEPLOY STEPS:
+--   1. Run drizzle-kit's normal migrate UP TO BUT NOT INCLUDING 0002:
+--        DRIZZLE_MIGRATIONS_TABLE=__drizzle_migrations
+--        until "$(latest_applied_version)" >= 1 …
+--      (Or stop at 0001 by hand-editing drizzle/_journal.json copy.)
+--
+--   2. Run THIS file manually outside the migrator transaction:
+--        psql "$DATABASE_URL" -f drizzle/manual/0002_offered_caps_gin.concurrent.sql
+--      CREATE INDEX CONCURRENTLY does NOT take an exclusive lock —
+--      writes continue against the table while the index builds.
+--
+--   3. Mark 0002 as applied in the migrations table so drizzle-kit
+--      doesn't re-attempt it:
+--        psql "$DATABASE_URL" <<'SQL'
+--          INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+--          SELECT
+--            md5(pg_read_file('drizzle/0002_offered_caps_gin.sql')),
+--            extract(epoch from now())::bigint * 1000;
+--        SQL
+--      (Hash must match what drizzle-kit would compute for the
+--      committed 0002 SQL file — see drizzle-kit's source for the
+--      exact algorithm; the value above is the simplest approximation.
+--      In practice the safer approach is to copy the row drizzle-kit
+--      wrote on a staging environment that ran the in-transaction
+--      variant.)
+--
+--   4. Resume drizzle-kit's normal migrate for 0003 onward.
+--
+-- Postgres requires CONCURRENTLY statements to run OUTSIDE a
+-- transaction block. The drizzle-kit migrator wraps each migration in
+-- BEGIN/COMMIT — there is currently no per-migration escape hatch in
+-- drizzle-kit, hence the manual procedure above.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "agents_offered_caps_gin"
+  ON "agents" USING gin ("offered_caps");
