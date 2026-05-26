@@ -24,6 +24,12 @@ export const config = {
   apiKeys: readList('API_KEYS'),
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
   maxAuditEventsInMemory: readNumber('MAX_AUDIT_EVENTS_MEMORY', 500),
+  // Per-process cap on concurrent /api/events/stream connections.
+  // Each open SSE holds an in-process subscription on the event bus,
+  // so unbounded growth would leak memory under a misbehaving client.
+  // The default is generous; raise it if you front this with a fan-out
+  // proxy that opens its own pool of upstream streams.
+  maxSseConnections: readNumber('MAX_SSE_CONNECTIONS', 500),
   revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
@@ -53,3 +59,15 @@ export const config = {
 } as const;
 
 export type Config = typeof config;
+
+// Surface configuration that's "permissive in dev, dangerous in prod"
+// at boot, once per process. We log via stderr directly rather than the
+// pino logger to avoid a circular import (logger.ts has no deps on
+// this module today, and we want to keep it that way).
+if (!config.isProduction && config.apiKeys.length === 0 && !process.env.JEST_WORKER_ID) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[aitp-cp] API_KEYS is empty; admin routes are unauthenticated in this NODE_ENV. ' +
+      'Set API_KEYS before exposing this instance to anything beyond localhost.',
+  );
+}

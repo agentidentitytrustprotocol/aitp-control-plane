@@ -25,9 +25,18 @@ interface ManifestEnvelope {
 
 const REGISTRATION_EXPIRY_GUARD_MS = 5 * 60 * 1000;
 
+/** Best-effort derivation of the agent's own `.well-known` manifest URL.
+ *
+ * This is a HINT — the field name conveys that — assuming the agent
+ * hosts `.well-known` at the host root, which is the RFC-AITP convention
+ * for an agent that owns its own host. Operators running multiple agents
+ * behind a single gateway will get a 404 from the hint; callers should
+ * fall back to the CP's own cached copy at `manifestUrl`. Returns null
+ * only when the handshake URL can't be parsed at all. */
 function deriveAgentManifestHint(handshakeEndpoint: string): string | null {
   try {
     const url = new URL(handshakeEndpoint);
+    if (!url.host) return null;
     return `${url.protocol}//${url.host}/.well-known/aitp-manifest`;
   } catch {
     return null;

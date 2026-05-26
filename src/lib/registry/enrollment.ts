@@ -7,6 +7,12 @@ import { config } from '../config';
 // would silently reject. Single source of truth here.
 const REGISTRATION_EXPIRY_GUARD_MS = 5 * 60 * 1000;
 
+// Enrollment tokens are short-lived bearer credentials. The lifetime is
+// deliberately tight: the only thing they unlock is a one-shot
+// `POST /api/registry/agents` for the matching aid. If you raise this,
+// also re-check that the manifest expiry guard above still covers it.
+const TOKEN_LIFETIME_SECS = 300;
+
 interface EnrollmentPayload {
   sub: string;
   scope: 'register';
@@ -69,10 +75,10 @@ export class EnrollmentService {
       sub: aid,
       scope: 'register',
       iat: now,
-      exp: now + 300,
+      exp: now + TOKEN_LIFETIME_SECS,
       jti: randomUUID(),
     };
-    return { token: this.sign(payload), expiresIn: 300, aid };
+    return { token: this.sign(payload), expiresIn: TOKEN_LIFETIME_SECS, aid };
   }
 
   validateToken(token: string, expectedAid: string): void {

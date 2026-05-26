@@ -75,6 +75,13 @@ interface RequestBody {
   events?: unknown[];
 }
 
+// Caps for the batched telemetry sink. Picked to match a 50-event batch
+// of typical handshake/TCT events (~1KB each) with a 5x headroom. A
+// caller that legitimately needs more should split into multiple
+// requests rather than asking us to lift these.
+const MAX_BATCH_BYTES = 256 * 1024;
+const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
+
 export async function POST(req: NextRequest) {
   // Lazy startup hooks — idempotent, .unref()'d intervals. Run BEFORE
   // the idempotency wrapper so they fire even on replayed requests
@@ -82,6 +89,21 @@ export async function POST(req: NextRequest) {
   startExpiryJob();
   startWebhookReaper();
   startRetentionJob();
+
+  // Reject obviously-too-large bodies before consuming them. The
+  // per-event check after parse catches the case where Content-Length
+  // is unset or wrong; this check just spares us reading 50MB to learn
+  // we'll reject it.
+  const declaredLen = Number(req.headers.get('content-length'));
+  if (Number.isFinite(declaredLen) && declaredLen > MAX_BATCH_BYTES) {
+    return Response.json(
+      {
+        error: `request body exceeds ${MAX_BATCH_BYTES} bytes`,
+        code: 'PAYLOAD_TOO_LARGE',
+      },
+      { status: 413 },
+    );
+  }
 
   let body: RequestBody | unknown[] | null = null;
   try {
@@ -103,6 +125,23 @@ export async function POST(req: NextRequest) {
         (e): e is Record<string, unknown> => typeof e === 'object' && e !== null,
       )
       .map(normalize);
+
+    // Per-event payload cap. Rejecting the whole batch is intentional —
+    // partial-acceptance would force callers to reconcile which events
+    // landed and which didn't, which defeats batching.
+    for (const event of normalized) {
+      const size = JSON.stringify(event.payload).length;
+      if (size > MAX_EVENT_PAYLOAD_BYTES) {
+        return {
+          status: 413,
+          body: {
+            error: `event payload exceeds ${MAX_EVENT_PAYLOAD_BYTES} bytes (got ${size})`,
+            code: 'PAYLOAD_TOO_LARGE',
+            eventType: event.type,
+          },
+        };
+      }
+    }
 
     await ingestEvents(normalized);
 

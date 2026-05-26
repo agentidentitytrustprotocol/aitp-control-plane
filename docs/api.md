@@ -84,7 +84,7 @@ In production, an empty `API_KEYS` causes gated routes to return `503 SERVER_MIS
 |---|---|---|---|
 | POST | `/api/events` | API key (or open in dev) | Ingest a batch of audit events |
 | GET | `/api/events/history` | API key | Query persisted events. Filters: `?type=`, `?aid=`, `?sessionId=`, `?runId=`, `?since=`, `?until=`, `?limit=`, `?offset=` |
-| GET | `/api/events/stream` | API key | Server-Sent Events stream (live + backlog) |
+| GET | `/api/events/stream` | API key | Server-Sent Events stream (live + backlog). 503 `SSE_CAPACITY` once `MAX_SSE_CONNECTIONS` open streams are in flight |
 
 #### `POST /api/events` body
 
@@ -107,6 +107,8 @@ Accepts either a bare array or `{ events: [...] }`. Each event:
 `aid_a` / `aid_b` / `session_id` / `run_id` snake_case keys are also accepted (the playground emits snake_case).
 
 Response: `{ "ingested": <n> }`.
+
+Limits: a single batch must be ≤ 256 KiB on the wire and each event's `payload` must be ≤ 64 KiB. Requests above these caps return `413 PAYLOAD_TOO_LARGE`. Split large batches into multiple requests.
 
 ### Audit
 
@@ -208,6 +210,6 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 | `X-Aitp-Namespace` | request | Tenant scope override on enrollment |
 | `X-AITP-Signature` | response (webhook delivery) | `sha256=<hex>` HMAC of body bytes |
 
-## Status
+## Lifecycle
 
-This document tracks the **shipped** endpoints. Roadmap items (TCT lifecycle, delegation chains, trust anchors, pinned-key allowlist, batch export, replay) are in [`../plans/README.md`](../plans/README.md) and not yet exposed.
+- `GET /api/readyz` returns `503` with `{ "ready": false, "reason": "shutting_down" }` once the process has received a SIGTERM, so a load balancer can drain the pod out of rotation before it exits. `GET /api/health` continues to return `200` during the drain window.

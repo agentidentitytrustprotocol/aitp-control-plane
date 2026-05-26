@@ -1,10 +1,45 @@
 import { NextRequest } from 'next/server';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
+import { config } from '@/lib/config';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Per-process count of open SSE streams. Survives hot-reload via a
+// global slot so the count doesn't reset to zero on a dev rebuild and
+// leak the previous generation's still-open connections out of the cap.
+declare global {
+  // eslint-disable-next-line no-var
+  var __sseOpenCount: number | undefined;
+}
+function incrementSseCount(): number {
+  globalThis.__sseOpenCount = (globalThis.__sseOpenCount ?? 0) + 1;
+  return globalThis.__sseOpenCount;
+}
+function decrementSseCount(): void {
+  globalThis.__sseOpenCount = Math.max(
+    0,
+    (globalThis.__sseOpenCount ?? 0) - 1,
+  );
+}
+
 export function GET(req: NextRequest) {
+  if ((globalThis.__sseOpenCount ?? 0) >= config.maxSseConnections) {
+    return new Response(
+      JSON.stringify({
+        error: 'too many open SSE connections; retry after current streams drain',
+        code: 'SSE_CAPACITY',
+      }),
+      {
+        status: 503,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': '30',
+        },
+      },
+    );
+  }
+
   const { searchParams } = new URL(req.url);
   const filterType = searchParams.get('type');
   const filterRunId = searchParams.get('run_id') ?? searchParams.get('runId');
@@ -27,9 +62,13 @@ export function GET(req: NextRequest) {
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  // Reserve a slot for this connection; release it in cleanup so the
+  // count tracks live streams 1:1.
+  incrementSseCount();
   const cleanup = () => {
     if (closed) return;
     closed = true;
+    decrementSseCount();
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;

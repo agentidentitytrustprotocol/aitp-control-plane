@@ -3,11 +3,13 @@
  * boot (Node.js or Edge runtime), before any route handler executes.
  * Use it to wire up OpenTelemetry so spans from route handlers, pg
  * pool calls, and outbound fetch (webhook deliveries) are exported
- * to the configured OTLP collector.
+ * to the configured OTLP collector, and to register process-level
+ * shutdown hooks.
  *
- * Disabled by default: set OTEL_ENABLED=true to turn it on. The SDK
- * imports are dynamic so a deployment with OTel disabled doesn't pay
- * the cold-start cost of loading the auto-instrumentations.
+ * OpenTelemetry is disabled by default: set OTEL_ENABLED=true to turn
+ * it on. The SDK imports are dynamic so a deployment with OTel
+ * disabled doesn't pay the cold-start cost of loading the
+ * auto-instrumentations.
  *
  * Edge runtime cannot host the OpenTelemetry Node SDK; we only wire
  * it under the Node.js runtime. All route handlers in this project
@@ -15,8 +17,16 @@
  */
 
 export async function register(): Promise<void> {
-  if (process.env.OTEL_ENABLED !== 'true') return;
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+  // Shutdown hooks must always be wired — even with OTel off — so
+  // readiness drains correctly on SIGTERM.
+  const { registerShutdownHooks } = await import('./lib/shutdown');
+
+  if (process.env.OTEL_ENABLED !== 'true') {
+    registerShutdownHooks();
+    return;
+  }
 
   const { NodeSDK } = await import('@opentelemetry/sdk-node');
   const { OTLPTraceExporter } = await import(
@@ -52,10 +62,7 @@ export async function register(): Promise<void> {
 
   sdk.start();
 
-  process.on('SIGTERM', () => {
-    sdk
-      .shutdown()
-      .catch(() => undefined)
-      .finally(() => process.exit(0));
-  });
+  // The OTel SDK flush runs as a shutdown hook so trace spans for the
+  // request that triggered the signal still make it to the collector.
+  registerShutdownHooks([() => sdk.shutdown()]);
 }
