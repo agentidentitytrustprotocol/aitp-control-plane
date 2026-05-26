@@ -1,1 +1,1 @@
-# aitp-cp
+# aitp-control-plane

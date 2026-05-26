@@ -44,30 +44,30 @@ export async function GET() {
       .from(auditEvents)
       .groupBy(auditEvents.type);
 
-    lines.push('# HELP aitp_cp_agents_active Active agents in registry');
-    lines.push('# TYPE aitp_cp_agents_active gauge');
-    lines.push(`aitp_cp_agents_active ${activeAgents[0]?.c ?? 0}`);
+    lines.push('# HELP aitp_control_plane_agents_active Active agents in registry');
+    lines.push('# TYPE aitp_control_plane_agents_active gauge');
+    lines.push(`aitp_control_plane_agents_active ${activeAgents[0]?.c ?? 0}`);
 
     lines.push(
-      '# HELP aitp_cp_agents_expired Agents with expired manifests awaiting re-enrollment',
+      '# HELP aitp_control_plane_agents_expired Agents with expired manifests awaiting re-enrollment',
     );
-    lines.push('# TYPE aitp_cp_agents_expired gauge');
-    lines.push(`aitp_cp_agents_expired ${expiredAgents[0]?.c ?? 0}`);
+    lines.push('# TYPE aitp_control_plane_agents_expired gauge');
+    lines.push(`aitp_control_plane_agents_expired ${expiredAgents[0]?.c ?? 0}`);
 
-    lines.push('# HELP aitp_cp_sessions_total Total handshake sessions ever observed');
-    lines.push('# TYPE aitp_cp_sessions_total counter');
-    lines.push(`aitp_cp_sessions_total ${totalSessions[0]?.c ?? 0}`);
+    lines.push('# HELP aitp_control_plane_sessions_total Total handshake sessions ever observed');
+    lines.push('# TYPE aitp_control_plane_sessions_total counter');
+    lines.push(`aitp_control_plane_sessions_total ${totalSessions[0]?.c ?? 0}`);
 
-    lines.push('# HELP aitp_cp_webhook_deliveries Webhook deliveries by status');
-    lines.push('# TYPE aitp_cp_webhook_deliveries gauge');
-    lines.push(`aitp_cp_webhook_deliveries{status="pending"} ${deliveriesPending[0]?.c ?? 0}`);
-    lines.push(`aitp_cp_webhook_deliveries{status="failed"} ${deliveriesFailed[0]?.c ?? 0}`);
+    lines.push('# HELP aitp_control_plane_webhook_deliveries Webhook deliveries by status');
+    lines.push('# TYPE aitp_control_plane_webhook_deliveries gauge');
+    lines.push(`aitp_control_plane_webhook_deliveries{status="pending"} ${deliveriesPending[0]?.c ?? 0}`);
+    lines.push(`aitp_control_plane_webhook_deliveries{status="failed"} ${deliveriesFailed[0]?.c ?? 0}`);
 
-    lines.push('# HELP aitp_cp_audit_events Total audit events by type');
-    lines.push('# TYPE aitp_cp_audit_events counter');
+    lines.push('# HELP aitp_control_plane_audit_events Total audit events by type');
+    lines.push('# TYPE aitp_control_plane_audit_events counter');
     for (const r of eventsByType) {
       const labelType = r.type.replace(/"/g, '\\"');
-      lines.push(`aitp_cp_audit_events{type="${labelType}"} ${r.c}`);
+      lines.push(`aitp_control_plane_audit_events{type="${labelType}"} ${r.c}`);
     }
   } catch (err) {
     dbOk = false;
@@ -75,9 +75,9 @@ export async function GET() {
     void sql; // keep import live
   }
 
-  lines.push('# HELP aitp_cp_db_up Whether the database was reachable for this scrape');
-  lines.push('# TYPE aitp_cp_db_up gauge');
-  lines.push(`aitp_cp_db_up ${dbOk ? 1 : 0}`);
+  lines.push('# HELP aitp_control_plane_db_up Whether the database was reachable for this scrape');
+  lines.push('# TYPE aitp_control_plane_db_up gauge');
+  lines.push(`aitp_control_plane_db_up ${dbOk ? 1 : 0}`);
 
   return new Response(lines.join('\n') + '\n', {
     headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },

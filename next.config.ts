@@ -40,7 +40,7 @@ const nextConfig: NextConfig = {
     const corsOrigin = process.env.CORS_ORIGIN ?? '*';
     if (!process.env.CORS_ORIGIN && process.env.NODE_ENV === 'production') {
       console.warn(
-        '[aitp-cp] CORS_ORIGIN not set in production — defaulting to "*". Set CORS_ORIGIN to the UI plane origin.',
+        '[aitp-control-plane] CORS_ORIGIN not set in production — defaulting to "*". Set CORS_ORIGIN to the UI plane origin.',
       );
     }
     return [

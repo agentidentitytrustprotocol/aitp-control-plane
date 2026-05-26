@@ -7,6 +7,6 @@ export default defineConfig({
   dbCredentials: {
     url:
       process.env.DATABASE_URL ??
-      'postgres://postgres:postgres@localhost:5432/aitp_cp',
+      'postgres://postgres:postgres@localhost:5432/aitp_control_plane',
   },
 });

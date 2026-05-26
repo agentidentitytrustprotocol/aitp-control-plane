@@ -20,7 +20,7 @@ export function initCpIdentity(): void {
     }
     const seed = randomBytes(32);
     console.warn(
-      `[aitp-cp] CP_AID_SEED_HEX not set — using ephemeral key (${seed.toString('hex')})`,
+      `[aitp-control-plane] CP_AID_SEED_HEX not set — using ephemeral key (${seed.toString('hex')})`,
     );
     agent = AitpAgent.fromSeed(seed);
   } else {

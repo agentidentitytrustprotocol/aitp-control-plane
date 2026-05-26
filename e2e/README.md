@@ -1,4 +1,4 @@
-# aitp-cp e2e
+# aitp-control-plane e2e
 
 End-to-end integration test that drives the
 [`aitp-playground`](../../aitp-playground) through a real scenario
@@ -24,7 +24,7 @@ npm run db:migrate
 API_KEYS=e2e-playground-key,e2e-driver-key \
 CP_AID_SEED_HEX=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))") \
 ENROLLMENT_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))") \
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/aitp_cp \
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/aitp_control_plane \
 npm run start
 ```
 

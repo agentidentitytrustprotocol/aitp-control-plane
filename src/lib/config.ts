@@ -19,7 +19,7 @@ export const config = {
   cpAidSeedHex: process.env.CP_AID_SEED_HEX ?? '',
   databaseUrl:
     process.env.DATABASE_URL ??
-    'postgres://postgres:postgres@localhost:5432/aitp_cp',
+    'postgres://postgres:postgres@localhost:5432/aitp_control_plane',
   dbPoolMax: readNumber('DB_POOL_MAX', 20),
   apiKeys: readList('API_KEYS'),
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
