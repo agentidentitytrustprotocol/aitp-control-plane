@@ -20,6 +20,7 @@ class EventBus {
   private listeners = new Set<Listener>();
   private backlog: AuditEventRecord[] = [];
   private readonly maxBacklog: number;
+  private dropped = 0;
 
   constructor(maxBacklog: number) {
     this.maxBacklog = maxBacklog;
@@ -27,7 +28,10 @@ class EventBus {
 
   publish(event: AuditEventRecord): void {
     this.backlog.push(event);
-    if (this.backlog.length > this.maxBacklog) this.backlog.shift();
+    if (this.backlog.length > this.maxBacklog) {
+      this.backlog.shift();
+      this.dropped += 1;
+    }
     for (const l of this.listeners) {
       try {
         l(event);
@@ -46,6 +50,13 @@ class EventBus {
 
   getBacklog(limit = 100): AuditEventRecord[] {
     return this.backlog.slice(-limit);
+  }
+
+  /** Total events evicted from the in-memory backlog since process start.
+   * Eviction means a slow SSE subscriber that connected later may have
+   * missed events — they should reconcile with `/api/events/history`. */
+  getDroppedCount(): number {
+    return this.dropped;
   }
 }
 

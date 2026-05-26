@@ -44,4 +44,17 @@ describe('eventBus', () => {
     unsubB();
     expect(recorded).toBe(1);
   });
+
+  it('exposes a monotonic dropped-count via getDroppedCount', () => {
+    // The shared singleton already has unknown prior drops; capture a
+    // baseline and assert the delta after we overflow the cap ourselves.
+    const before = eventBus.getDroppedCount();
+    // The default cap is 500 in test; publish enough to force at least one drop.
+    const overflow = 600;
+    for (let i = 0; i < overflow; i += 1) {
+      eventBus.publish(makeEvent(`drop-${i}`));
+    }
+    const after = eventBus.getDroppedCount();
+    expect(after).toBeGreaterThan(before);
+  });
 });

@@ -45,7 +45,8 @@ const RATE_LIMIT_EXEMPT_PATHS = new Set<string>([
   '/api/metrics',
 ]);
 
-const WINDOW_MS = 60_000;
+// Configurable via RATE_LIMIT_WINDOW_MS; default 60s matches the per-min limits.
+const WINDOW_MS = appConfig.rateLimitWindowMs;
 
 function newRequestId(): string {
   return `cp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

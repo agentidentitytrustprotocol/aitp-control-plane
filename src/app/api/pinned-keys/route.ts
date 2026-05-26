@@ -15,6 +15,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { pinnedKeys } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
 
 export const runtime = 'nodejs';
@@ -119,7 +120,7 @@ export async function POST(req: NextRequest) {
         pubkey: body.pubkey,
         label,
         expiresAt,
-        addedBy: req.headers.get('authorization')?.slice(7, 19) ?? null,
+        addedBy: actorIdFromAuthHeader(req.headers.get('authorization')),
       })
       .onConflictDoUpdate({
         target: [pinnedKeys.namespace, pinnedKeys.aid],

@@ -39,6 +39,23 @@ export async function POST(req: NextRequest) {
       return { status: 400, body: { error: 'jti must be a UUID', code: 'JTI_INVALID' } };
     }
 
+    if (body.reason !== undefined && body.reason !== null) {
+      if (typeof body.reason !== 'string') {
+        return {
+          status: 400,
+          body: { error: 'reason must be a string', code: 'BODY_INVALID' },
+        };
+      }
+      if (body.reason.length > 500) {
+        return {
+          status: 400,
+          body: {
+            error: 'reason exceeds 500 character limit',
+            code: 'BODY_INVALID',
+          },
+        };
+      }
+    }
     const reason = typeof body.reason === 'string' ? body.reason : null;
     let revokedAt: string;
     if (typeof body.revokedAt === 'string') {

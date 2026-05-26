@@ -22,16 +22,24 @@ export async function GET(
       { status: 404 },
     );
   }
-  return Response.json({
-    aid: agent.aid,
-    displayName: agent.displayName,
-    handshakeEndpoint: agent.handshakeEndpoint,
-    offeredCaps: agent.offeredCaps,
-    status: agent.status,
-    registeredAt: agent.registeredAt,
-    lastSeenAt: agent.lastSeenAt,
-    manifestUrl: `/api/registry/agents/${encodeURIComponent(agent.aid)}/manifest`,
-  });
+  return Response.json(
+    {
+      aid: agent.aid,
+      displayName: agent.displayName,
+      handshakeEndpoint: agent.handshakeEndpoint,
+      offeredCaps: agent.offeredCaps,
+      status: agent.status,
+      registeredAt: agent.registeredAt,
+      lastSeenAt: agent.lastSeenAt,
+      manifestUrl: `/api/registry/agents/${encodeURIComponent(agent.aid)}/manifest`,
+    },
+    {
+      // Public discovery surface — a 30s cache softens load on hot
+      // peer-discovery paths without making stale data dangerous (the
+      // canonical signed manifest is fetched at handshake time anyway).
+      headers: { 'Cache-Control': 'public, max-age=30' },
+    },
+  );
 }
 
 export async function DELETE(

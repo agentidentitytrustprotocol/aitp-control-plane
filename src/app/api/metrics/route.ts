@@ -8,6 +8,8 @@ import {
 } from '@/lib/db/schema';
 import { rateLimiter } from '@/lib/rate-limit';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
+import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
+import { eventBus } from '@/lib/audit/stream';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -108,6 +110,23 @@ export async function GET() {
   );
   lines.push(
     `aitp_control_plane_webhook_circuit_breaker_open{state="half_open"} ${halfOpenCount}`,
+  );
+
+  // Operator visibility into silent-degradation surfaces.
+  lines.push(
+    '# HELP aitp_control_plane_admin_audit_insert_failures Admin-audit inserts that failed since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_admin_audit_insert_failures counter');
+  lines.push(
+    `aitp_control_plane_admin_audit_insert_failures ${getAdminAuditInsertFailures()}`,
+  );
+
+  lines.push(
+    '# HELP aitp_control_plane_event_backlog_dropped Audit events evicted from the in-memory SSE backlog since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_event_backlog_dropped counter');
+  lines.push(
+    `aitp_control_plane_event_backlog_dropped ${eventBus.getDroppedCount()}`,
   );
 
   return new Response(lines.join('\n') + '\n', {

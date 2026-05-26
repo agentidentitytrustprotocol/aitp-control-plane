@@ -33,6 +33,7 @@ export const config = {
   rateLimitEnrollPerIpMin: readNumber('RATE_LIMIT_ENROLLMENT_PER_IP_MIN', 5),
   rateLimitPublicPerIpMin: readNumber('RATE_LIMIT_PUBLIC_PER_IP_MIN', 60),
   rateLimitApiKeyMin: readNumber('RATE_LIMIT_API_KEY_PER_MIN', 600),
+  rateLimitWindowMs: readNumber('RATE_LIMIT_WINDOW_MS', 60_000),
   rateLimitEnabled:
     (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
   // ── Data retention ───────────────────────────────────────────────────

@@ -63,6 +63,7 @@ All settings are environment variables. See `.env.example` for the canonical lis
 | `WEBHOOK_RETRY_ATTEMPTS` | no | `3` | Per-delivery retry budget |
 | `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog size |
 | `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
+| `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min rate limits accumulate |
 
 ## API surface
 

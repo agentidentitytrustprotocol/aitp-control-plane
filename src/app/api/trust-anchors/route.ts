@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
 
 export const runtime = 'nodejs';
@@ -90,7 +91,7 @@ export async function POST(req: NextRequest) {
         issuerUrl: body.issuerUrl,
         jwksUrl,
         label,
-        addedBy: req.headers.get('authorization')?.slice(7, 19) ?? null,
+        addedBy: actorIdFromAuthHeader(req.headers.get('authorization')),
       });
     } catch (err) {
       if (

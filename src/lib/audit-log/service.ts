@@ -12,6 +12,15 @@ export interface AdminAuditEntry {
   requestId?: string;
 }
 
+// Failures here never abort the caller (audit must not gate the request
+// path), but silent loss is dangerous — surface a counter on /api/metrics
+// so operators notice if the audit trail is degrading.
+let adminAuditInsertFailures = 0;
+
+export function getAdminAuditInsertFailures(): number {
+  return adminAuditInsertFailures;
+}
+
 export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
   try {
     await db.insert(adminAuditLog).values({
@@ -23,7 +32,7 @@ export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
       requestId: entry.requestId ?? null,
     });
   } catch (err) {
-    // Audit logging must never break the calling request path.
+    adminAuditInsertFailures += 1;
     logger.warn({ err, action: entry.action }, 'admin-audit insert failed');
   }
 }

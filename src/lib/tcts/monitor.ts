@@ -121,29 +121,31 @@ class TctMonitorService {
     const jti = readString(event.payload, 'jti');
     if (!jti || !UUID_RE.test(jti)) return;
     const revokedAt = event.ts;
-    // Mark the issued TCT itself revoked (if present)
-    await db
-      .update(issuedTcts)
-      .set({ revoked: true, revokedAt })
-      .where(and(eq(issuedTcts.jti, jti), eq(issuedTcts.revoked, false)));
+    // Atomic: TCT row update + descendant cascade must commit together so
+    // active-chain queries never observe a half-applied revocation.
+    await db.transaction(async (tx) => {
+      await tx
+        .update(issuedTcts)
+        .set({ revoked: true, revokedAt })
+        .where(and(eq(issuedTcts.jti, jti), eq(issuedTcts.revoked, false)));
 
-    // Cascade to any child delegations whose chain anchors on this JTI.
-    await db.execute(sql`
-      update ${delegations}
-      set revoked = true,
-          revoked_at = ${revokedAt},
-          revoked_reason = 'parent_revoked'
-      where revoked = false
-        and jti in (
-          with recursive descendants(jti) as (
-            select jti from ${delegations} where parent_jti = ${jti}
-            union
-            select d.jti from ${delegations} d
-            join descendants on d.parent_jti = descendants.jti
+      await tx.execute(sql`
+        update ${delegations}
+        set revoked = true,
+            revoked_at = ${revokedAt},
+            revoked_reason = 'parent_revoked'
+        where revoked = false
+          and jti in (
+            with recursive descendants(jti) as (
+              select jti from ${delegations} where parent_jti = ${jti}
+              union
+              select d.jti from ${delegations} d
+              join descendants on d.parent_jti = descendants.jti
+            )
+            select jti from descendants
           )
-          select jti from descendants
-        )
-    `);
+      `);
+    });
   }
 
   private async recordDelegation(event: AuditEventRecord): Promise<void> {
@@ -177,31 +179,31 @@ class TctMonitorService {
     if (!jti || !UUID_RE.test(jti)) return;
     const revokedAt = event.ts;
 
-    // Mark the named delegation revoked.
-    await db
-      .update(delegations)
-      .set({ revoked: true, revokedAt, revokedReason: 'explicit' })
-      .where(and(eq(delegations.jti, jti), eq(delegations.revoked, false)));
+    // Atomic: explicit revocation + descendant cascade must commit
+    // together so active-chain queries never observe a partial state.
+    await db.transaction(async (tx) => {
+      await tx
+        .update(delegations)
+        .set({ revoked: true, revokedAt, revokedReason: 'explicit' })
+        .where(and(eq(delegations.jti, jti), eq(delegations.revoked, false)));
 
-    // Cascade to any descendants in the delegation tree. Same recursive
-    // CTE as `recordRevocation` — revoking an intermediate delegation
-    // must propagate downward, otherwise active-chain queries lie.
-    await db.execute(sql`
-      update ${delegations}
-      set revoked = true,
-          revoked_at = ${revokedAt},
-          revoked_reason = 'parent_revoked'
-      where revoked = false
-        and jti in (
-          with recursive descendants(jti) as (
-            select jti from ${delegations} where parent_jti = ${jti}
-            union
-            select d.jti from ${delegations} d
-            join descendants on d.parent_jti = descendants.jti
+      await tx.execute(sql`
+        update ${delegations}
+        set revoked = true,
+            revoked_at = ${revokedAt},
+            revoked_reason = 'parent_revoked'
+        where revoked = false
+          and jti in (
+            with recursive descendants(jti) as (
+              select jti from ${delegations} where parent_jti = ${jti}
+              union
+              select d.jti from ${delegations} d
+              join descendants on d.parent_jti = descendants.jti
+            )
+            select jti from descendants
           )
-          select jti from descendants
-        )
-    `);
+      `);
+    });
   }
 }
 

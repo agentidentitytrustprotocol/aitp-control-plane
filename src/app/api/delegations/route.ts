@@ -19,6 +19,9 @@ import { delegations } from '@/lib/db/schema';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 interface DelegationRow {
   jti: string;
   parent_jti: string;
@@ -53,6 +56,12 @@ export async function GET(req: NextRequest) {
   // Root-rooted descendant tree query — recursive CTE.
   const rootJti = sp.get('root_jti') ?? sp.get('rootJti');
   if (rootJti) {
+    if (!UUID_RE.test(rootJti)) {
+      return Response.json(
+        { error: 'root_jti must be a UUID', code: 'BAD_REQUEST' },
+        { status: 400 },
+      );
+    }
     const result = await db.execute(sql`
       with recursive tree as (
         select * from ${delegations} where jti = ${rootJti}
@@ -69,7 +78,15 @@ export async function GET(req: NextRequest) {
 
   const wheres: SQL[] = [];
   const parentJti = sp.get('parent_jti') ?? sp.get('parentJti');
-  if (parentJti) wheres.push(eq(delegations.parentJti, parentJti));
+  if (parentJti) {
+    if (!UUID_RE.test(parentJti)) {
+      return Response.json(
+        { error: 'parent_jti must be a UUID', code: 'BAD_REQUEST' },
+        { status: 400 },
+      );
+    }
+    wheres.push(eq(delegations.parentJti, parentJti));
+  }
   const delegator = sp.get('delegator');
   if (delegator) wheres.push(eq(delegations.delegatorAid, delegator));
   const delegatee = sp.get('delegatee');

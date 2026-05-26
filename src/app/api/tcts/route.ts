@@ -16,7 +16,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { and, desc, eq, gt, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { issuedTcts } from '@/lib/db/schema';
 
@@ -75,6 +75,3 @@ export async function GET(req: NextRequest) {
     })),
   });
 }
-
-// silence unused-import warning in case `gt` is dropped later by editors
-void gt;
