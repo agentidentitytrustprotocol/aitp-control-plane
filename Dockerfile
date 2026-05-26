@@ -14,6 +14,9 @@ COPY --from=deps /workspace/aitp-rs/bindings/aitp-node /workspace/aitp-rs/bindin
 COPY --from=deps /workspace/aitp-control-plane/node_modules ./node_modules
 COPY aitp-control-plane/ ./
 ENV NEXT_TELEMETRY_DISABLED=1
+# Opt the build into Next.js standalone output. Gated by env so local
+# `next start` workflows aren't affected (see next.config.ts).
+ENV NEXT_OUTPUT=standalone
 RUN npm run build
 
 FROM node:20-slim AS runner
