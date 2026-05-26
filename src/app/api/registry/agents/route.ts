@@ -5,6 +5,8 @@ import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
+import { logger } from '@/lib/logger';
+import { withIdempotency } from '@/lib/idempotency';
 import { randomUUID } from 'node:crypto';
 
 export const runtime = 'nodejs';
@@ -72,110 +74,107 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = req.headers.get('authorization') ?? '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
-
   const body = await req.text();
-  let envelope: ManifestEnvelope;
-  try {
-    envelope = JSON.parse(body) as ManifestEnvelope;
-  } catch {
-    return Response.json(
-      { error: 'request body must be JSON ManifestEnvelope', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
-  const manifest = envelope.manifest;
-  if (!manifest?.aid) {
-    return Response.json(
-      { error: 'missing manifest.aid', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
 
-  try {
-    getEnrollmentService().validateToken(token, manifest.aid);
-  } catch (err) {
-    return Response.json(
-      {
-        error: err instanceof Error ? err.message : String(err),
-        code: 'TOKEN_INVALID',
-      },
-      { status: 401 },
-    );
-  }
-
-  // Reject any manifest that has already expired or expires within
-  // 5 minutes. Without this, a borderline manifest enters the registry
-  // and is then silently hidden from discovery (manifest-expired filter
-  // in listAgents) — frustrating to debug.
-  if (manifest.expires_at) {
-    const expiresMs = manifest.expires_at * 1000;
-    if (expiresMs < Date.now() + REGISTRATION_EXPIRY_GUARD_MS) {
-      return Response.json(
-        {
-          error:
-            'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
-          code: 'MANIFEST_EXPIRED',
-        },
-        { status: 400 },
-      );
+  return withIdempotency(req, 'agents.register', async () => {
+    let envelope: ManifestEnvelope;
+    try {
+      envelope = JSON.parse(body) as ManifestEnvelope;
+    } catch {
+      return {
+        status: 400,
+        body: { error: 'request body must be JSON ManifestEnvelope', code: 'BODY_INVALID' },
+      };
     }
-  }
+    const manifest = envelope.manifest;
+    if (!manifest?.aid) {
+      return {
+        status: 400,
+        body: { error: 'missing manifest.aid', code: 'BODY_INVALID' },
+      };
+    }
 
-  const headerNamespace = req.headers.get('x-aitp-namespace');
-  const extNamespace = manifest.extensions?.namespace;
-  if (extNamespace !== undefined && typeof extNamespace !== 'string') {
-    return Response.json(
-      {
-        error:
-          'manifest.extensions.namespace must be a string when present',
-        code: 'BODY_INVALID',
-      },
-      { status: 400 },
-    );
-  }
-  const namespace =
-    headerNamespace ?? (typeof extNamespace === 'string' ? extNamespace : undefined);
+    try {
+      getEnrollmentService().validateToken(token, manifest.aid);
+    } catch (err) {
+      return {
+        status: 401,
+        body: {
+          error: err instanceof Error ? err.message : String(err),
+          code: 'TOKEN_INVALID',
+        },
+      };
+    }
 
-  await upsertAgent({
-    aid: manifest.aid,
-    displayName: manifest.display_name ?? manifest.aid,
-    handshakeEndpoint: manifest.handshake_endpoint,
-    offeredCaps: manifest.offered_capabilities ?? [],
-    manifestJson: body,
-    manifestExpiresAt: manifest.expires_at
-      ? new Date(manifest.expires_at * 1000).toISOString()
-      : null,
-    namespace,
-  });
+    if (manifest.expires_at) {
+      const expiresMs = manifest.expires_at * 1000;
+      if (expiresMs < Date.now() + REGISTRATION_EXPIRY_GUARD_MS) {
+        return {
+          status: 400,
+          body: {
+            error:
+              'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
+            code: 'MANIFEST_EXPIRED',
+          },
+        };
+      }
+    }
 
-  const event: AuditEventRecord = {
-    id: randomUUID(),
-    type: 'agent.registered',
-    ts: new Date().toISOString(),
-    aidA: manifest.aid,
-    payload: {
-      displayName: manifest.display_name ?? manifest.aid,
-      namespace: namespace ?? 'default',
-    },
-    source: 'cp',
-  };
-  await ingestOneEvent(event);
-  eventBus.publish(event);
-  void dispatchWebhooks(event).catch((err) =>
-    console.warn('[webhooks] agent.registered dispatch failed:', err),
-  );
-  await writeAdminAudit({
-    action: 'agent.register',
-    targetId: manifest.aid,
-    requestId: req.headers.get('x-request-id') ?? undefined,
-  });
+    const headerNamespace = req.headers.get('x-aitp-namespace');
+    const extNamespace = manifest.extensions?.namespace;
+    if (extNamespace !== undefined && typeof extNamespace !== 'string') {
+      return {
+        status: 400,
+        body: {
+          error: 'manifest.extensions.namespace must be a string when present',
+          code: 'BODY_INVALID',
+        },
+      };
+    }
+    const namespace =
+      headerNamespace ?? (typeof extNamespace === 'string' ? extNamespace : undefined);
 
-  return Response.json(
-    {
+    await upsertAgent({
       aid: manifest.aid,
       displayName: manifest.display_name ?? manifest.aid,
-      registeredAt: new Date().toISOString(),
-    },
-    { status: 201 },
-  );
+      handshakeEndpoint: manifest.handshake_endpoint,
+      offeredCaps: manifest.offered_capabilities ?? [],
+      manifestJson: body,
+      manifestExpiresAt: manifest.expires_at
+        ? new Date(manifest.expires_at * 1000).toISOString()
+        : null,
+      namespace,
+    });
+
+    const event: AuditEventRecord = {
+      id: randomUUID(),
+      type: 'agent.registered',
+      ts: new Date().toISOString(),
+      aidA: manifest.aid,
+      payload: {
+        displayName: manifest.display_name ?? manifest.aid,
+        namespace: namespace ?? 'default',
+      },
+      source: 'cp',
+    };
+    await ingestOneEvent(event);
+    eventBus.publish(event);
+    void dispatchWebhooks(event).catch((err) =>
+      logger.warn({ err, aid: manifest.aid }, 'agent.registered webhook dispatch failed'),
+    );
+    await writeAdminAudit({
+      action: 'agent.register',
+      targetId: manifest.aid,
+      requestId: req.headers.get('x-request-id') ?? undefined,
+    });
+
+    return {
+      status: 201,
+      body: {
+        aid: manifest.aid,
+        displayName: manifest.display_name ?? manifest.aid,
+        registeredAt: new Date().toISOString(),
+      },
+    };
+  });
 }

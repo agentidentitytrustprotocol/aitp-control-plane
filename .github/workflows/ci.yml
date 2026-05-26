@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs on the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '20'
+  # aitp-rs is a sibling repo; CI checks it out alongside this one so the
+  # `aitp` NAPI binding referenced as `file:../aitp-rs/bindings/aitp-node`
+  # in package.json resolves correctly.
+  AITP_RS_REF: main
+
+jobs:
+  build-and-test:
+    name: Build, typecheck, lint, test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aitp_control_plane_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aitp_control_plane_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout aitp-control-plane
+        uses: actions/checkout@v4
+        with:
+          path: aitp-control-plane
+
+      - name: Checkout aitp-rs (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: agentidentitytrustprotocol/aitp-rs
+          ref: ${{ env.AITP_RS_REF }}
+          path: aitp-rs
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: aitp-control-plane/package-lock.json
+
+      - name: Setup Rust (for NAPI binding)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            aitp-rs/target
+            aitp-rs/bindings/aitp-node/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('aitp-rs/Cargo.lock', 'aitp-rs/bindings/aitp-node/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build aitp-node NAPI binding (Linux)
+        working-directory: aitp-rs/bindings/aitp-node
+        run: |
+          npm install --no-save @napi-rs/cli
+          npx napi build --platform --release
+
+      - name: Install CP dependencies
+        working-directory: aitp-control-plane
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: aitp-control-plane
+        run: npm run typecheck
+
+      - name: Lint
+        working-directory: aitp-control-plane
+        run: npm run lint
+
+      # Migrations run BEFORE any test step so unit tests that
+      # accidentally touch the DB don't fail against an unmigrated schema.
+      - name: Apply migrations to test database
+        working-directory: aitp-control-plane
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
+        run: npm run db:migrate
+
+      - name: Unit tests
+        working-directory: aitp-control-plane
+        run: npm test
+
+      - name: Integration tests
+        working-directory: aitp-control-plane
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
+          # >= 32 chars (enforced by EnrollmentService at boot)
+          ENROLLMENT_SECRET: ci-integration-secret-min-thirty-two-chars
+          CP_AID_SEED_HEX: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+          CP_BASE_URL: http://localhost:4000
+        run: npm run test:integration
+
+      - name: Next build (smoke test)
+        working-directory: aitp-control-plane
+        env:
+          # Production-required vars must be set for `next build`.
+          NODE_ENV: production
+          CP_AID_SEED_HEX: '0000000000000000000000000000000000000000000000000000000000000001'
+          ENROLLMENT_SECRET: ci-build-secret
+          API_KEYS: ci-build-key
+          CORS_ORIGIN: http://localhost:3000
+          DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
+        run: npm run build
+
+  docker-build:
+    name: Docker image build (smoke)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout aitp-control-plane
+        uses: actions/checkout@v4
+        with:
+          path: aitp-control-plane
+
+      - name: Checkout aitp-rs (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: agentidentitytrustprotocol/aitp-rs
+          ref: ${{ env.AITP_RS_REF }}
+          path: aitp-rs
+
+      - name: Setup Rust (for NAPI binding)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build aitp-node NAPI binding for Docker context
+        working-directory: aitp-rs/bindings/aitp-node
+        run: |
+          npm install --no-save @napi-rs/cli
+          npx napi build --platform --release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build
+        # The Dockerfile expects the build context to contain both
+        # `aitp-control-plane/` and `aitp-rs/bindings/aitp-node` as siblings.
+        run: |
+          docker build \
+            --file aitp-control-plane/Dockerfile \
+            --tag aitp-control-plane:ci-${{ github.sha }} \
+            .

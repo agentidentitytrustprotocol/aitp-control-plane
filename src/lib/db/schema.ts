@@ -4,8 +4,10 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
@@ -229,6 +231,168 @@ export const adminAuditLog = pgTable(
   }),
 );
 
+// ── Issued TCTs (RFC-AITP-0003) ───────────────────────────────────────
+//
+// The CP observes; it does not issue TCTs. Rows here are derived from
+// `tct.issued` events reported by agents at handshake completion, so
+// operators can answer "who currently holds a valid grant to call
+// <capability> on <aid>?" without spelunking event payloads.
+//
+// `revoked` is mirrored from `revocation_entries` whenever a JTI is
+// added there; both tables stay queryable independently.
+
+export const issuedTcts = pgTable(
+  'issued_tcts',
+  {
+    jti: uuid('jti').primaryKey(),
+    issuerAid: varchar('issuer_aid', { length: 512 }).notNull(),
+    subjectAid: varchar('subject_aid', { length: 512 }).notNull(),
+    audienceAid: varchar('audience_aid', { length: 512 }).notNull(),
+    grants: jsonb('grants').$type<string[]>().notNull().default([]),
+    bindingCnf: varchar('binding_cnf', { length: 128 }),
+    issuedAt: timestamp('issued_at', { withTimezone: true, mode: 'string' }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    sessionId: varchar('session_id', { length: 255 }),
+    revoked: boolean('revoked').notNull().default(false),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    issuerIdx: index('issued_tcts_issuer_idx').on(t.issuerAid),
+    subjectIdx: index('issued_tcts_subject_idx').on(t.subjectAid),
+    audienceIdx: index('issued_tcts_audience_idx').on(t.audienceAid),
+    sessionIdx: index('issued_tcts_session_idx').on(t.sessionId),
+    grantsGin: index('issued_tcts_grants_gin').using('gin', t.grants),
+  }),
+);
+
+// ── Delegation chains (RFC-AITP-0006 single-hop; 0011 multi-hop draft) ─
+//
+// A delegation is a parent → child TCT relationship. Walking the chain
+// from a root parent_jti yields the descendant tree. Revoking a parent
+// can therefore cascade-mark the children (`revoked` column) without
+// touching `issued_tcts`.
+
+export const delegations = pgTable(
+  'delegations',
+  {
+    jti: uuid('jti').primaryKey(),
+    parentJti: uuid('parent_jti').notNull(),
+    delegatorAid: varchar('delegator_aid', { length: 512 }).notNull(),
+    delegateeAid: varchar('delegatee_aid', { length: 512 }).notNull(),
+    scope: jsonb('scope').$type<string[]>().notNull().default([]),
+    issuedAt: timestamp('issued_at', { withTimezone: true, mode: 'string' }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    revoked: boolean('revoked').notNull().default(false),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+    revokedReason: varchar('revoked_reason', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    parentIdx: index('delegations_parent_idx').on(t.parentJti),
+    delegatorIdx: index('delegations_delegator_idx').on(t.delegatorAid),
+    delegateeIdx: index('delegations_delegatee_idx').on(t.delegateeAid),
+  }),
+);
+
+// ── OIDC trust anchors (RFC-AITP-0002 OIDC identity mode) ─────────────
+//
+// Org-scoped allowlist of trusted OIDC issuers. Agents in a namespace
+// can fetch this list at boot to bootstrap their JwksResolver config
+// instead of each one shipping its own static config.
+
+export const trustAnchors = pgTable(
+  'trust_anchors',
+  {
+    id: uuid('id').primaryKey(),
+    namespace: varchar('namespace', { length: 128 }).notNull().default('default'),
+    issuerUrl: text('issuer_url').notNull(),
+    // Optional override of the issuer's own jwks_uri (well-known
+    // OIDC discovery normally resolves this).
+    jwksUrl: text('jwks_url'),
+    // Most-recently cached JWKS keyset (helpful for clients that can't
+    // reach the issuer themselves). Refreshed by the CP periodically.
+    jwksCache: jsonb('jwks_cache').$type<Record<string, unknown> | null>(),
+    jwksCachedAt: timestamp('jwks_cached_at', {
+      withTimezone: true,
+      mode: 'string',
+    }),
+    label: varchar('label', { length: 128 }),
+    addedBy: varchar('added_by', { length: 255 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    namespaceIdx: index('trust_anchors_namespace_idx').on(t.namespace),
+    // (namespace, issuer_url) must be unique. The POST handler does a
+    // check-then-insert that is racy under concurrent admins; the DB
+    // is the only place that can enforce this without a write lock.
+    namespaceIssuerUnique: uniqueIndex(
+      'trust_anchors_namespace_issuer_uniq',
+    ).on(t.namespace, t.issuerUrl),
+  }),
+);
+
+// ── Pinned-key allowlist (RFC-AITP-0002 pinned-key identity mode) ──────
+//
+// Org-managed set of (namespace, aid → public-key) pairs. Agents in
+// pinned-key mode fetch this list at boot rather than maintaining
+// per-agent trust stores.
+
+export const pinnedKeys = pgTable(
+  'pinned_keys',
+  {
+    namespace: varchar('namespace', { length: 128 }).notNull().default('default'),
+    aid: varchar('aid', { length: 512 }).notNull(),
+    pubkey: varchar('pubkey', { length: 128 }).notNull(),
+    label: varchar('label', { length: 128 }),
+    addedBy: varchar('added_by', { length: 255 }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.namespace, t.aid] }),
+    aidIdx: index('pinned_keys_aid_idx').on(t.aid),
+  }),
+);
+
+// ── Idempotency keys (Idempotency-Key header support) ─────────────────
+//
+// Stores the response of a mutating request keyed by (scope, key) so a
+// client that retries the same request receives the same response
+// instead of producing duplicate side effects. Rows are aged out by the
+// retention sweep.
+
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    scope: varchar('scope', { length: 64 }).notNull(),
+    key: varchar('key', { length: 255 }).notNull(),
+    responseStatus: integer('response_status').notNull(),
+    responseBody: jsonb('response_body').$type<unknown>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.scope, t.key] }),
+    createdIdx: index('idempotency_keys_created_at_idx').on(t.createdAt),
+  }),
+);
+
 export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
 export type HandshakeSession = typeof handshakeSessions.$inferSelect;
@@ -238,3 +402,11 @@ export type Webhook = typeof webhooks.$inferSelect;
 export type NewWebhook = typeof webhooks.$inferInsert;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type AdminAuditRow = typeof adminAuditLog.$inferSelect;
+export type IssuedTct = typeof issuedTcts.$inferSelect;
+export type NewIssuedTct = typeof issuedTcts.$inferInsert;
+export type Delegation = typeof delegations.$inferSelect;
+export type NewDelegation = typeof delegations.$inferInsert;
+export type TrustAnchor = typeof trustAnchors.$inferSelect;
+export type NewTrustAnchor = typeof trustAnchors.$inferInsert;
+export type PinnedKey = typeof pinnedKeys.$inferSelect;
+export type NewPinnedKey = typeof pinnedKeys.$inferInsert;

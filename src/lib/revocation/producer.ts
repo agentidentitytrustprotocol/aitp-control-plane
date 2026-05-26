@@ -2,6 +2,7 @@ import { getCpAgent } from '../identity/cp-agent';
 import { db } from '../db';
 import { revocationEntries } from '../db/schema';
 import { config } from '../config';
+import { logger } from '../logger';
 
 class RevocationProducer {
   private cachedEnvelope = '';
@@ -28,7 +29,7 @@ class RevocationProducer {
       // DB unreachable / table missing → publish an empty signed list.
       // The spec treats an empty entries array as a meaningful assertion
       // that nothing has been revoked since the previous snapshot.
-      console.warn('[revocation] DB read failed, publishing empty list:', err);
+      logger.warn({ err }, 'revocation DB read failed, publishing empty list');
     }
     const agent = getCpAgent();
     this.cachedEnvelope = agent.signRevocationList(

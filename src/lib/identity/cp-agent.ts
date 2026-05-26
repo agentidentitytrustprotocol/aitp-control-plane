@@ -1,6 +1,7 @@
 import { AitpAgent } from 'aitp';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config';
+import { logger } from '../logger';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -19,8 +20,9 @@ export function initCpIdentity(): void {
       throw new Error('CP_AID_SEED_HEX is required in production');
     }
     const seed = randomBytes(32);
-    console.warn(
-      `[aitp-control-plane] CP_AID_SEED_HEX not set — using ephemeral key (${seed.toString('hex')})`,
+    logger.warn(
+      { seedHex: seed.toString('hex') },
+      'CP_AID_SEED_HEX not set — using ephemeral key (regenerated each restart)',
     );
     agent = AitpAgent.fromSeed(seed);
   } else {

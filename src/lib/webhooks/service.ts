@@ -9,6 +9,8 @@ import {
 } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
 import { config } from '../config';
+import { logger } from '../logger';
+import { webhookBreaker } from './circuit-breaker';
 
 // Don't overwhelm a downstream receiver during recovery / catch-up.
 const FLUSH_CONCURRENCY = 8;
@@ -134,7 +136,7 @@ async function enqueueDelivery(
     attempts: 0,
   });
   void attemptDelivery(id).catch((err) =>
-    console.warn('[webhooks] initial attempt failed:', err),
+    logger.warn({ err, deliveryId: id, webhookId }, 'webhooks initial attempt failed'),
   );
 }
 
@@ -196,6 +198,29 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
     return;
   }
 
+  // Circuit breaker — short-circuit if the subscriber has been failing
+  // consecutively. The retry reaper will pick this row up again once
+  // the breaker moves to half_open.
+  //
+  // Per-delivery jitter (0..30s on top of the breaker's reset window)
+  // prevents a stampede when the breaker eventually closes — without
+  // it every queued delivery has the same nextRetryAt and they all
+  // POST at once on the same reaper tick.
+  if (!webhookBreaker.shouldAttempt(webhook.id)) {
+    const snap = webhookBreaker.getSnapshot(webhook.id);
+    const baseMs = snap.nextProbeAt ?? Date.now() + 60_000;
+    const jitterMs = Math.floor(Math.random() * 30_000);
+    await db
+      .update(webhookDeliveries)
+      .set({
+        status: 'pending',
+        error: `circuit breaker ${snap.state}`,
+        nextRetryAt: new Date(baseMs + jitterMs).toISOString(),
+      })
+      .where(eq(webhookDeliveries.id, deliveryId));
+    return;
+  }
+
   // Optimistic claim: atomically bump `attempts` so concurrent callers
   // can't both POST the same delivery. The WHERE clause pins on the
   // attempt count we just read; if another caller raced ahead, the
@@ -226,8 +251,9 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
     body = delivery.body;
     signature = delivery.signature;
   } else {
-    console.warn(
-      `[webhooks] delivery ${deliveryId} predates the body/signature columns; signing on the fly (signature will differ per retry)`,
+    logger.warn(
+      { deliveryId },
+      'webhook delivery predates body/signature columns; signing on the fly (signature will differ per retry)',
     );
     body = buildCanonicalBody(
       delivery.id,
@@ -264,6 +290,7 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
   }
 
   if (ok) {
+    webhookBreaker.recordSuccess(webhook.id);
     await db
       .update(webhookDeliveries)
       .set({
@@ -276,6 +303,7 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
       .where(eq(webhookDeliveries.id, deliveryId));
     return;
   }
+  webhookBreaker.recordFailure(webhook.id);
 
   if (attempts >= config.webhookRetryAttempts) {
     await db
@@ -297,7 +325,7 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
 
   setTimeout(() => {
     void attemptDelivery(deliveryId).catch((e) =>
-      console.warn('[webhooks] retry failed:', e),
+      logger.warn({ err: e, deliveryId }, 'webhook retry failed'),
     );
   }, backoffMs).unref?.();
 }
@@ -327,7 +355,7 @@ export async function flushDueRetries(): Promise<number> {
     await Promise.all(
       slice.map((d) =>
         attemptDelivery(d.id).catch((err) =>
-          console.warn('[webhooks] reaper attempt failed:', err),
+          logger.warn({ err, deliveryId: d.id }, 'webhook reaper attempt failed'),
         ),
       ),
     );
@@ -349,11 +377,11 @@ export function startWebhookReaper(intervalMs = 60_000): void {
   if (globalThis.__webhookReaperInterval) return;
   // First pass on boot.
   void flushDueRetries().catch((err) =>
-    console.warn('[webhooks] reaper boot flush failed:', err),
+    logger.warn({ err }, 'webhook reaper boot flush failed'),
   );
   globalThis.__webhookReaperInterval = setInterval(() => {
     flushDueRetries().catch((err) =>
-      console.warn('[webhooks] reaper tick failed:', err),
+      logger.warn({ err }, 'webhook reaper tick failed'),
     );
   }, intervalMs);
   globalThis.__webhookReaperInterval.unref?.();

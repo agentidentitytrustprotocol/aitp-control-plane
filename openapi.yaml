@@ -1,0 +1,918 @@
+openapi: 3.1.0
+info:
+  title: AITP Control Plane API
+  version: 0.1.0
+  description: |
+    Registry, audit log, revocation list, and webhook fan-out for an AITP
+    (Agent Identity Trust Protocol) deployment. See README.md and
+    docs/api.md for the prose reference.
+  license:
+    name: See LICENSE
+
+servers:
+  - url: http://localhost:4000
+    description: Local dev
+  - url: https://control-plane.example.com
+    description: Production placeholder
+
+tags:
+  - name: discovery
+    description: Public unauth endpoints (manifest, revocation list, health, metrics)
+  - name: registry
+    description: Agent enrollment and discovery
+  - name: events
+    description: Telemetry ingestion and query
+  - name: sessions
+    description: Handshake session records
+  - name: revocation
+    description: TCT revocation
+  - name: webhooks
+    description: Outbound delivery subscriptions
+  - name: audit
+    description: Admin audit log
+  - name: dashboard
+    description: Aggregated JSON for consumers
+  - name: tcts
+    description: Observed TCTs (projected from handshake events)
+  - name: delegations
+    description: Observed delegation chains
+  - name: trust
+    description: OIDC trust anchors and pinned-key allowlist
+
+security:
+  - apiKey: []
+  - {}
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: API key from `API_KEYS` env allowlist. Required for gated routes; unset in dev disables auth.
+    enrollmentToken:
+      type: http
+      scheme: bearer
+      description: One-time bearer issued by `POST /api/registry/enroll`. Used only on `POST /api/registry/agents`.
+
+  parameters:
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 255
+      description: Opaque client-chosen key. Replaying the same key returns the cached response without re-running the handler.
+    namespace:
+      name: namespace
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Tenant scope filter. Omitting it returns rows across all namespaces.
+    requestId:
+      name: x-request-id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Client-supplied request correlation ID. Echoed on the response.
+
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+
+    Agent:
+      type: object
+      required: [aid, displayName, handshakeEndpoint, offeredCaps, status]
+      properties:
+        aid: { type: string, example: "aid:pubkey:z:abc..." }
+        displayName: { type: string }
+        handshakeEndpoint: { type: string, format: uri }
+        offeredCaps:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [active, expired, deregistered]
+        namespace: { type: string, default: default }
+        org: { type: string, nullable: true }
+        cloud: { type: string, nullable: true }
+        registeredAt: { type: string, format: date-time }
+        lastEnrolledAt: { type: string, format: date-time, nullable: true }
+        lastSeenAt: { type: string, format: date-time, nullable: true }
+        manifestUrl: { type: string }
+        agentManifestHint: { type: string, nullable: true }
+        manifestJson:
+          type: string
+          description: Inline ManifestEnvelope JSON. Present only when `?include_manifest=true`.
+
+    EnrollResponse:
+      type: object
+      required: [token, expiresIn, aid]
+      properties:
+        token: { type: string }
+        expiresIn: { type: integer, example: 300 }
+        aid: { type: string }
+
+    AuditEvent:
+      type: object
+      required: [id, type, ts]
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          example: handshake.complete
+          description: "Examples: agent.registered, agent.expired, agent.deregistered, handshake.started, handshake.complete, handshake.failed, tct.revoked, delegation.issued, delegation.redeemed"
+        ts: { type: string, format: date-time }
+        aidA: { type: string, nullable: true }
+        aidB: { type: string, nullable: true }
+        sessionId: { type: string, nullable: true }
+        runId: { type: string, nullable: true }
+        grants:
+          type: array
+          items: { type: string }
+        payload: { type: object, additionalProperties: true }
+        source: { type: string, nullable: true }
+
+    EventIngestRequest:
+      oneOf:
+        - type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        - type: object
+          properties:
+            events:
+              type: array
+              items: { $ref: "#/components/schemas/AuditEvent" }
+
+    EventIngestResponse:
+      type: object
+      properties:
+        ingested: { type: integer }
+
+    HandshakeSession:
+      type: object
+      required: [sessionId, status]
+      properties:
+        sessionId: { type: string }
+        aidA: { type: string, nullable: true }
+        aidB: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [started, complete, failed]
+        grants:
+          type: array
+          items: { type: string }
+        runId: { type: string, nullable: true }
+        boundary: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+
+    RevocationEntryRequest:
+      type: object
+      required: [jti]
+      properties:
+        jti: { type: string, format: uuid }
+        reason: { type: string }
+        revokedAt: { type: string, format: date-time }
+
+    Webhook:
+      type: object
+      required: [id, url, events, active]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    WebhookCreateRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+          description: Empty array means "all event types"
+        secret: { type: string }
+        active: { type: boolean, default: true }
+
+    IssuedTct:
+      type: object
+      required: [jti, issuer, subject, audience, grants, issuedAt, revoked]
+      properties:
+        jti: { type: string, format: uuid }
+        issuer: { type: string }
+        subject: { type: string }
+        audience: { type: string }
+        grants:
+          type: array
+          items: { type: string }
+        bindingCnf: { type: string, nullable: true }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        sessionId: { type: string, nullable: true }
+        revoked: { type: boolean }
+        revokedAt: { type: string, format: date-time, nullable: true }
+
+    Delegation:
+      type: object
+      required: [jti, parentJti, delegator, delegatee, scope, issuedAt, revoked]
+      properties:
+        jti: { type: string, format: uuid }
+        parentJti: { type: string, format: uuid }
+        delegator: { type: string }
+        delegatee: { type: string }
+        scope:
+          type: array
+          items: { type: string }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        revoked: { type: boolean }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        revokedReason: { type: string, nullable: true, enum: [explicit, parent_revoked, null] }
+
+    TrustAnchor:
+      type: object
+      required: [id, namespace, issuerUrl]
+      properties:
+        id: { type: string, format: uuid }
+        namespace: { type: string, default: default }
+        issuerUrl: { type: string, format: uri }
+        jwksUrl: { type: string, format: uri, nullable: true }
+        jwksCachedAt: { type: string, format: date-time, nullable: true }
+        label: { type: string, nullable: true }
+        addedBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TrustAnchorCreateRequest:
+      type: object
+      required: [issuerUrl]
+      properties:
+        namespace: { type: string }
+        issuerUrl: { type: string, format: uri }
+        jwksUrl: { type: string, format: uri }
+        label: { type: string }
+
+    PinnedKey:
+      type: object
+      required: [namespace, aid, pubkey]
+      properties:
+        namespace: { type: string }
+        aid: { type: string }
+        pubkey:
+          type: string
+          description: Ed25519 public key, 43-character base64url
+          pattern: ^[A-Za-z0-9_-]{43}$
+        label: { type: string, nullable: true }
+        addedBy: { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CircuitBreakerSnapshot:
+      type: object
+      required: [state, failures, consecutiveSuccesses]
+      properties:
+        state:
+          type: string
+          enum: [closed, open, half_open]
+        failures: { type: integer }
+        consecutiveSuccesses: { type: integer }
+        openedAt: { type: integer, nullable: true, description: Unix ms when the breaker last opened }
+        nextProbeAt: { type: integer, nullable: true, description: Unix ms when the next half_open probe is allowed }
+
+paths:
+  /api/health:
+    get:
+      tags: [discovery]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200": { description: OK }
+
+  /api/readyz:
+    get:
+      tags: [discovery]
+      summary: Readiness probe
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+
+  /api/metrics:
+    get:
+      tags: [discovery]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain: { schema: { type: string } }
+
+  /.well-known/aitp-manifest:
+    get:
+      tags: [discovery]
+      summary: CP's own AITP manifest
+      security: []
+      responses:
+        "200":
+          description: Signed ManifestEnvelope JSON
+
+  /.well-known/aitp-revocation-list:
+    get:
+      tags: [discovery]
+      summary: Signed revocation snapshot (RFC-AITP-0008)
+      security: []
+      responses:
+        "200":
+          description: Signed RevocationListEnvelope JSON
+
+  /api/registry/enroll:
+    post:
+      tags: [registry]
+      summary: Issue a one-time enrollment token from a signed manifest
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                manifest: { type: object }
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollResponse" }
+        "400": { description: Invalid manifest, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { description: Rate limited }
+
+  /api/registry/agents:
+    get:
+      tags: [registry]
+      summary: Discover agents by capability or AID
+      security: []
+      parameters:
+        - name: capability
+          in: query
+          schema: { type: string }
+        - name: aid
+          in: query
+          schema: { type: string }
+        - name: displayName
+          in: query
+          schema: { type: string }
+        - $ref: "#/components/parameters/namespace"
+        - name: include_manifest
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Matching agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items: { $ref: "#/components/schemas/Agent" }
+    post:
+      tags: [registry]
+      summary: Register an agent with a previously-issued enrollment token
+      security:
+        - enrollmentToken: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+        - name: X-Aitp-Namespace
+          in: header
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest]
+              properties:
+                manifest: { type: object }
+      responses:
+        "201":
+          description: Registered
+        "400": { description: Bad manifest }
+        "401": { description: Bad token }
+        "429": { description: Rate limited }
+
+  /api/registry/agents/{aid}:
+    parameters:
+      - name: aid
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [registry]
+      summary: Fetch one agent
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "404": { description: Not found }
+    delete:
+      tags: [registry]
+      summary: Deregister an agent (admin)
+      responses:
+        "204": { description: Deregistered }
+        "404": { description: Not found }
+
+  /api/registry/agents/{aid}/manifest:
+    parameters:
+      - name: aid
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [registry]
+      summary: Fetch the cached ManifestEnvelope for an agent
+      security: []
+      responses:
+        "200": { description: ManifestEnvelope JSON }
+        "404": { description: Not found }
+
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: List handshake sessions
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [started, complete, failed] }
+        - name: runId
+          in: query
+          schema: { type: string }
+        - name: aid
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/HandshakeSession" }
+
+  /api/sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sessions]
+      summary: Fetch one handshake session
+      responses:
+        "200": { description: OK }
+        "404": { description: Not found }
+
+  /api/events:
+    post:
+      tags: [events]
+      summary: Ingest a batch of audit events
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventIngestRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventIngestResponse" }
+        "400": { description: Body not JSON }
+
+  /api/events/history:
+    get:
+      tags: [events]
+      summary: Query persisted audit events
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: aid, in: query, schema: { type: string } }
+        - { name: sessionId, in: query, schema: { type: string } }
+        - { name: runId, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEvent" }
+
+  /api/events/stream:
+    get:
+      tags: [events]
+      summary: Server-Sent Events live stream (with backlog replay)
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream: { schema: { type: string } }
+
+  /api/revocation/entries:
+    post:
+      tags: [revocation]
+      summary: Add a JTI to the revocation list
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RevocationEntryRequest" }
+      responses:
+        "201": { description: Added }
+        "400": { description: Bad JTI }
+
+  /api/webhooks:
+    get:
+      tags: [webhooks]
+      summary: List webhook subscriptions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Webhook" }
+    post:
+      tags: [webhooks]
+      summary: Create a subscription
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Webhook" }
+
+  /api/webhooks/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [webhooks]
+      summary: Fetch one subscription
+      responses:
+        "200": { description: OK }
+        "404": { description: Not found }
+    patch:
+      tags: [webhooks]
+      summary: Update a subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
+      responses:
+        "200": { description: Updated }
+        "404": { description: Not found }
+    delete:
+      tags: [webhooks]
+      summary: Delete a subscription
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
+
+  /api/audit:
+    get:
+      tags: [audit]
+      summary: Admin audit log (who did what when)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: OK }
+
+  /api/dashboard/overview:
+    get:
+      tags: [dashboard]
+      summary: Aggregate counts + recent activity
+      parameters:
+        - { name: window, in: query, schema: { type: string, enum: [1h, 24h, 7d, 30d], default: 24h } }
+      responses:
+        "200": { description: OK }
+
+  /api/dashboard/agents:
+    get:
+      tags: [dashboard]
+      summary: Per-agent metrics
+      responses:
+        "200": { description: OK }
+
+  /api/tcts:
+    get:
+      tags: [tcts]
+      summary: Query observed TCTs
+      parameters:
+        - { name: issuer, in: query, schema: { type: string } }
+        - { name: subject, in: query, schema: { type: string } }
+        - { name: audience, in: query, schema: { type: string } }
+        - { name: capability, in: query, schema: { type: string } }
+        - { name: sessionId, in: query, schema: { type: string } }
+        - { name: active, in: query, schema: { type: boolean }, description: "If true, exclude revoked and expired" }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tcts:
+                    type: array
+                    items: { $ref: "#/components/schemas/IssuedTct" }
+
+  /api/delegations:
+    get:
+      tags: [delegations]
+      summary: Query observed delegation chains
+      description: |
+        Without filters, returns recent delegations. With `?root_jti=`,
+        walks the descendant tree rooted at that JTI via a recursive
+        CTE.
+      parameters:
+        - { name: root_jti, in: query, schema: { type: string, format: uuid } }
+        - { name: parent_jti, in: query, schema: { type: string, format: uuid } }
+        - { name: delegator, in: query, schema: { type: string } }
+        - { name: delegatee, in: query, schema: { type: string } }
+        - { name: active, in: query, schema: { type: boolean } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delegations:
+                    type: array
+                    items: { $ref: "#/components/schemas/Delegation" }
+
+  /api/trust-anchors:
+    get:
+      tags: [trust]
+      summary: List OIDC trust anchors
+      parameters:
+        - $ref: "#/components/parameters/namespace"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trustAnchors:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrustAnchor" }
+    post:
+      tags: [trust]
+      summary: Create a trust anchor
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TrustAnchorCreateRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrustAnchor" }
+        "409":
+          description: Duplicate (namespace, issuerUrl)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/trust-anchors/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [trust]
+      summary: Fetch one trust anchor
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrustAnchor" }
+        "404": { description: Not found }
+    patch:
+      tags: [trust]
+      summary: Update a trust anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                issuerUrl: { type: string, format: uri }
+                jwksUrl: { type: string, format: uri, nullable: true }
+                label: { type: string, nullable: true }
+      responses:
+        "200": { description: Updated }
+        "404": { description: Not found }
+    delete:
+      tags: [trust]
+      summary: Delete a trust anchor
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
+
+  /api/pinned-keys:
+    get:
+      tags: [trust]
+      summary: List pinned keys (or look up a specific (namespace, aid))
+      description: With `?aid=` (and optional `?namespace=`), returns the single matching row.
+      parameters:
+        - $ref: "#/components/parameters/namespace"
+        - { name: aid, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/PinnedKey" }
+                  - type: object
+                    properties:
+                      pinnedKeys:
+                        type: array
+                        items: { $ref: "#/components/schemas/PinnedKey" }
+        "404": { description: aid lookup with no match }
+    post:
+      tags: [trust]
+      summary: Upsert a pinned key
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aid, pubkey]
+              properties:
+                namespace: { type: string }
+                aid: { type: string }
+                pubkey:
+                  type: string
+                  description: Ed25519 public key, 43-character base64url
+                  pattern: ^[A-Za-z0-9_-]{43}$
+                label: { type: string }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        "201":
+          description: Upserted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PinnedKey" }
+    delete:
+      tags: [trust]
+      summary: Delete a pinned key
+      parameters:
+        - $ref: "#/components/parameters/namespace"
+        - { name: aid, in: query, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
+
+  /api/sessions/{sessionId}/export:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+      - { name: format, in: query, schema: { type: string, enum: [json, jsonl], default: json } }
+    get:
+      tags: [sessions]
+      summary: Export session bundle (session + events + projected TCTs)
+      responses:
+        "200":
+          description: Bundle
+          content:
+            application/json: { schema: { type: object } }
+            application/x-ndjson: { schema: { type: string } }
+        "404": { description: Not found }
+
+  /api/sessions/{sessionId}/replay:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+      - { name: since, in: query, schema: { type: string, format: date-time } }
+      - { name: until, in: query, schema: { type: string, format: date-time } }
+      - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 10000 } }
+    get:
+      tags: [sessions]
+      summary: Ordered event stream for one session (offline replay)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId: { type: string }
+                  count: { type: integer }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEvent" }
+
+  /api/registry/agents/{aid}/export:
+    parameters:
+      - { name: aid, in: path, required: true, schema: { type: string } }
+      - { name: format, in: query, schema: { type: string, enum: [json, jsonl], default: json } }
+      - { name: eventLimit, in: query, schema: { type: integer, default: 1000, maximum: 10000 } }
+    get:
+      tags: [registry]
+      summary: Export an agent bundle (admin only — leaks audit data)
+      description: |
+        Admin-gated. Returns the agent's registry row, sessions they
+        participated in (either side), all TCTs they issued/received,
+        and the most recent N audit events touching them.
+      responses:
+        "200":
+          description: Bundle
+          content:
+            application/json: { schema: { type: object } }
+            application/x-ndjson: { schema: { type: string } }
+        "404": { description: Not found }
+
+  /api/webhooks/{id}/circuit-breaker:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [webhooks]
+      summary: Get circuit-breaker snapshot for a webhook
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
+
+  /api/webhooks/{id}/circuit-breaker/reset:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [webhooks]
+      summary: Manually reset a webhook's circuit breaker to closed
+      responses:
+        "200":
+          description: Reset; returns the post-reset snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }

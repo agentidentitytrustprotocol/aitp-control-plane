@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { ingestEvents } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { sessionMonitor } from '@/lib/sessions/monitor';
+import { tctMonitor } from '@/lib/tcts/monitor';
 import { touchLastSeenBatch } from '@/lib/registry/store';
 import {
   dispatchWebhooksWithList,
@@ -10,6 +11,9 @@ import {
   startWebhookReaper,
 } from '@/lib/webhooks/service';
 import { startExpiryJob } from '@/lib/registry/expiry-job';
+import { startRetentionJob } from '@/lib/retention';
+import { logger } from '@/lib/logger';
+import { withIdempotency } from '@/lib/idempotency';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -72,10 +76,12 @@ interface RequestBody {
 }
 
 export async function POST(req: NextRequest) {
-  // First-ingest lazy startup hooks — both are idempotent and start a
-  // .unref()'d interval so they don't keep Node alive on their own.
+  // Lazy startup hooks — idempotent, .unref()'d intervals. Run BEFORE
+  // the idempotency wrapper so they fire even on replayed requests
+  // (the periodic jobs are also re-arm-on-call).
   startExpiryJob();
   startWebhookReaper();
+  startRetentionJob();
 
   let body: RequestBody | unknown[] | null = null;
   try {
@@ -86,46 +92,47 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const rawEvents: unknown[] = Array.isArray(body)
-    ? body
-    : (body?.events ?? []);
 
-  const normalized = rawEvents
-    .filter(
-      (e): e is Record<string, unknown> => typeof e === 'object' && e !== null,
-    )
-    .map(normalize);
+  return withIdempotency(req, 'events.ingest', async () => {
+    const rawEvents: unknown[] = Array.isArray(body)
+      ? body
+      : (body?.events ?? []);
 
-  await ingestEvents(normalized);
+    const normalized = rawEvents
+      .filter(
+        (e): e is Record<string, unknown> => typeof e === 'object' && e !== null,
+      )
+      .map(normalize);
 
-  // One ACTIVE-only webhook lookup for the whole batch — avoids
-  // pulling inactive webhook secrets into the request path.
-  const activeWebhooks = await listActiveWebhooks().catch((err) => {
-    console.warn('[webhooks] list failed, skipping fan-out:', err);
-    return [];
-  });
+    await ingestEvents(normalized);
 
-  // One last_seen UPDATE for the whole batch.
-  const seenAids = new Set<string>();
-  for (const event of normalized) {
-    if (event.aidA) seenAids.add(event.aidA);
-    if (event.aidB) seenAids.add(event.aidB);
-  }
-  if (seenAids.size > 0) {
-    try {
-      await touchLastSeenBatch([...seenAids]);
-    } catch {
-      // best-effort
+    const activeWebhooks = await listActiveWebhooks().catch((err) => {
+      logger.warn({ err }, 'webhooks list failed, skipping fan-out');
+      return [];
+    });
+
+    const seenAids = new Set<string>();
+    for (const event of normalized) {
+      if (event.aidA) seenAids.add(event.aidA);
+      if (event.aidB) seenAids.add(event.aidB);
     }
-  }
+    if (seenAids.size > 0) {
+      try {
+        await touchLastSeenBatch([...seenAids]);
+      } catch {
+        // best-effort
+      }
+    }
 
-  for (const event of normalized) {
-    eventBus.publish(event);
-    await sessionMonitor.onEvent(event);
-    void dispatchWebhooksWithList(event, activeWebhooks).catch((err) =>
-      console.warn('[webhooks] dispatch failed:', err),
-    );
-  }
+    for (const event of normalized) {
+      eventBus.publish(event);
+      await sessionMonitor.onEvent(event);
+      await tctMonitor.onEvent(event);
+      void dispatchWebhooksWithList(event, activeWebhooks).catch((err) =>
+        logger.warn({ err, eventType: event.type }, 'webhooks dispatch failed'),
+      );
+    }
 
-  return Response.json({ ingested: normalized.length });
+    return { status: 200, body: { ingested: normalized.length } };
+  });
 }

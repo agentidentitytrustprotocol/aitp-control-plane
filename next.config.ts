@@ -1,12 +1,26 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['aitp'],
+  // Packages that Node should `require()` at runtime instead of letting
+  // webpack bundle them. `aitp` ships a native NAPI binary; the OTel
+  // SDK pulls in @grpc/grpc-js which uses Node built-ins (fs, net, tls)
+  // that webpack can't bundle for the server target.
+  serverExternalPackages: [
+    'aitp',
+    '@opentelemetry/sdk-node',
+    '@opentelemetry/auto-instrumentations-node',
+    '@opentelemetry/exporter-trace-otlp-http',
+    '@opentelemetry/resources',
+    '@opentelemetry/semantic-conventions',
+    '@grpc/grpc-js',
+  ],
 
-  // Belt-and-suspenders: even with serverExternalPackages, webpack will
-  // try to parse `aitp.<platform>.node` because of how the NAPI loader
-  // resolves it. Mark the package as a CommonJS external so webpack
-  // never traces into the native binary at build time.
+  // Belt-and-suspenders for the same reason: webpack still tries to
+  // trace require() calls inside the externalized packages at build
+  // time. The regex externals tell it "anything under @opentelemetry/*
+  // or @grpc/* is a runtime require — don't follow the imports."
+  // Also externalize the `aitp` NAPI loader so webpack never tries to
+  // parse `aitp.<platform>.node`.
   webpack: (config, { isServer }) => {
     if (isServer) {
       const externals = Array.isArray(config.externals)
@@ -15,6 +29,14 @@ const nextConfig: NextConfig = {
           ? [config.externals]
           : [];
       externals.push({ aitp: 'commonjs aitp' });
+      externals.push(
+        ({ request }: { request?: string }, callback: (err?: Error | null, result?: string) => void) => {
+          if (request && (/^@opentelemetry\//.test(request) || /^@grpc\//.test(request))) {
+            return callback(null, `commonjs ${request}`);
+          }
+          callback();
+        },
+      );
       config.externals = externals;
     }
     return config;

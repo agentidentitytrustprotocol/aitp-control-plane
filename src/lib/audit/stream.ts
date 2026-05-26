@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { logger } from '../logger';
 
 export interface AuditEventRecord {
   id: string;
@@ -31,7 +32,7 @@ class EventBus {
       try {
         l(event);
       } catch (err) {
-        console.warn('[eventBus] listener threw:', err);
+        logger.warn({ err, eventType: event.type }, 'eventBus listener threw');
       }
     }
   }

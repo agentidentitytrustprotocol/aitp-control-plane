@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { config as appConfig } from './lib/config';
+import { rateLimiter } from './lib/rate-limit';
 
 // Always public regardless of method. /api/registry/agents collection
 // is in here so POST works with only the enrollment token (the actual
@@ -16,9 +17,35 @@ const PUBLIC_PATHS = new Set<string>([
   '/api/metrics',
 ]);
 
-// GET-only public sub-trees. DELETE /api/registry/agents/:aid stays
-// API-key-gated because it's an admin action; GETs are public discovery.
-const PUBLIC_GET_PREFIXES = ['/api/registry/agents/'];
+// Anonymous discovery: `GET /api/registry/agents/{aid}` and
+// `GET /api/registry/agents/{aid}/manifest` are the only public reads
+// under the agents/ subtree. New admin-only suffixes (e.g. /export)
+// MUST NOT be added to this list — they leak audit data. The pattern
+// is path-shape-anchored to make accidental opening of new routes
+// impossible.
+const PUBLIC_GET_PATTERNS: RegExp[] = [
+  /^\/api\/registry\/agents\/[^/]+$/,
+  /^\/api\/registry\/agents\/[^/]+\/manifest$/,
+];
+
+/** Exported for unit testing; do not import from production code. */
+export function isPublicRequest(pathname: string, method: string): boolean {
+  if (PUBLIC_PATHS.has(pathname)) return true;
+  if (method === 'GET' && PUBLIC_GET_PATTERNS.some((re) => re.test(pathname))) {
+    return true;
+  }
+  return false;
+}
+
+// Paths exempt from rate limiting. Probes and metrics scrape endpoints
+// run on tight intervals; throttling them would mask real outages.
+const RATE_LIMIT_EXEMPT_PATHS = new Set<string>([
+  '/api/health',
+  '/api/readyz',
+  '/api/metrics',
+]);
+
+const WINDOW_MS = 60_000;
 
 function newRequestId(): string {
   return `cp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -28,12 +55,21 @@ function resolveRequestId(request: NextRequest): string {
   return request.headers.get('x-request-id') ?? newRequestId();
 }
 
+function getClientIp(request: NextRequest): string {
+  const fwd = request.headers.get('x-forwarded-for');
+  if (fwd) return fwd.split(',')[0]!.trim();
+  const real = request.headers.get('x-real-ip');
+  if (real) return real.trim();
+  // Next.js no longer exposes request.ip in middleware as of v15; the
+  // platform (Vercel, Cloudflare, an ALB) sets x-forwarded-for instead.
+  // For raw localhost dev the header is absent, so we bucket all such
+  // requests together under "unknown" — fine for a single dev machine.
+  return 'unknown';
+}
+
 /** Pass the request through unmodified except for an x-request-id
  * header that both downstream route handlers AND the client response
- * will see. The `request.headers` Headers object on NextRequest is
- * read-only from the route-handler side unless we rebuild it here and
- * hand it back via NextResponse.next({ request: { headers } }) — just
- * calling request.headers.set(...) silently no-ops. */
+ * will see. */
 function passThrough(request: NextRequest): NextResponse {
   const requestId = resolveRequestId(request);
   const forwarded = new Headers(request.headers);
@@ -43,11 +79,59 @@ function passThrough(request: NextRequest): NextResponse {
   return response;
 }
 
-function deny(request: NextRequest, body: unknown, status: number): NextResponse {
+function deny(
+  request: NextRequest,
+  body: unknown,
+  status: number,
+  extraHeaders?: Record<string, string>,
+): NextResponse {
   const requestId = resolveRequestId(request);
   const response = NextResponse.json(body, { status });
   response.headers.set('x-request-id', requestId);
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) response.headers.set(k, v);
+  }
   return response;
+}
+
+interface RateLimitChoice {
+  bucketName: string;
+  key: string;
+  limit: number;
+}
+
+/** Pick a rate-limit bucket for the request. Order:
+ *  - enrollment endpoint gets its own strict per-IP bucket (token brute force)
+ *  - other public routes share a per-IP bucket
+ *  - authenticated routes use per-API-key
+ */
+function chooseRateLimit(
+  request: NextRequest,
+  pathname: string,
+  token: string | null,
+  isPublic: boolean,
+): RateLimitChoice {
+  const ip = getClientIp(request);
+  if (pathname === '/api/registry/enroll') {
+    return {
+      bucketName: 'enroll-ip',
+      key: ip,
+      limit: appConfig.rateLimitEnrollPerIpMin,
+    };
+  }
+  if (isPublic || !token) {
+    return {
+      bucketName: 'public-ip',
+      key: ip,
+      limit: appConfig.rateLimitPublicPerIpMin,
+    };
+  }
+  // Hash-ish prefix is enough — we just need a stable per-key bucket.
+  return {
+    bucketName: 'api-key',
+    key: token.slice(0, 24),
+    limit: appConfig.rateLimitApiKeyMin,
+  };
 }
 
 export function middleware(request: NextRequest) {
@@ -56,42 +140,70 @@ export function middleware(request: NextRequest) {
 
   if (!pathname.startsWith('/api/')) return NextResponse.next();
   if (method === 'OPTIONS') return passThrough(request);
-  if (PUBLIC_PATHS.has(pathname)) return passThrough(request);
-  if (
-    method === 'GET' &&
-    PUBLIC_GET_PREFIXES.some((p) => pathname.startsWith(p))
-  ) {
-    return passThrough(request);
-  }
 
-  const keys = appConfig.apiKeys;
-  if (keys.length === 0) {
-    // In production an empty API_KEYS list would expose admin endpoints
-    // (POST /api/webhooks, POST /api/revocation/entries, GET /api/audit,
-    // DELETE /api/registry/agents/:aid). Refuse the request instead of
-    // silently passing it through — operators see the misconfiguration
-    // immediately rather than after an exfiltration incident.
-    if (appConfig.isProduction) {
-      return deny(
-        request,
-        {
-          error:
-            'server misconfigured: API_KEYS is required in production',
-          code: 'SERVER_MISCONFIGURED',
-        },
-        503,
-      );
-    }
-    return passThrough(request);
-  }
+  const isPublic = isPublicRequest(pathname, method);
 
   const authHeader = request.headers.get('authorization') ?? '';
   const token = authHeader.startsWith('Bearer ')
     ? authHeader.slice(7)
-    : authHeader;
+    : authHeader || null;
 
-  if (!token || !keys.includes(token)) {
-    return deny(request, { error: 'Unauthorized', code: 'INVALID_API_KEY' }, 401);
+  // ── Auth check ─────────────────────────────────────────────────────
+  if (!isPublic) {
+    const keys = appConfig.apiKeys;
+    if (keys.length === 0) {
+      if (appConfig.isProduction) {
+        return deny(
+          request,
+          {
+            error: 'server misconfigured: API_KEYS is required in production',
+            code: 'SERVER_MISCONFIGURED',
+          },
+          503,
+        );
+      }
+      // Dev: fall through to rate limit + handler with no auth.
+    } else {
+      if (!token || !keys.includes(token)) {
+        return deny(
+          request,
+          { error: 'Unauthorized', code: 'INVALID_API_KEY' },
+          401,
+        );
+      }
+    }
+  }
+
+  // ── Rate limit ─────────────────────────────────────────────────────
+  if (appConfig.rateLimitEnabled && !RATE_LIMIT_EXEMPT_PATHS.has(pathname)) {
+    const choice = chooseRateLimit(request, pathname, token, isPublic);
+    const decision = rateLimiter.check(
+      choice.bucketName,
+      choice.key,
+      choice.limit,
+      WINDOW_MS,
+    );
+    if (!decision.allowed) {
+      const retryAfter = Math.max(
+        1,
+        Math.ceil((decision.resetAt - Date.now()) / 1000),
+      );
+      return deny(
+        request,
+        {
+          error: 'rate limit exceeded',
+          code: 'RATE_LIMITED',
+          bucket: choice.bucketName,
+        },
+        429,
+        {
+          'Retry-After': String(retryAfter),
+          'X-RateLimit-Limit': String(decision.limit),
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset': String(Math.floor(decision.resetAt / 1000)),
+        },
+      );
+    }
   }
 
   return passThrough(request);

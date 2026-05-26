@@ -7,6 +7,9 @@ import { writeAdminAudit } from '@/lib/audit-log/service';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
+import { logger } from '@/lib/logger';
+import { withIdempotency } from '@/lib/idempotency';
+import { tctMonitor } from '@/lib/tcts/monitor';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -30,74 +33,74 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  if (typeof body.jti !== 'string' || !UUID_RE.test(body.jti)) {
-    return Response.json(
-      { error: 'jti must be a UUID', code: 'JTI_INVALID' },
-      { status: 400 },
-    );
-  }
 
-  const reason = typeof body.reason === 'string' ? body.reason : null;
-  let revokedAt: string;
-  if (typeof body.revokedAt === 'string') {
-    const parsed = new Date(body.revokedAt);
-    if (Number.isNaN(parsed.getTime())) {
-      return Response.json(
-        {
-          error: 'revokedAt must be a parseable date string (ISO-8601 recommended)',
-          code: 'BODY_INVALID',
-        },
-        { status: 400 },
-      );
+  return withIdempotency(req, 'revocation.entries', async () => {
+    if (typeof body.jti !== 'string' || !UUID_RE.test(body.jti)) {
+      return { status: 400, body: { error: 'jti must be a UUID', code: 'JTI_INVALID' } };
     }
-    revokedAt = parsed.toISOString();
-  } else {
-    revokedAt = new Date().toISOString();
-  }
 
-  try {
-    await db
-      .insert(revocationEntries)
-      .values({
-        jti: body.jti,
-        revokedAt,
-        reason,
-      })
-      .onConflictDoNothing();
-  } catch (err) {
-    return Response.json(
-      {
-        error: err instanceof Error ? err.message : String(err),
-        code: 'INSERT_FAILED',
-      },
-      { status: 500 },
+    const reason = typeof body.reason === 'string' ? body.reason : null;
+    let revokedAt: string;
+    if (typeof body.revokedAt === 'string') {
+      const parsed = new Date(body.revokedAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return {
+          status: 400,
+          body: {
+            error: 'revokedAt must be a parseable date string (ISO-8601 recommended)',
+            code: 'BODY_INVALID',
+          },
+        };
+      }
+      revokedAt = parsed.toISOString();
+    } else {
+      revokedAt = new Date().toISOString();
+    }
+
+    try {
+      await db
+        .insert(revocationEntries)
+        .values({
+          jti: body.jti,
+          revokedAt,
+          reason,
+        })
+        .onConflictDoNothing();
+    } catch (err) {
+      return {
+        status: 500,
+        body: {
+          error: err instanceof Error ? err.message : String(err),
+          code: 'INSERT_FAILED',
+        },
+      };
+    }
+
+    revocationProducer.invalidate();
+
+    const event: AuditEventRecord = {
+      id: randomUUID(),
+      type: 'tct.revoked',
+      ts: revokedAt,
+      payload: { jti: body.jti, reason },
+      source: 'cp',
+    };
+    await ingestOneEvent(event);
+    eventBus.publish(event);
+    await tctMonitor.onEvent(event);
+    void dispatchWebhooks(event).catch((err) =>
+      logger.warn({ err, jti: body.jti }, 'tct.revoked webhook dispatch failed'),
     );
-  }
+    await writeAdminAudit({
+      action: 'revocation.add',
+      targetId: body.jti as string,
+      details: { reason },
+      requestId: req.headers.get('x-request-id') ?? undefined,
+    });
 
-  // Re-sign next time the well-known list is fetched.
-  revocationProducer.invalidate();
-
-  const event: AuditEventRecord = {
-    id: randomUUID(),
-    type: 'tct.revoked',
-    ts: revokedAt,
-    payload: { jti: body.jti, reason },
-    source: 'cp',
-  };
-  await ingestOneEvent(event);
-  eventBus.publish(event);
-  void dispatchWebhooks(event).catch((err) =>
-    console.warn('[webhooks] tct.revoked dispatch failed:', err),
-  );
-  await writeAdminAudit({
-    action: 'revocation.add',
-    targetId: body.jti,
-    details: { reason },
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    return {
+      status: 201,
+      body: { jti: body.jti, revokedAt, reason },
+    };
   });
-
-  return Response.json(
-    { jti: body.jti, revokedAt, reason },
-    { status: 201 },
-  );
 }

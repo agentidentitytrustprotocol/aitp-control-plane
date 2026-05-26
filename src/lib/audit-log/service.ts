@@ -2,6 +2,7 @@ import { desc } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { db } from '../db';
 import { adminAuditLog, type AdminAuditRow } from '../db/schema';
+import { logger } from '../logger';
 
 export interface AdminAuditEntry {
   action: string;
@@ -23,7 +24,7 @@ export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
     });
   } catch (err) {
     // Audit logging must never break the calling request path.
-    console.warn('[admin-audit] insert failed:', err);
+    logger.warn({ err, action: entry.action }, 'admin-audit insert failed');
   }
 }
 

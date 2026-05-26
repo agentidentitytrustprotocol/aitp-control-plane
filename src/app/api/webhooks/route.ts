@@ -4,6 +4,7 @@ import {
   listWebhooks,
 } from '@/lib/webhooks/service';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { withIdempotency } from '@/lib/idempotency';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -39,36 +40,39 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  if (typeof body.url !== 'string' || !/^https?:\/\//.test(body.url)) {
-    return Response.json(
-      { error: 'url must be an http(s) URL', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
-  const events = Array.isArray(body.events)
-    ? body.events.filter((e): e is string => typeof e === 'string')
-    : [];
-  const webhook = await createWebhook({
-    url: body.url,
-    events,
-    secret: typeof body.secret === 'string' ? body.secret : undefined,
-    active: typeof body.active === 'boolean' ? body.active : true,
+
+  return withIdempotency(req, 'webhooks.create', async () => {
+    if (typeof body.url !== 'string' || !/^https?:\/\//.test(body.url)) {
+      return {
+        status: 400,
+        body: { error: 'url must be an http(s) URL', code: 'BODY_INVALID' },
+      };
+    }
+    const events = Array.isArray(body.events)
+      ? body.events.filter((e): e is string => typeof e === 'string')
+      : [];
+    const webhook = await createWebhook({
+      url: body.url,
+      events,
+      secret: typeof body.secret === 'string' ? body.secret : undefined,
+      active: typeof body.active === 'boolean' ? body.active : true,
+    });
+    await writeAdminAudit({
+      action: 'webhook.create',
+      targetId: webhook.id,
+      details: { url: webhook.url, events: webhook.events },
+      requestId: req.headers.get('x-request-id') ?? undefined,
+    });
+    return {
+      status: 201,
+      body: {
+        id: webhook.id,
+        url: webhook.url,
+        events: webhook.events,
+        secret: webhook.secret,
+        active: webhook.active,
+        createdAt: webhook.createdAt,
+      },
+    };
   });
-  await writeAdminAudit({
-    action: 'webhook.create',
-    targetId: webhook.id,
-    details: { url: webhook.url, events: webhook.events },
-    requestId: req.headers.get('x-request-id') ?? undefined,
-  });
-  return Response.json(
-    {
-      id: webhook.id,
-      url: webhook.url,
-      events: webhook.events,
-      secret: webhook.secret,
-      active: webhook.active,
-      createdAt: webhook.createdAt,
-    },
-    { status: 201 },
-  );
 }

@@ -27,6 +27,29 @@ export const config = {
   revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
+  // Rate limits (requests per minute). All buckets are in-memory and
+  // per-process; for multi-instance deployments add a Redis hub later.
+  // 0 disables that bucket.
+  rateLimitEnrollPerIpMin: readNumber('RATE_LIMIT_ENROLLMENT_PER_IP_MIN', 5),
+  rateLimitPublicPerIpMin: readNumber('RATE_LIMIT_PUBLIC_PER_IP_MIN', 60),
+  rateLimitApiKeyMin: readNumber('RATE_LIMIT_API_KEY_PER_MIN', 600),
+  rateLimitEnabled:
+    (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
+  // ── Data retention ───────────────────────────────────────────────────
+  // Periodic sweep deletes old rows so storage stays bounded. The sweep
+  // uses a Postgres advisory lock so multiple CP instances do not
+  // duplicate work. Set RETENTION_ENABLED=false to disable entirely.
+  retentionEnabled:
+    (process.env.RETENTION_ENABLED ?? 'true').toLowerCase() !== 'false',
+  retentionIntervalMs: readNumber('RETENTION_INTERVAL_MS', 30 * 60 * 1000),
+  auditEventsTtlDays: readNumber('AUDIT_EVENTS_TTL_DAYS', 90),
+  webhookDeliveryTtlDays: readNumber('WEBHOOK_DELIVERY_TTL_DAYS', 14),
+  expiredAgentGraceDays: readNumber('EXPIRED_AGENT_GRACE_DAYS', 30),
+  adminAuditTtlDays: readNumber('ADMIN_AUDIT_TTL_DAYS', 365),
+  idempotencyKeyTtlDays: readNumber('IDEMPOTENCY_KEY_TTL_DAYS', 7),
+  // Per-sweep batch size — caps how many rows a single sweep deletes so
+  // a long-running deploy doesn't lock tables for minutes.
+  retentionBatchLimit: readNumber('RETENTION_BATCH_LIMIT', 10_000),
 } as const;
 
 export type Config = typeof config;

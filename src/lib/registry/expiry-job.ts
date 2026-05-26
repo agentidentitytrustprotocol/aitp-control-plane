@@ -5,6 +5,7 @@ import { agents } from '../db/schema';
 import { ingestOneEvent } from '../audit/event-store';
 import { eventBus, type AuditEventRecord } from '../audit/stream';
 import { dispatchWebhooks } from '../webhooks/service';
+import { logger } from '../logger';
 
 /** Sweep all currently-expired manifests, transition their rows to
  * status='expired', and emit `agent.expired` events. Returns the
@@ -55,15 +56,15 @@ export async function enforceManifestExpiry(): Promise<number> {
     try {
       await ingestOneEvent(event);
     } catch (err) {
-      console.warn('[expiry-job] audit insert failed:', err);
+      logger.warn({ err, aid: agent.aid }, 'expiry-job audit insert failed');
     }
     eventBus.publish(event);
     void dispatchWebhooks(event).catch((err) =>
-      console.warn('[expiry-job] webhook dispatch failed:', err),
+      logger.warn({ err, aid: agent.aid }, 'expiry-job webhook dispatch failed'),
     );
   }
 
-  console.log(`[expiry-job] marked ${transitioned.length} agents expired`);
+  logger.info({ count: transitioned.length }, 'expiry-job marked agents expired');
   return transitioned.length;
 }
 
@@ -78,7 +79,7 @@ export function startExpiryJob(intervalMs = 5 * 60 * 1000): void {
   if (globalThis.__expiryInterval) return;
   globalThis.__expiryInterval = setInterval(() => {
     enforceManifestExpiry().catch((err) =>
-      console.warn('[expiry-job] failed:', err),
+      logger.warn({ err }, 'expiry-job tick failed'),
     );
   }, intervalMs);
   // Don't hold the event loop open just for the timer.

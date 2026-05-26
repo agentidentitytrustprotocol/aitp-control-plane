@@ -21,5 +21,6 @@ function createDb() {
 }
 
 export const db = globalThis.__db ?? (globalThis.__db = createDb());
+export const pool = globalThis.__dbPool!;
 export type Db = typeof db;
 export { schema };

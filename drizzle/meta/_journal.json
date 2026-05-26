@@ -29,6 +29,27 @@
       "when": 1779593645833,
       "tag": "0003_webhook_delivery_body",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779765890164,
+      "tag": "0004_idempotency_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779766363136,
+      "tag": "0005_aitp_depth",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779768472802,
+      "tag": "0006_trust_anchors_uniq",
+      "breakpoints": true
     }
   ]
 }

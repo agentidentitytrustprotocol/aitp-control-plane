@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "trust_anchors_namespace_issuer_uniq" ON "trust_anchors" USING btree ("namespace","issuer_url");

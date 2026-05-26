@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { handshakeSessions } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
+import { logger } from '../logger';
 
 function deriveBoundary(event: AuditEventRecord): string | undefined {
   const payload = event.payload as Record<string, unknown>;
@@ -50,7 +51,7 @@ class SessionMonitorService {
           .where(eq(handshakeSessions.sessionId, sid));
       }
     } catch (err) {
-      console.warn('[session-monitor] db update failed:', err);
+      logger.warn({ err, sessionId: sid, type: event.type }, 'session-monitor db update failed');
     }
   }
 }
