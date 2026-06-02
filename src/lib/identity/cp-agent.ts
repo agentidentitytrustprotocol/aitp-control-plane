@@ -20,11 +20,14 @@ export function initCpIdentity(): void {
       throw new Error('CP_AID_SEED_HEX is required in production');
     }
     const seed = randomBytes(32);
+    agent = AitpAgent.fromSeed(seed);
+    // NEVER log the seed: it is the CP's Ed25519 private key material and
+    // reconstructs the key that signs the revocation list and manifest.
+    // Log only the public AID so the ephemeral identity is still traceable.
     logger.warn(
-      { seedHex: seed.toString('hex') },
+      { aid: agent.aid },
       'CP_AID_SEED_HEX not set — using ephemeral key (regenerated each restart)',
     );
-    agent = AitpAgent.fromSeed(seed);
   } else {
     agent = AitpAgent.fromSeed(Buffer.from(seedHex, 'hex'));
   }

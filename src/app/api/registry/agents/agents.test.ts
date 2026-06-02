@@ -14,6 +14,7 @@ import type { Agent } from '@/lib/db/schema';
 const listAgentsMock = jest.fn(async (_filters: unknown) => [] as Agent[]);
 const upsertAgentMock = jest.fn(async (_input: unknown) => undefined);
 const validateTokenMock = jest.fn();
+const consumeEnrollmentJtiMock = jest.fn(async (_jti: string, _exp: number) => true);
 const ingestOneEventMock = jest.fn(async (_e: unknown) => undefined);
 const dispatchWebhooksMock = jest.fn(async (_e: unknown) => undefined);
 const writeAdminAuditMock = jest.fn(async (_e: unknown) => undefined);
@@ -27,6 +28,10 @@ jest.mock('@/lib/registry/enrollment', () => ({
   getEnrollmentService: () => ({
     validateToken: (...args: unknown[]) => validateTokenMock(...args),
   }),
+}));
+jest.mock('@/lib/registry/jti-store', () => ({
+  consumeEnrollmentJti: (jti: string, exp: number) =>
+    consumeEnrollmentJtiMock(jti, exp),
 }));
 jest.mock('@/lib/audit/event-store', () => ({
   ingestOneEvent: (e: unknown) => ingestOneEventMock(e),
@@ -83,7 +88,22 @@ beforeEach(() => {
   writeAdminAuditMock.mockReset();
   writeAdminAuditMock.mockResolvedValue(undefined);
   eventBusPublishMock.mockReset();
+  consumeEnrollmentJtiMock.mockReset();
+  consumeEnrollmentJtiMock.mockResolvedValue(true);
 });
+
+// validateToken returns the verified payload; the route reads .jti/.exp
+// off it and then consumes the jti. Mock a valid payload for the
+// success-path tests.
+function okPayload() {
+  return {
+    sub: 'aid:pubkey:fake',
+    scope: 'register' as const,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 300,
+    jti: 'jti-test-1',
+  };
+}
 
 // ── POST — Bug 6: reject manifests expiring within 5 min ───────────
 describe('POST /api/registry/agents (Plan Bug 6)', () => {
@@ -102,7 +122,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
   it('returns 400 MANIFEST_EXPIRED for a manifest expiring in 60 s (inside the 5-min guard)', async () => {
     // The route validates the enrollment token BEFORE the expiry guard,
     // so the mocked validateToken must succeed for the guard to fire.
-    validateTokenMock.mockImplementation(() => undefined);
+    validateTokenMock.mockImplementation(() => okPayload());
     const res = await POST(
       makeReq('/api/registry/agents', {
         method: 'POST',
@@ -118,7 +138,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
   });
 
   it('returns 201 + persists for a manifest expiring in 1 hour', async () => {
-    validateTokenMock.mockImplementation(() => undefined);
+    validateTokenMock.mockImplementation(() => okPayload());
     const res = await POST(
       makeReq('/api/registry/agents', {
         method: 'POST',
@@ -152,8 +172,24 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     expect(upsertAgentMock).not.toHaveBeenCalled();
   });
 
+  it('returns 401 TOKEN_REPLAYED when the jti was already consumed (P0-3)', async () => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    consumeEnrollmentJtiMock.mockResolvedValue(false); // already used
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer replayed-token' },
+        body: envelope(3600),
+      }),
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('TOKEN_REPLAYED');
+    expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+
   it('rejects manifest.extensions.namespace when it is not a string (Plan 2.2)', async () => {
-    validateTokenMock.mockImplementation(() => undefined);
+    validateTokenMock.mockImplementation(() => okPayload());
     const body = JSON.stringify({
       manifest: {
         aid: 'aid:pubkey:fake',

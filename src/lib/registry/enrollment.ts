@@ -81,7 +81,11 @@ export class EnrollmentService {
     return { token: this.sign(payload), expiresIn: TOKEN_LIFETIME_SECS, aid };
   }
 
-  validateToken(token: string, expectedAid: string): void {
+  /** Verify the token's signature, scope, expiry, and subject binding.
+   * Returns the validated payload so the caller can atomically consume
+   * the `jti` (one-time-token enforcement — see `consumeEnrollmentJti`).
+   * Throws on any failure. */
+  validateToken(token: string, expectedAid: string): EnrollmentPayload {
     const payload = this.verify(token);
     if (payload.scope !== 'register') {
       throw new Error('token scope must be register');
@@ -94,6 +98,10 @@ export class EnrollmentService {
         `token sub ${payload.sub} does not match manifest aid ${expectedAid}`,
       );
     }
+    if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
+      throw new Error('enrollment token missing jti');
+    }
+    return payload;
   }
 
   private sign(payload: EnrollmentPayload): string {

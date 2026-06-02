@@ -393,6 +393,30 @@ export const idempotencyKeys = pgTable(
   }),
 );
 
+// ── Consumed enrollment token JTIs (one-time-token enforcement) ───────
+//
+// Enrollment tokens are short-lived HMAC bearer credentials minted by
+// POST /api/registry/enroll and spent by POST /api/registry/agents. To
+// make them genuinely one-time, the register handler atomically inserts
+// the token's `jti` here; a second insert of the same jti conflicts and
+// the replay is rejected. Rows are aged out by the retention sweep once
+// past `expires_at` (the token can't be replayed after it expires
+// anyway, so the row is only needed for the token's lifetime).
+
+export const enrollmentJtis = pgTable(
+  'enrollment_jtis',
+  {
+    jti: varchar('jti', { length: 64 }).primaryKey(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    expiresIdx: index('enrollment_jtis_expires_at_idx').on(t.expiresAt),
+  }),
+);
+
 export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
 export type HandshakeSession = typeof handshakeSessions.$inferSelect;

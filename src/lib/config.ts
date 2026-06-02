@@ -33,6 +33,10 @@ export const config = {
   revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
+  // Optional allowlist of webhook target hosts. Empty = allow any public
+  // host (still SSRF-range-checked). Entries are exact hosts; a leading
+  // dot (".example.com") matches the apex and any subdomain.
+  webhookUrlAllowlist: readList('WEBHOOK_URL_ALLOWLIST'),
   // Rate limits (requests per minute). All buckets are in-memory and
   // per-process; for multi-instance deployments add a Redis hub later.
   // 0 disables that bucket.
@@ -40,6 +44,19 @@ export const config = {
   rateLimitPublicPerIpMin: readNumber('RATE_LIMIT_PUBLIC_PER_IP_MIN', 60),
   rateLimitApiKeyMin: readNumber('RATE_LIMIT_API_KEY_PER_MIN', 600),
   rateLimitWindowMs: readNumber('RATE_LIMIT_WINDOW_MS', 60_000),
+  // Client-IP resolution for rate limiting. `X-Forwarded-For` is
+  // client-controllable: the leftmost entry is whatever the caller sent,
+  // so trusting it lets an attacker rotate it to dodge the per-IP
+  // enrollment throttle (or spoof a victim's IP to exhaust their bucket).
+  //   CLIENT_IP_HEADER — a single trusted header your edge sets to the
+  //     real client IP (e.g. "cf-connecting-ip", "x-vercel-forwarded-for",
+  //     "x-real-ip"). When set, it wins.
+  //   TRUSTED_PROXY_HOPS — number of trusted proxies appending to XFF.
+  //     The client IP is read that many entries from the RIGHT (the
+  //     proxy-appended end), not the spoofable left. Default 0 = do not
+  //     trust XFF at all.
+  clientIpHeader: (process.env.CLIENT_IP_HEADER ?? '').trim().toLowerCase(),
+  trustedProxyHops: readNumber('TRUSTED_PROXY_HOPS', 0),
   rateLimitEnabled:
     (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
   // ── Data retention ───────────────────────────────────────────────────

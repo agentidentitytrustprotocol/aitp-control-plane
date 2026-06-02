@@ -30,6 +30,7 @@ import {
   adminAuditLog,
   agents,
   auditEvents,
+  enrollmentJtis,
   idempotencyKeys,
   webhookDeliveries,
 } from './db/schema';
@@ -52,6 +53,7 @@ export interface SweepResult {
   adminAuditDeleted: number;
   agentsDeleted: number;
   idempotencyKeysDeleted: number;
+  enrollmentJtisDeleted: number;
   durationMs: number;
 }
 
@@ -121,6 +123,22 @@ async function purgeIdempotencyKeys(tx: Tx, limit: number): Promise<number> {
   return (deleted as unknown as { rowCount?: number }).rowCount ?? 0;
 }
 
+async function purgeEnrollmentJtis(tx: Tx, limit: number): Promise<number> {
+  // A consumed jti only needs to live as long as the token could still be
+  // presented; once expired, the row is dead weight. Delete past-expiry
+  // rows (no separate TTL knob — `expires_at` is authoritative).
+  const now = new Date().toISOString();
+  const deleted = await tx.execute(sql`
+    delete from ${enrollmentJtis}
+    where jti in (
+      select jti from ${enrollmentJtis}
+      where ${enrollmentJtis.expiresAt} < ${now}
+      limit ${limit}
+    )
+  `);
+  return (deleted as unknown as { rowCount?: number }).rowCount ?? 0;
+}
+
 async function purgeDeregisteredAgents(tx: Tx): Promise<number> {
   if (config.expiredAgentGraceDays <= 0) return 0;
   const cutoff = daysAgoIso(config.expiredAgentGraceDays);
@@ -152,6 +170,7 @@ const SKIPPED: Omit<SweepResult, 'durationMs'> = {
   adminAuditDeleted: 0,
   agentsDeleted: 0,
   idempotencyKeysDeleted: 0,
+  enrollmentJtisDeleted: 0,
 };
 
 const DISABLED: Omit<SweepResult, 'durationMs'> = {
@@ -186,12 +205,14 @@ export async function runRetentionSweep(): Promise<SweepResult> {
     const adminAuditDeleted = await purgeAdminAudit(tx, limit);
     const agentsDeleted = await purgeDeregisteredAgents(tx);
     const idempotencyKeysDeleted = await purgeIdempotencyKeys(tx, limit);
+    const enrollmentJtisDeleted = await purgeEnrollmentJtis(tx, limit);
     return {
       auditEventsDeleted,
       webhookDeliveriesDeleted,
       adminAuditDeleted,
       agentsDeleted,
       idempotencyKeysDeleted,
+      enrollmentJtisDeleted,
     };
   });
 
@@ -206,7 +227,8 @@ export async function runRetentionSweep(): Promise<SweepResult> {
     counts.webhookDeliveriesDeleted +
     counts.adminAuditDeleted +
     counts.agentsDeleted +
-    counts.idempotencyKeysDeleted;
+    counts.idempotencyKeysDeleted +
+    counts.enrollmentJtisDeleted;
   if (total > 0) {
     logger.info({ ...counts, durationMs }, 'retention sweep complete');
   }

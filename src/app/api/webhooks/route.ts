@@ -3,6 +3,10 @@ import {
   createWebhook,
   listWebhooks,
 } from '@/lib/webhooks/service';
+import {
+  assertSafeWebhookUrl,
+  UnsafeWebhookUrlError,
+} from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 import { withIdempotency } from '@/lib/idempotency';
 
@@ -42,11 +46,22 @@ export async function POST(req: NextRequest) {
   }
 
   return withIdempotency(req, 'webhooks.create', async () => {
-    if (typeof body.url !== 'string' || !/^https?:\/\//.test(body.url)) {
+    if (typeof body.url !== 'string') {
       return {
         status: 400,
         body: { error: 'url must be an http(s) URL', code: 'BODY_INVALID' },
       };
+    }
+    try {
+      await assertSafeWebhookUrl(body.url);
+    } catch (err) {
+      if (err instanceof UnsafeWebhookUrlError) {
+        return {
+          status: 400,
+          body: { error: err.message, code: 'URL_NOT_ALLOWED' },
+        };
+      }
+      throw err;
     }
     const events = Array.isArray(body.events)
       ? body.events.filter((e): e is string => typeof e === 'string')

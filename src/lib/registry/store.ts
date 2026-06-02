@@ -8,7 +8,14 @@ export interface RegistryFilters {
   displayName?: string;
   status?: string;
   namespace?: string;
+  limit?: number;
+  offset?: number;
 }
+
+// Bound the discovery query so a large registry can't turn this endpoint
+// into a memory/latency cliff (the result set was previously unbounded).
+const DEFAULT_AGENTS_LIMIT = 200;
+const MAX_AGENTS_LIMIT = 1000;
 
 export interface RegisterInput {
   aid: string;
@@ -44,11 +51,18 @@ export async function listAgents(filters: RegistryFilters): Promise<Agent[]> {
       sql`${agents.offeredCaps} @> ${JSON.stringify([filters.capability])}::jsonb`,
     );
   }
+  const limit = Math.min(
+    Math.max(Math.trunc(filters.limit ?? DEFAULT_AGENTS_LIMIT), 1),
+    MAX_AGENTS_LIMIT,
+  );
+  const offset = Math.max(Math.trunc(filters.offset ?? 0), 0);
   return db
     .select()
     .from(agents)
     .where(and(...where))
-    .orderBy(asc(agents.registeredAt));
+    .orderBy(asc(agents.registeredAt))
+    .limit(limit)
+    .offset(offset);
 }
 
 export async function getAgent(aid: string): Promise<Agent | undefined> {
