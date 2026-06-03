@@ -57,14 +57,33 @@ function resolveRequestId(request: NextRequest): string {
 }
 
 function getClientIp(request: NextRequest): string {
-  const fwd = request.headers.get('x-forwarded-for');
-  if (fwd) return fwd.split(',')[0]!.trim();
+  // 1. A trusted platform header (set by the edge, not the client) wins.
+  if (appConfig.clientIpHeader) {
+    const v = request.headers.get(appConfig.clientIpHeader);
+    if (v) return v.split(',')[0]!.trim();
+  }
+
+  // 2. X-Forwarded-For, read from the RIGHT by trusted-proxy hop count.
+  //    Each trusted proxy APPENDS the address it saw, so the real client
+  //    is `hops` entries from the end. The leftmost entries are
+  //    client-supplied and must never be trusted. With 0 hops we don't
+  //    trust XFF at all (a misconfigured edge shouldn't open a spoof).
+  const hops = appConfig.trustedProxyHops;
+  if (hops > 0) {
+    const fwd = request.headers.get('x-forwarded-for');
+    if (fwd) {
+      const parts = fwd.split(',').map((s) => s.trim()).filter(Boolean);
+      const idx = parts.length - hops;
+      if (idx >= 0 && parts[idx]) return parts[idx]!;
+    }
+  }
+
+  // 3. x-real-ip (single value some proxies set) then a localhost-dev
+  //    fallback. Next.js no longer exposes request.ip in middleware as of
+  //    v15; raw localhost dev sends no proxy headers, so all such requests
+  //    bucket together under "unknown" — fine for a single dev machine.
   const real = request.headers.get('x-real-ip');
   if (real) return real.trim();
-  // Next.js no longer exposes request.ip in middleware as of v15; the
-  // platform (Vercel, Cloudflare, an ALB) sets x-forwarded-for instead.
-  // For raw localhost dev the header is absent, so we bucket all such
-  // requests together under "unknown" — fine for a single dev machine.
   return 'unknown';
 }
 

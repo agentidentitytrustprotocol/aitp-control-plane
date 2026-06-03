@@ -50,6 +50,13 @@
       "when": 1779768472802,
       "tag": "0006_trust_anchors_uniq",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1780369963638,
+      "tag": "0007_enrollment_jtis",
+      "breakpoints": true
     }
   ]
 }

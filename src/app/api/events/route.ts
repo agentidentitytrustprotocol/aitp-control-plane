@@ -14,6 +14,7 @@ import { startExpiryJob } from '@/lib/registry/expiry-job';
 import { startRetentionJob } from '@/lib/retention';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
+import { BodyTooLargeError, readBodyTextWithLimit } from '@/lib/http/read-body';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -81,6 +82,13 @@ interface RequestBody {
 // requests rather than asking us to lift these.
 const MAX_BATCH_BYTES = 256 * 1024;
 const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
+// Hard ceiling on events per request. Independent of the byte cap so a
+// payload of many tiny objects can't flood the SSE backlog, the DB, or
+// the webhook fan-out. Callers needing more must split into batches.
+const MAX_BATCH_EVENTS = 500;
+// Bound concurrent webhook fan-out per batch so a full batch can't spawn
+// an unbounded burst of outbound deliveries.
+const WEBHOOK_DISPATCH_CONCURRENCY = 8;
 
 export async function POST(req: NextRequest) {
   // Lazy startup hooks — idempotent, .unref()'d intervals. Run BEFORE
@@ -105,9 +113,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Read with a hard byte ceiling enforced on the actual bytes, not just
+  // the (spoofable / chunked-bypassable) Content-Length header.
+  let bodyText: string;
+  try {
+    bodyText = await readBodyTextWithLimit(req, MAX_BATCH_BYTES);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return Response.json(
+        { error: err.message, code: 'PAYLOAD_TOO_LARGE' },
+        { status: 413 },
+      );
+    }
+    throw err;
+  }
+
   let body: RequestBody | unknown[] | null = null;
   try {
-    body = (await req.json()) as RequestBody | unknown[];
+    body = JSON.parse(bodyText) as RequestBody | unknown[];
   } catch {
     return Response.json(
       { error: 'body must be JSON', code: 'BODY_INVALID' },
@@ -119,6 +142,16 @@ export async function POST(req: NextRequest) {
     const rawEvents: unknown[] = Array.isArray(body)
       ? body
       : (body?.events ?? []);
+
+    if (rawEvents.length > MAX_BATCH_EVENTS) {
+      return {
+        status: 413,
+        body: {
+          error: `batch exceeds ${MAX_BATCH_EVENTS} events (got ${rawEvents.length})`,
+          code: 'PAYLOAD_TOO_LARGE',
+        },
+      };
+    }
 
     const normalized = rawEvents
       .filter(
@@ -167,8 +200,19 @@ export async function POST(req: NextRequest) {
       eventBus.publish(event);
       await sessionMonitor.onEvent(event);
       await tctMonitor.onEvent(event);
-      void dispatchWebhooksWithList(event, activeWebhooks).catch((err) =>
-        logger.warn({ err, eventType: event.type }, 'webhooks dispatch failed'),
+    }
+
+    // Webhook fan-out with bounded concurrency. The batch is already
+    // capped at MAX_BATCH_EVENTS; this caps the in-flight enqueue width
+    // so a full batch can't burst the outbound delivery layer.
+    for (let i = 0; i < normalized.length; i += WEBHOOK_DISPATCH_CONCURRENCY) {
+      const slice = normalized.slice(i, i + WEBHOOK_DISPATCH_CONCURRENCY);
+      await Promise.all(
+        slice.map((event) =>
+          dispatchWebhooksWithList(event, activeWebhooks).catch((err) =>
+            logger.warn({ err, eventType: event.type }, 'webhooks dispatch failed'),
+          ),
+        ),
       );
     }
 

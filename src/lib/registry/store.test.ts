@@ -10,15 +10,19 @@ let updateRowsToReturn: Array<{ aid: string }> = [];
 let selectRowsToReturn: unknown[] = [];
 
 jest.mock('../db', () => {
-  // SELECT chain: select().from().where().orderBy()  →  rows
+  // SELECT chain: select().from().where().orderBy().limit().offset() → rows
   const selectChain: Record<string, unknown> = {};
   selectChain.from = () => selectChain;
   selectChain.where = (arg: unknown) => {
     recorded.push({ kind: 'select.where', args: [arg] });
     return selectChain;
   };
-  selectChain.orderBy = () => Promise.resolve(selectRowsToReturn);
-  selectChain.limit = () => Promise.resolve(selectRowsToReturn);
+  selectChain.orderBy = () => selectChain;
+  selectChain.limit = (arg: unknown) => {
+    recorded.push({ kind: 'select.limit', args: [arg] });
+    return selectChain;
+  };
+  selectChain.offset = () => Promise.resolve(selectRowsToReturn);
 
   // UPDATE chain: update().set().where().returning() OR no .returning()
   const updateChain: Record<string, unknown> = {};

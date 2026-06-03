@@ -11,6 +11,7 @@ import type { AuditEventRecord } from '../audit/stream';
 import { config } from '../config';
 import { logger } from '../logger';
 import { webhookBreaker } from './circuit-breaker';
+import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './url-guard';
 
 // Don't overwhelm a downstream receiver during recovery / catch-up.
 const FLUSH_CONCURRENCY = 8;
@@ -261,6 +262,27 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
       delivery.createdAt,
     );
     signature = signPayload(webhook.secret, body);
+  }
+
+  // Re-validate the target right before connecting. A host that was
+  // public when the webhook was created can later resolve to a private
+  // address (DNS rebinding); this re-resolution closes that vector. An
+  // unsafe URL is terminal — fail the delivery rather than retrying.
+  try {
+    await assertSafeWebhookUrl(webhook.url);
+  } catch (err) {
+    if (err instanceof UnsafeWebhookUrlError) {
+      await db
+        .update(webhookDeliveries)
+        .set({ status: 'failed', error: `unsafe target: ${err.message}`, nextRetryAt: null })
+        .where(eq(webhookDeliveries.id, deliveryId));
+      logger.warn(
+        { deliveryId, webhookId: webhook.id, url: webhook.url },
+        'webhook delivery blocked — target resolves to a non-public address',
+      );
+      return;
+    }
+    throw err;
   }
 
   let statusCode: number | null = null;

@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
+import { consumeEnrollmentJti } from '@/lib/registry/jti-store';
 import { listAgents, upsertAgent } from '@/lib/registry/store';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
@@ -7,6 +8,7 @@ import { writeAdminAudit } from '@/lib/audit-log/service';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
+import { parsePagination } from '@/lib/pagination';
 import { randomUUID } from 'node:crypto';
 
 export const runtime = 'nodejs';
@@ -51,12 +53,18 @@ export async function GET(req: NextRequest) {
     searchParams.get('display_name') ?? searchParams.get('displayName') ?? undefined;
   const namespace = searchParams.get('namespace') ?? undefined;
   const includeManifest = searchParams.get('include_manifest') === 'true';
+  const { limit, offset } = parsePagination(searchParams, {
+    defaultLimit: 200,
+    maxLimit: 1000,
+  });
 
   const results = await listAgents({
     capability,
     aid,
     displayName,
     namespace,
+    limit,
+    offset,
   });
   return Response.json({
     agents: results.map((a) => ({
@@ -103,14 +111,30 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    let tokenPayload;
     try {
-      getEnrollmentService().validateToken(token, manifest.aid);
+      tokenPayload = getEnrollmentService().validateToken(token, manifest.aid);
     } catch (err) {
       return {
         status: 401,
         body: {
           error: err instanceof Error ? err.message : String(err),
           code: 'TOKEN_INVALID',
+        },
+      };
+    }
+
+    // One-time-token enforcement: atomically consume the jti. A second
+    // presentation of the same (still-valid) token is a replay — reject
+    // it so a captured token can't resurrect a deregistered agent or
+    // overwrite a registration after the operator changed it.
+    const firstUse = await consumeEnrollmentJti(tokenPayload.jti, tokenPayload.exp);
+    if (!firstUse) {
+      return {
+        status: 401,
+        body: {
+          error: 'enrollment token already used',
+          code: 'TOKEN_REPLAYED',
         },
       };
     }

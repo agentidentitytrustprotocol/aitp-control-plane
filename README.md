@@ -61,6 +61,9 @@ All settings are environment variables. See `.env.example` for the canonical lis
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Falls back to `*` with a warning in prod if unset. |
 | `REVOCATION_LIST_TTL_SECS` | no | `3600` | TTL on the signed revocation snapshot |
 | `WEBHOOK_RETRY_ATTEMPTS` | no | `3` | Per-delivery retry budget |
+| `WEBHOOK_URL_ALLOWLIST` | no | empty | Comma-separated host allowlist for webhook targets. Empty = any public host (private/loopback/link-local ranges are always rejected as SSRF). Leading `.` matches subdomains. |
+| `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
+| `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |
 | `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog size |
 | `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
 | `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min rate limits accumulate |

@@ -1,5 +1,9 @@
 import { NextRequest } from 'next/server';
 import { deleteWebhook, updateWebhook } from '@/lib/webhooks/service';
+import {
+  assertSafeWebhookUrl,
+  UnsafeWebhookUrlError,
+} from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 
 export const runtime = 'nodejs';
@@ -32,7 +36,20 @@ export async function PATCH(
     secret?: string;
     active?: boolean;
   } = {};
-  if (typeof body.url === 'string') patch.url = body.url;
+  if (typeof body.url === 'string') {
+    try {
+      await assertSafeWebhookUrl(body.url);
+    } catch (err) {
+      if (err instanceof UnsafeWebhookUrlError) {
+        return Response.json(
+          { error: err.message, code: 'URL_NOT_ALLOWED' },
+          { status: 400 },
+        );
+      }
+      throw err;
+    }
+    patch.url = body.url;
+  }
   if (Array.isArray(body.events)) {
     patch.events = body.events.filter((e): e is string => typeof e === 'string');
   }
