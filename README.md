@@ -154,6 +154,18 @@ docs/             API reference + integration contracts
 plans/            Forward-looking roadmap
 ```
 
+## Deployment
+
+CI builds a multi-arch container image and publishes it to GHCR
+(`ghcr.io/agentidentitytrustprotocol/aitp-control-plane`) on every push to
+`main`. The `aitp` SDK is the published
+[`@agentidentitytrustprotocol/aitp`](https://www.npmjs.com/package/@agentidentitytrustprotocol/aitp)
+npm package, so the image and CI are self-contained — no sibling `aitp-rs`
+checkout or Rust toolchain required.
+
+See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the full CI/CD pipeline and a
+step-by-step Railway deployment guide.
+
 ## License
 
 See [`LICENSE`](LICENSE).
