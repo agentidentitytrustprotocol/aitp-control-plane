@@ -1,0 +1,17 @@
+node_modules
+.next
+.git
+.github
+coverage
+**/*.test.ts
+**/*.integration.test.ts
+docker-compose.yml
+Dockerfile
+.dockerignore
+.env*
+!.env.example
+temp
+plans
+*.log
+.DS_Store
+tsconfig.tsbuildinfo

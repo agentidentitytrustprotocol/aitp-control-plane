@@ -13,10 +13,6 @@ concurrency:
 
 env:
   NODE_VERSION: '20'
-  # aitp-rs is a sibling repo; CI checks it out alongside this one so the
-  # `aitp` NAPI binding referenced as `file:../aitp-rs/bindings/aitp-node`
-  # in package.json resolves correctly.
-  AITP_RS_REF: main
 
 jobs:
   build-and-test:
@@ -39,72 +35,38 @@ jobs:
           --health-retries 20
 
     steps:
-      - name: Checkout aitp-control-plane
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: aitp-control-plane
-
-      - name: Checkout aitp-rs (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: agentidentitytrustprotocol/aitp-rs
-          ref: ${{ env.AITP_RS_REF }}
-          path: aitp-rs
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: aitp-control-plane/package-lock.json
 
-      - name: Setup Rust (for NAPI binding)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            aitp-rs/target
-            aitp-rs/bindings/aitp-node/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('aitp-rs/Cargo.lock', 'aitp-rs/bindings/aitp-node/Cargo.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Build aitp-node NAPI binding (Linux)
-        working-directory: aitp-rs/bindings/aitp-node
-        run: |
-          npm install --no-save @napi-rs/cli
-          npx napi build --platform --release
-
-      - name: Install CP dependencies
-        working-directory: aitp-control-plane
+      # `aitp` is the published @agentidentitytrustprotocol/aitp package
+      # (npm alias). `npm ci` pulls the prebuilt Linux NAPI binary — no
+      # sibling aitp-rs checkout or Rust toolchain needed.
+      - name: Install dependencies
         run: npm ci
 
       - name: Typecheck
-        working-directory: aitp-control-plane
         run: npm run typecheck
 
       - name: Lint
-        working-directory: aitp-control-plane
         run: npm run lint
 
       # Migrations run BEFORE any test step so unit tests that
       # accidentally touch the DB don't fail against an unmigrated schema.
       - name: Apply migrations to test database
-        working-directory: aitp-control-plane
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
         run: npm run db:migrate
 
       - name: Unit tests
-        working-directory: aitp-control-plane
         run: npm test
 
       - name: Integration tests
-        working-directory: aitp-control-plane
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
           # >= 32 chars (enforced by EnrollmentService at boot)
@@ -114,53 +76,65 @@ jobs:
         run: npm run test:integration
 
       - name: Next build (smoke test)
-        working-directory: aitp-control-plane
         env:
           # Production-required vars must be set for `next build`.
           NODE_ENV: production
           CP_AID_SEED_HEX: '0000000000000000000000000000000000000000000000000000000000000001'
-          ENROLLMENT_SECRET: ci-build-secret
+          ENROLLMENT_SECRET: ci-build-secret-min-thirty-two-characters
           API_KEYS: ci-build-key
           CORS_ORIGIN: http://localhost:3000
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
         run: npm run build
 
-  docker-build:
-    name: Docker image build (smoke)
+  docker-publish:
+    name: Build & push image to GHCR
     runs-on: ubuntu-latest
     needs: build-and-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
 
     steps:
-      - name: Checkout aitp-control-plane
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: aitp-control-plane
 
-      - name: Checkout aitp-rs (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: agentidentitytrustprotocol/aitp-rs
-          ref: ${{ env.AITP_RS_REF }}
-          path: aitp-rs
-
-      - name: Setup Rust (for NAPI binding)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build aitp-node NAPI binding for Docker context
-        working-directory: aitp-rs/bindings/aitp-node
-        run: |
-          npm install --no-save @napi-rs/cli
-          npx napi build --platform --release
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Docker build
-        # The Dockerfile expects the build context to contain both
-        # `aitp-control-plane/` and `aitp-rs/bindings/aitp-node` as siblings.
-        run: |
-          docker build \
-            --file aitp-control-plane/Dockerfile \
-            --tag aitp-control-plane:ci-${{ github.sha }} \
-            .
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # The published @agentidentitytrustprotocol/aitp package ships
+      # prebuilt binaries for both linux/amd64 (x64-gnu) and linux/arm64
+      # (arm64-gnu), so the image builds cleanly on both platforms.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

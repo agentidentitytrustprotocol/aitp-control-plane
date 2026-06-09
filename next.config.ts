@@ -1,4 +1,3 @@
-import path from 'node:path';
 import type { NextConfig } from 'next';
 
 // Gate `output: 'standalone'` behind an env var so the Docker build
@@ -12,13 +11,22 @@ const nextConfig: NextConfig = {
   ...(standalone
     ? {
         output: 'standalone' as const,
-        // The CP imports the `aitp` NAPI binding via a `file:` dep that
-        // points at a sibling repo. Setting the tracing root one
-        // directory up tells Next to include sibling-workspace files in
-        // the standalone output (and preserves the `aitp-control-plane/`
-        // prefix the Dockerfile's CMD expects:
-        //   `node aitp-control-plane/server.js`)
-        outputFileTracingRoot: path.join(__dirname, '..'),
+        // `aitp` is the published `@agentidentitytrustprotocol/aitp` NAPI
+        // loader (installed as a normal node_modules package via an npm
+        // alias). The loader `require()`s a separate per-platform binary
+        // package at runtime (e.g. `@agentidentitytrustprotocol/aitp-
+        // linux-x64-gnu`). Next's file tracing resolves the binary for
+        // the build host's platform, but we force-include the Linux
+        // packages so the standalone output always ships the native
+        // `.node` for the container — including for multi-arch images
+        // built on a different host arch. Globs that don't match on the
+        // build host (e.g. on macOS dev) are simply skipped.
+        outputFileTracingIncludes: {
+          '*': [
+            './node_modules/@agentidentitytrustprotocol/aitp-linux-x64-gnu/**',
+            './node_modules/@agentidentitytrustprotocol/aitp-linux-arm64-gnu/**',
+          ],
+        },
       }
     : {}),
 
