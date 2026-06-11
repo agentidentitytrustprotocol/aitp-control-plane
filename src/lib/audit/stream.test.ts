@@ -2,7 +2,9 @@ import type { AuditEventRecord } from './stream';
 // Pull the bus indirectly so the singleton initialises with the
 // process-wide default backlog cap; the basic semantics we test
 // (publish + replay + unsubscribe) don't depend on the cap value.
-import { eventBus } from './stream';
+// `EventBus` is imported directly so the drop-count test can use a fresh
+// instance with a deterministic, small cap.
+import { EventBus, eventBus } from './stream';
 
 function makeEvent(id: string, type = 'handshake.started'): AuditEventRecord {
   return {
@@ -45,16 +47,24 @@ describe('eventBus', () => {
     expect(recorded).toBe(1);
   });
 
-  it('exposes a monotonic dropped-count via getDroppedCount', () => {
-    // The shared singleton already has unknown prior drops; capture a
-    // baseline and assert the delta after we overflow the cap ourselves.
-    const before = eventBus.getDroppedCount();
-    // The default cap is 500 in test; publish enough to force at least one drop.
-    const overflow = 600;
-    for (let i = 0; i < overflow; i += 1) {
-      eventBus.publish(makeEvent(`drop-${i}`));
-    }
-    const after = eventBus.getDroppedCount();
-    expect(after).toBeGreaterThan(before);
+  it('counts exactly the events evicted past a known backlog cap', () => {
+    // A fresh bus with a tiny cap makes the drop count exact, unlike the
+    // shared singleton whose prior state is unknown. Cap 3, publish 10 →
+    // the first 7 are evicted as the 8th..10th arrive (10 - 3 = 7).
+    const bus = new EventBus(3);
+    for (let i = 0; i < 10; i += 1) bus.publish(makeEvent(`drop-${i}`));
+    expect(bus.getDroppedCount()).toBe(7);
+    // Backlog retains only the most recent `cap` events, in order.
+    expect(bus.getBacklog(100).map((e) => e.id)).toEqual([
+      'drop-7',
+      'drop-8',
+      'drop-9',
+    ]);
+  });
+
+  it('reports zero drops while within the cap', () => {
+    const bus = new EventBus(5);
+    for (let i = 0; i < 5; i += 1) bus.publish(makeEvent(`keep-${i}`));
+    expect(bus.getDroppedCount()).toBe(0);
   });
 });

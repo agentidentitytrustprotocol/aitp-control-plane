@@ -16,7 +16,9 @@ export interface AuditEventRecord {
 
 type Listener = (event: AuditEventRecord) => void;
 
-class EventBus {
+/** Exported for unit testing with a deterministic backlog cap; production
+ * code should use the shared `eventBus` singleton below. */
+export class EventBus {
   private listeners = new Set<Listener>();
   private backlog: AuditEventRecord[] = [];
   private readonly maxBacklog: number;

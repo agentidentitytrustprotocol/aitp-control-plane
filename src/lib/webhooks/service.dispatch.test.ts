@@ -1,5 +1,7 @@
-// Verifies the batched dispatcher only enqueues for matching active
-// webhooks and skips event types outside DELIVERABLE_EVENT_TYPES.
+// Verifies dispatchWebhooksWithList (in ./service) only enqueues for
+// matching active webhooks and skips event types outside
+// DELIVERABLE_EVENT_TYPES. (There is no separate dispatcher module; the
+// file is named for the unit under test, alongside service.test.ts.)
 
 import { jest } from '@jest/globals';
 
