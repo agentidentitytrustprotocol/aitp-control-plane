@@ -231,7 +231,7 @@ export const adminAuditLog = pgTable(
   }),
 );
 
-// ── Issued TCTs (RFC-AITP-0003) ───────────────────────────────────────
+// ── Issued TCTs (RFC-AITP-0005) ───────────────────────────────────────
 //
 // The CP observes; it does not issue TCTs. Rows here are derived from
 // `tct.issued` events reported by agents at handshake completion, so

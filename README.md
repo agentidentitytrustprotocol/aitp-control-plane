@@ -10,7 +10,7 @@ A coordination surface for AITP agents. It **observes and audits**; it does not 
 
 - **Agent registry** — agents self-enroll with a short-lived token; the CP caches their manifest and offered capabilities so peers can discover them.
 - **Audit event store** — every handshake, delegation, and revocation reported by agents is persisted and streamed live over SSE.
-- **Revocation list** — operators record revoked TCT JTIs; the CP signs and serves a periodically-refreshed revocation snapshot at `/.well-known/aitp-revocation-list` per RFC-AITP-0008.
+- **Revocation list** — operators record revoked TCT JTIs; the CP signs and serves a periodically-refreshed revocation snapshot at `/.well-known/aitp-revocation-list` per [RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation).
 - **Webhook outbox** — subscribers receive HMAC-signed deliveries for selected event types, with retries.
 - **Telemetry sink** — `POST /api/events` accepts batched run telemetry from the [aitp-playground](https://github.com/agentidentitytrustprotocol/aitp-playground) and any other AITP runner.
 
@@ -19,6 +19,8 @@ A coordination surface for AITP agents. It **observes and audits**; it does not 
 - **Not a TCT issuer.** AITP is bilateral peer-to-peer trust. Agents issue TCTs to each other in a four-message handshake, audience-bound and `cnf`-bound to the holder's Ed25519 key. A central issuer would break the protocol's threat model.
 - **Not a gateway or proxy.** Handshake traffic is agent-to-agent. The CP never sees handshake payloads.
 - **Not a UI.** No dashboard, no admin pages. Build one separately against the JSON API if you need one.
+
+> This README and [`docs/`](docs/README.md) describe the **control plane**. The protocol itself (handshake, TCTs, identity, revocation) is normatively defined by the [AITP RFCs](https://agentidentitytrustprotocol.io/spec) and implemented by [`aitp-rs`](https://agentidentitytrustprotocol.io/implementation) — these docs link to the RFCs rather than restate them.
 
 ## Quickstart
 
@@ -47,7 +49,11 @@ curl http://localhost:4000/.well-known/aitp-manifest
 
 ## Configuration
 
-All settings are environment variables. See `.env.example` for the canonical list.
+All settings are environment variables. `.env.example` is the canonical list;
+[`docs/operations.md`](docs/operations.md) is the runbook explaining how the
+rate-limit, retention, and telemetry subsystems behave.
+
+**Core**
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -57,20 +63,56 @@ All settings are environment variables. See `.env.example` for the canonical lis
 | `DATABASE_URL` | yes | `postgres://postgres:postgres@localhost:5432/aitp_control_plane` | Postgres connection string |
 | `DB_POOL_MAX` | no | `20` | Connection pool size |
 | `API_KEYS` | **prod** | empty | Comma-separated allowlist. Empty in prod returns 503 on gated routes (fail-safe). Empty in dev disables auth. |
-| `ENROLLMENT_SECRET` | yes | empty | HMAC secret for one-time enrollment tokens |
+| `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret for minting/verifying one-time enrollment tokens (callers never present it) |
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Falls back to `*` with a warning in prod if unset. |
 | `REVOCATION_LIST_TTL_SECS` | no | `3600` | TTL on the signed revocation snapshot |
+| `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
+
+**Webhooks & SSE**
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
 | `WEBHOOK_RETRY_ATTEMPTS` | no | `3` | Per-delivery retry budget |
 | `WEBHOOK_URL_ALLOWLIST` | no | empty | Comma-separated host allowlist for webhook targets. Empty = any public host (private/loopback/link-local ranges are always rejected as SSRF). Leading `.` matches subdomains. |
+| `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog replayed to each new subscriber |
+| `MAX_SSE_CONNECTIONS` | no | `500` | Concurrent `/api/events/stream` cap per process; over-limit returns `503 SSE_CAPACITY` |
+
+**Rate limiting** (in-memory, per-process — see [operations.md](docs/operations.md#rate-limiting))
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `RATE_LIMIT_ENABLED` | no | `true` | Master switch for the limiter |
+| `RATE_LIMIT_ENROLLMENT_PER_IP_MIN` | no | `5` | `/api/registry/enroll` per-IP budget |
+| `RATE_LIMIT_PUBLIC_PER_IP_MIN` | no | `60` | Public routes per-IP budget |
+| `RATE_LIMIT_API_KEY_PER_MIN` | no | `600` | Authenticated routes per-key budget |
+| `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min limits accumulate |
 | `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
 | `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |
-| `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog size |
-| `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
-| `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min rate limits accumulate |
+
+**Data retention** (periodic sweep, multi-instance safe — set any TTL to `0` to keep that table forever)
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `RETENTION_ENABLED` | no | `true` | Master switch for the retention sweep |
+| `RETENTION_INTERVAL_MS` | no | `1800000` | Sweep cadence (30 min) |
+| `RETENTION_BATCH_LIMIT` | no | `10000` | Max rows deleted per sweep |
+| `AUDIT_EVENTS_TTL_DAYS` | no | `90` | `audit_events` retention |
+| `WEBHOOK_DELIVERY_TTL_DAYS` | no | `14` | Terminal `webhook_deliveries` retention |
+| `ADMIN_AUDIT_TTL_DAYS` | no | `365` | `admin_audit_log` retention |
+| `IDEMPOTENCY_KEY_TTL_DAYS` | no | `7` | `idempotency_keys` retention |
+| `EXPIRED_AGENT_GRACE_DAYS` | no | `30` | Grace before GC'ing operator-**deregistered** agents (`expired` rows are kept) |
+
+**Telemetry (OpenTelemetry, off by default)**
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `OTEL_ENABLED` | no | `false` | Enable OTLP span export |
+| `OTEL_SERVICE_NAME` | no | `aitp-control-plane` | Service name on exported spans |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | empty | OTLP HTTP collector endpoint (`/v1/traces` appended unless `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set) |
 
 ## API surface
 
-See [`docs/api.md`](docs/api.md) for the prose reference and [`openapi.yaml`](openapi.yaml) for the machine-readable schema. High-level groups:
+See [`docs/`](docs/README.md) for the full documentation set — [`docs/api.md`](docs/api.md) (prose API reference), [`docs/events.md`](docs/events.md) (event types & projections), [`docs/data-model.md`](docs/data-model.md) (Postgres schema), and [`docs/operations.md`](docs/operations.md) (runbook) — plus [`openapi.yaml`](openapi.yaml) for the machine-readable schema. High-level groups:
 
 - Public discovery: `/api/health`, `/api/readyz`, `/api/metrics`, `/.well-known/aitp-manifest`, `/.well-known/aitp-revocation-list`
 - Registry: `/api/registry/enroll`, `/api/registry/agents`, `/api/registry/agents/:aid`, `/api/registry/agents/:aid/manifest`, `/api/registry/agents/:aid/export`
@@ -117,7 +159,7 @@ The CP **never** participates in a handshake. Agents talk to each other directly
 
 ## Integration with aitp-playground
 
-See [`docs/integration-playground.md`](docs/integration-playground.md) for the exact contract.
+See [`docs/integration-playground.md`](docs/integration-playground.md) for the exact contract, and [`docs/events.md`](docs/events.md) for the event types a runner can report (and which ones drive session/TCT projections and webhook fan-out).
 
 ## Development
 
@@ -150,7 +192,8 @@ src/
     sessions/     Handshake-session monitor (from audit events)
     webhooks/     Outbox dispatcher, HMAC signing, retry reaper
 drizzle/          SQL migrations
-docs/             API reference + integration contracts
+docs/             Published docs: API reference, events, data model, ops runbook, integration contract
+internal_docs/    Internal-only docs (deployment/CI) — NOT published to the website
 plans/            Forward-looking roadmap
 ```
 
@@ -163,8 +206,9 @@ CI builds a multi-arch container image and publishes it to GHCR
 npm package, so the image and CI are self-contained — no sibling `aitp-rs`
 checkout or Rust toolchain required.
 
-See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the full CI/CD pipeline and a
-step-by-step Railway deployment guide.
+The full CI/CD pipeline and a step-by-step Railway deployment guide live in
+[`internal_docs/`](https://github.com/agentidentitytrustprotocol/aitp-control-plane/tree/main/internal_docs)
+— operational detail kept out of the published docs site.
 
 ## License
 
