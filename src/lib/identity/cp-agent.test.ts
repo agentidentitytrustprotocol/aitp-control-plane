@@ -16,4 +16,21 @@ describe('cp identity', () => {
     expect(parsed.manifest.aid).toMatch(/^aid:pubkey:/);
     expect(parsed.manifest.aid).toBe(mod.getCpAgent().aid);
   });
+
+  it('memoizes the identity so repeated lookups return the same instance', async () => {
+    const mod = await import('./cp-agent');
+    // Same object reference and same manifest bytes across calls — proves
+    // the globalThis singleton is reused rather than regenerated per call
+    // (a fresh ephemeral key each call would change the aid).
+    expect(mod.getCpAgent()).toBe(mod.getCpAgent());
+    expect(mod.getCpManifestJson()).toBe(mod.getCpManifestJson());
+  });
+
+  it('derives a deterministic identity from a fixed seed', async () => {
+    const { AitpAgent } = await import('aitp');
+    // Two agents from the same seed must yield the same AID — the property
+    // CP_AID_SEED_HEX relies on for a stable production identity.
+    const seed = Buffer.alloc(32, 7);
+    expect(AitpAgent.fromSeed(seed).aid).toBe(AitpAgent.fromSeed(seed).aid);
+  });
 });

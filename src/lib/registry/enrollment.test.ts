@@ -51,6 +51,33 @@ describe('EnrollmentService', () => {
     expect(() => service.validateToken('no-dot-here', 'aid:x')).toThrow();
   });
 
+  it('rejects a token past its expiry', () => {
+    const manifest = buildManifest();
+    const { token, aid, expiresIn } = service.verifyAndIssueToken(manifest);
+    // Jump the clock past the token's lifetime; the signature stays valid,
+    // so this isolates the expiry check specifically.
+    const realNow = Date.now();
+    const spy = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(realNow + (expiresIn + 60) * 1000);
+    try {
+      expect(() => service.validateToken(token, aid)).toThrow(/expired/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rejects a manifest whose TTL falls inside the 5-minute registration guard', () => {
+    const agent = AitpAgent.generate();
+    const shortLived = agent.buildManifest({
+      displayName: 'short-ttl-agent',
+      handshakeEndpoint: 'https://agent.example.com/handshake',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 60, // expires before the 5-minute guard window
+    });
+    expect(() => service.verifyAndIssueToken(shortLived)).toThrow(/longer TTL/);
+  });
+
   it('refuses to construct with a sub-32-char secret', () => {
     expect(() => new EnrollmentService('too-short')).toThrow(/at least 32/);
   });
