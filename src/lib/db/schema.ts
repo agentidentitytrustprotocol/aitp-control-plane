@@ -240,6 +240,11 @@ export const adminAuditLog = pgTable(
 //
 // `revoked` is mirrored from `revocation_entries` whenever a JTI is
 // added there; both tables stay queryable independently.
+//
+// v0.2 (JWS TCT migration): the projected fields are unchanged — events
+// now carry decoded JWT claims (`iss/sub/aud/iat/exp`, `cnf.jkt`) which
+// map onto the same columns. No schema migration: the columns are
+// format-agnostic opaque scalars (see `binding_cnf` below).
 
 export const issuedTcts = pgTable(
   'issued_tcts',
@@ -249,6 +254,10 @@ export const issuedTcts = pgTable(
     subjectAid: varchar('subject_aid', { length: 512 }).notNull(),
     audienceAid: varchar('audience_aid', { length: 512 }).notNull(),
     grants: jsonb('grants').$type<string[]>().notNull().default([]),
+    // Key-binding confirmation, an opaque scalar. v0.1 stored the
+    // subject's raw pubkey (from `binding.cnf`); v0.2 stores the RFC 7638
+    // JWK thumbprint (`cnf.jkt`). Same column, same width — only the
+    // content semantics changed, so no migration is required.
     bindingCnf: varchar('binding_cnf', { length: 128 }),
     issuedAt: timestamp('issued_at', { withTimezone: true, mode: 'string' }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),

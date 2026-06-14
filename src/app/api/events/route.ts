@@ -64,6 +64,10 @@ function normalize(raw: Record<string, unknown>): AuditEventRecord {
       playground.run_id,
     ),
     grants: pickStringArray(raw.grants),
+    // Pass the payload through verbatim. v0.2 TCT/delegation events nest
+    // the artifact as `payload.tct = { token, claims }` (JWS migration);
+    // that structure is preserved untouched here and decomposed downstream
+    // by the tct-monitor — the ingestion layer never inspects token shape.
     payload:
       typeof raw.payload === 'object' && raw.payload !== null
         ? payload
