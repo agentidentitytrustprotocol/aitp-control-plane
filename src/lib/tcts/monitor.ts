@@ -9,6 +9,15 @@
  * skipped, since events come from heterogeneous agents on different
  * SDK versions. The CP's job is to record what's reported, not to
  * police it.
+ *
+ * v0.2 (JWS TCT migration): TCTs and delegations are now compact-JWS
+ * tokens. The telemetry contract carries the *decoded claims* alongside
+ * the opaque token — `payload.tct = { token, claims }` — so the CP keeps
+ * ingesting decomposed fields without ever JOSE-parsing a token it does
+ * not verify. Claims use JWT names (`iss/sub/aud/iat/exp`, `cnf.jkt`);
+ * the parsers below accept those alongside the v0.1 names so a staged
+ * rollout (mixed SDK versions reporting) projects cleanly. The opaque
+ * `token` is intentionally discarded — `jti` is all revocation needs.
  */
 
 import { and, eq, sql } from 'drizzle-orm';
@@ -28,21 +37,151 @@ function readString(o: Record<string, unknown>, ...keys: string[]): string | und
   return undefined;
 }
 
-function readStringArray(o: Record<string, unknown>, key: string): string[] {
-  const v = o[key];
-  if (Array.isArray(v) && v.every((s) => typeof s === 'string')) return v as string[];
+function readStringArray(o: Record<string, unknown>, ...keys: string[]): string[] {
+  for (const k of keys) {
+    const v = o[k];
+    if (Array.isArray(v) && v.every((s) => typeof s === 'string')) return v as string[];
+  }
   return [];
 }
 
-function readNumber(o: Record<string, unknown>, key: string): number | undefined {
-  const v = o[key];
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
+function readNumber(o: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
   return undefined;
 }
 
 function epochToIso(secs: number | undefined): string | undefined {
   if (secs === undefined) return undefined;
   return new Date(secs * 1000).toISOString();
+}
+
+/**
+ * The key-binding confirmation, as stored in `issued_tcts.binding_cnf`.
+ *
+ * - v0.2: `cnf` is an object `{ jkt }` (RFC 7638 JWK thumbprint of the
+ *   subject's key). We store the thumbprint scalar.
+ * - v0.1: the binding lived under `binding.cnf` as a raw pubkey string.
+ *
+ * Both reduce to an opaque scalar in the same column — no migration is
+ * needed, the *content* just changes from a pubkey to a thumbprint.
+ */
+function readCnf(claims: Record<string, unknown>): string | undefined {
+  const cnf = claims.cnf;
+  if (typeof cnf === 'object' && cnf !== null) {
+    const jkt = (cnf as Record<string, unknown>).jkt;
+    if (typeof jkt === 'string' && jkt.length > 0) return jkt;
+  }
+  // A flattened or legacy top-level scalar `cnf`.
+  if (typeof cnf === 'string' && cnf.length > 0) return cnf;
+  // v0.1: `binding.cnf`.
+  const binding = claims.binding;
+  if (typeof binding === 'object' && binding !== null) {
+    const bc = (binding as Record<string, unknown>).cnf;
+    if (typeof bc === 'string' && bc.length > 0) return bc;
+  }
+  return undefined;
+}
+
+/**
+ * Unwrap a telemetry artifact to its claims bag. v0.2 wraps the token as
+ * `{ token, claims }`; v0.1 emitted a flat object. The opaque compact
+ * token (if present) is dropped — the CP records claims, never the JWS.
+ */
+function claimsOf(raw: Record<string, unknown>): Record<string, unknown> {
+  const claims = raw.claims;
+  if (typeof claims === 'object' && claims !== null) {
+    return claims as Record<string, unknown>;
+  }
+  return raw;
+}
+
+/** Field projection of one TCT, ready for `issued_tcts`. */
+export interface ParsedTct {
+  jti: string;
+  issuerAid: string;
+  subjectAid: string;
+  audienceAid: string;
+  grants: string[];
+  bindingCnf: string | null;
+  issuedAt: string;
+  expiresAt: string | null;
+}
+
+/**
+ * Project a single reported TCT (v0.1 flat object or v0.2
+ * `{ token, claims }`) into column values, or `null` if it lacks the
+ * minimum identifying fields (`jti`, `iss`, `sub`). Pure — no DB.
+ */
+export function parseTct(raw: unknown, fallbackTs: string): ParsedTct | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const claims = claimsOf(raw as Record<string, unknown>);
+
+  const jti = readString(claims, 'jti');
+  const issuer = readString(claims, 'iss', 'issuer', 'issuer_aid', 'issuerAid');
+  const subject = readString(claims, 'sub', 'subject', 'subject_aid', 'subjectAid');
+  const audience = readString(claims, 'aud', 'audience', 'audience_aid', 'audienceAid');
+  if (!jti || !UUID_RE.test(jti) || !issuer || !subject) return null;
+
+  return {
+    jti,
+    issuerAid: issuer,
+    subjectAid: subject,
+    audienceAid: audience ?? subject,
+    grants: readStringArray(claims, 'grants'),
+    bindingCnf: readCnf(claims) ?? null,
+    issuedAt: epochToIso(readNumber(claims, 'iat', 'issued_at')) ?? fallbackTs,
+    expiresAt: epochToIso(readNumber(claims, 'exp', 'expires_at')) ?? null,
+  };
+}
+
+/** Field projection of one delegation, ready for `delegations`. */
+export interface ParsedDelegation {
+  jti: string;
+  parentJti: string;
+  delegatorAid: string;
+  delegateeAid: string;
+  scope: string[];
+  issuedAt: string;
+  expiresAt: string | null;
+}
+
+/**
+ * Project a `delegation.issued` payload into column values, or `null`
+ * if it lacks `jti`/`parent` identifiers. v0.2 may wrap the delegation
+ * claims under `payload.tct`/`payload.delegation` (`{ token, claims }`)
+ * or carry them flat. The parent reference is the grant voucher's
+ * `src_jti` claim in v0.2 (replacing v0.1's `parent_jti`); delegator and
+ * delegatee fall back to the `iss`/`sub` JWT claims. Pure — no DB.
+ */
+export function parseDelegation(
+  payload: Record<string, unknown>,
+  fallbackTs: string,
+): ParsedDelegation | null {
+  const wrapper = payload.tct ?? payload.delegation;
+  const claims =
+    wrapper && typeof wrapper === 'object'
+      ? claimsOf(wrapper as Record<string, unknown>)
+      : claimsOf(payload);
+
+  const jti = readString(claims, 'jti', 'child_jti');
+  const parentJti = readString(claims, 'src_jti', 'parent_jti', 'parentJti');
+  const delegator = readString(claims, 'delegator', 'delegator_aid', 'iss');
+  const delegatee = readString(claims, 'delegatee', 'delegatee_aid', 'sub');
+  if (!jti || !UUID_RE.test(jti) || !parentJti || !UUID_RE.test(parentJti)) return null;
+  if (!delegator || !delegatee) return null;
+
+  return {
+    jti,
+    parentJti,
+    delegatorAid: delegator,
+    delegateeAid: delegatee,
+    scope: readStringArray(claims, 'scope', 'grants'),
+    issuedAt: epochToIso(readNumber(claims, 'iat', 'issued_at')) ?? fallbackTs,
+    expiresAt: epochToIso(readNumber(claims, 'exp', 'expires_at')) ?? null,
+  };
 }
 
 class TctMonitorService {
@@ -73,7 +212,8 @@ class TctMonitorService {
 
   /** Both `tct.issued` (singular) and `handshake.complete` (array of
    * two TCTs, one per direction) are accepted. The payload may carry
-   * either a single TCT under `tct` or an array under `tcts`. */
+   * either a single TCT under `tct` or an array under `tcts`; each entry
+   * is a v0.1 flat object or a v0.2 `{ token, claims }` envelope. */
   private async recordIssuedTcts(event: AuditEventRecord): Promise<void> {
     const payload = event.payload;
     const tctList: unknown[] = Array.isArray(payload.tcts)
@@ -84,33 +224,13 @@ class TctMonitorService {
     if (tctList.length === 0) return;
 
     for (const raw of tctList) {
-      if (typeof raw !== 'object' || raw === null) continue;
-      const t = raw as Record<string, unknown>;
-      const jti = readString(t, 'jti');
-      const issuer = readString(t, 'issuer', 'issuer_aid', 'issuerAid');
-      const subject = readString(t, 'subject', 'subject_aid', 'subjectAid');
-      const audience = readString(t, 'audience', 'audience_aid', 'audienceAid');
-      if (!jti || !UUID_RE.test(jti) || !issuer || !subject) continue;
-
-      const grants = readStringArray(t, 'grants');
-      const issuedAt = epochToIso(readNumber(t, 'issued_at')) ?? event.ts;
-      const expiresAt = epochToIso(readNumber(t, 'expires_at'));
-      const cnf =
-        typeof (t.binding as { cnf?: unknown })?.cnf === 'string'
-          ? ((t.binding as { cnf: string }).cnf)
-          : readString(t, 'cnf');
+      const tct = parseTct(raw, event.ts);
+      if (!tct) continue;
 
       await db
         .insert(issuedTcts)
         .values({
-          jti,
-          issuerAid: issuer,
-          subjectAid: subject,
-          audienceAid: audience ?? subject,
-          grants,
-          bindingCnf: cnf ?? null,
-          issuedAt,
-          expiresAt: expiresAt ?? null,
+          ...tct,
           sessionId: event.sessionId ?? null,
         })
         .onConflictDoNothing();
@@ -149,29 +269,10 @@ class TctMonitorService {
   }
 
   private async recordDelegation(event: AuditEventRecord): Promise<void> {
-    const p = event.payload;
-    const jti = readString(p, 'jti', 'child_jti');
-    const parentJti = readString(p, 'parent_jti', 'parentJti');
-    const delegator = readString(p, 'delegator', 'delegator_aid');
-    const delegatee = readString(p, 'delegatee', 'delegatee_aid');
-    if (!jti || !UUID_RE.test(jti) || !parentJti || !UUID_RE.test(parentJti)) return;
-    if (!delegator || !delegatee) return;
-    const scope = readStringArray(p, 'scope');
-    const issuedAt = epochToIso(readNumber(p, 'issued_at')) ?? event.ts;
-    const expiresAt = epochToIso(readNumber(p, 'expires_at'));
+    const delegation = parseDelegation(event.payload, event.ts);
+    if (!delegation) return;
 
-    await db
-      .insert(delegations)
-      .values({
-        jti,
-        parentJti,
-        delegatorAid: delegator,
-        delegateeAid: delegatee,
-        scope,
-        issuedAt,
-        expiresAt: expiresAt ?? null,
-      })
-      .onConflictDoNothing();
+    await db.insert(delegations).values(delegation).onConflictDoNothing();
   }
 
   private async recordDelegationRevocation(event: AuditEventRecord): Promise<void> {

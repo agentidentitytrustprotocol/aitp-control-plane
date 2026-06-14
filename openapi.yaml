@@ -210,6 +210,12 @@ components:
 
     IssuedTct:
       type: object
+      description: >-
+        A TCT observed by the control plane. Fields are the decomposed,
+        format-agnostic projection of a reported `tct.issued` event. As of
+        aitp/0.2 (JWS TCT migration) the source claims use JWT names —
+        `issuer`/`subject`/`audience` derive from the `iss`/`sub`/`aud`
+        claims — but the response shape here is unchanged.
       required: [jti, issuer, subject, audience, grants, issuedAt, revoked]
       properties:
         jti: { type: string, format: uuid }
@@ -219,7 +225,13 @@ components:
         grants:
           type: array
           items: { type: string }
-        bindingCnf: { type: string, nullable: true }
+        bindingCnf:
+          type: string
+          nullable: true
+          description: >-
+            Key-binding confirmation scalar. In aitp/0.2 this is the
+            subject key's RFC 7638 JWK thumbprint (the `cnf.jkt` claim);
+            in aitp/0.1 it was the subject's raw public key (`binding.cnf`).
         issuedAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time, nullable: true }
         sessionId: { type: string, nullable: true }
@@ -228,6 +240,11 @@ components:
 
     Delegation:
       type: object
+      description: >-
+        A parent → child delegation observed by the control plane. As of
+        aitp/0.2, `parentJti` is sourced from the grant voucher's `src_jti`
+        claim (replacing aitp/0.1's `parent_jti`); the response shape is
+        unchanged.
       required: [jti, parentJti, delegator, delegatee, scope, issuedAt, revoked]
       properties:
         jti: { type: string, format: uuid }

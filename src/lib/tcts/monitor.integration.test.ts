@@ -137,6 +137,107 @@ describe('integration: tctMonitor revocation cascade', () => {
     }
   });
 
+  it('tct.issued (v0.2 { token, claims }): projects decoded claims into issued_tcts', async () => {
+    const jti = randomUUID();
+    try {
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'tct.issued',
+        ts: new Date().toISOString(),
+        sessionId: 'sess-v2',
+        payload: {
+          tct: {
+            token: 'eyJhbGciOiJFZERTQSIsInR5cCI6ImFpdHAtdGN0K2p3dCJ9.eyJ9.sig',
+            claims: {
+              ver: 'aitp/0.2',
+              jti,
+              iss: 'aid:test:issuer',
+              sub: 'aid:test:subject',
+              aud: 'aid:test:subject',
+              grants: ['demo.echo'],
+              iat: 1_750_000_000,
+              exp: 1_750_003_600,
+              cnf: { jkt: 'thumbprint-abc' },
+            },
+          },
+        },
+      });
+
+      const res = await db.execute(
+        sql`select issuer_aid, subject_aid, audience_aid, binding_cnf, session_id
+            from issued_tcts where jti = ${jti}`,
+      );
+      const rows = (res as unknown as {
+        rows: {
+          issuer_aid: string;
+          subject_aid: string;
+          audience_aid: string;
+          binding_cnf: string | null;
+          session_id: string | null;
+        }[];
+      }).rows;
+      expect(rows[0]).toMatchObject({
+        issuer_aid: 'aid:test:issuer',
+        subject_aid: 'aid:test:subject',
+        audience_aid: 'aid:test:subject',
+        binding_cnf: 'thumbprint-abc',
+        session_id: 'sess-v2',
+      });
+    } finally {
+      await db.delete(issuedTcts).where(sql`${issuedTcts.jti} = ${jti}`);
+    }
+  });
+
+  it('delegation.issued (v0.2): parent_jti sourced from src_jti claim', async () => {
+    const parent = randomUUID();
+    const child = randomUUID();
+    const now = new Date().toISOString();
+    try {
+      await db.insert(issuedTcts).values({
+        jti: parent,
+        issuerAid: 'aid:test:issuer',
+        subjectAid: 'aid:test:delegator',
+        audienceAid: 'aid:test:delegator',
+        grants: ['demo.echo'],
+        issuedAt: now,
+      });
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'delegation.issued',
+        ts: now,
+        payload: {
+          tct: {
+            token: 'eyJ...del',
+            claims: {
+              jti: child,
+              src_jti: parent,
+              iss: 'aid:test:delegator',
+              sub: 'aid:test:delegatee',
+              aud: 'aid:test:issuer',
+              scope: ['demo.echo'],
+              exp: 1_750_003_600,
+            },
+          },
+        },
+      });
+
+      const res = await db.execute(
+        sql`select parent_jti, delegator_aid, delegatee_aid from delegations where jti = ${child}`,
+      );
+      const rows = (res as unknown as {
+        rows: { parent_jti: string; delegator_aid: string; delegatee_aid: string }[];
+      }).rows;
+      expect(rows[0]).toMatchObject({
+        parent_jti: parent,
+        delegator_aid: 'aid:test:delegator',
+        delegatee_aid: 'aid:test:delegatee',
+      });
+    } finally {
+      await db.delete(delegations).where(sql`${delegations.jti} = ${child}`);
+      await db.delete(issuedTcts).where(sql`${issuedTcts.jti} = ${parent}`);
+    }
+  });
+
   it('rejects payloads with a malformed jti without touching the DB', async () => {
     const ids = await seedChain();
     try {
