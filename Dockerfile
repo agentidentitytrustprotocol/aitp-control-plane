@@ -36,6 +36,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=4000
+# The Next.js standalone server binds to process.env.HOSTNAME. In a
+# container Docker sets HOSTNAME to the container ID, which makes the
+# server listen on http://<container-id>:PORT instead of all interfaces —
+# so an external proxy (Railway, etc.) can't reach it and returns 502.
+# Pin it to 0.0.0.0 so it listens on every interface.
+ENV HOSTNAME=0.0.0.0
 
 RUN groupadd -r app && useradd -r -g app app
 # The standalone server bundles its own minimal node_modules (including
