@@ -32,8 +32,10 @@ signing key, not a config toggle.
   logs a one-time warning.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
   enrollment tokens. Required. Callers never see it.
-- **`CORS_ORIGIN`** — allowed browser origin. Required in prod; falls back to
-  `*` with a warning if unset.
+- **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
+  to a single origin, e.g. `https://console.example.com`. Applied per-request at
+  runtime by the middleware, so it can be changed via the deploy environment
+  without rebuilding the image. Defaults to `http://localhost:3000` if unset.
 
 See [`api.md`](api.md#authentication) for the full auth matrix.
 

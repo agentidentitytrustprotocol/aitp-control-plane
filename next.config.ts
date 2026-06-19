@@ -110,38 +110,11 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-
-  async headers() {
-    // CORS_ORIGIN is required in production; we log a one-time warning
-    // when missing rather than blocking startup, so misconfigured
-    // deploys still serve traffic instead of erroring at boot.
-    const corsOrigin = process.env.CORS_ORIGIN ?? '*';
-    if (!process.env.CORS_ORIGIN && process.env.NODE_ENV === 'production') {
-      console.warn(
-        '[aitp-control-plane] CORS_ORIGIN not set in production — defaulting to "*". Set CORS_ORIGIN to the UI plane origin.',
-      );
-    }
-    return [
-      {
-        source: '/api/:path*',
-        headers: [
-          { key: 'Access-Control-Allow-Origin', value: corsOrigin },
-          {
-            key: 'Access-Control-Allow-Methods',
-            value: 'GET,POST,PATCH,DELETE,OPTIONS',
-          },
-          {
-            key: 'Access-Control-Allow-Headers',
-            value: 'authorization,content-type,x-request-id,x-aitp-namespace',
-          },
-          {
-            key: 'Access-Control-Expose-Headers',
-            value: 'x-request-id',
-          },
-        ],
-      },
-    ];
-  },
+  // NOTE: CORS headers are intentionally NOT set here. Next evaluates
+  // `headers()` at BUILD time and freezes the result into
+  // routes-manifest.json, so CORS_ORIGIN would be baked into the image
+  // (defeating runtime config on Railway/Docker). CORS is instead applied
+  // per-request in src/middleware.ts, which reads CORS_ORIGIN at runtime.
 };
 
 export default nextConfig;

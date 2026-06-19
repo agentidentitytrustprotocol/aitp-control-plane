@@ -48,6 +48,24 @@ const RATE_LIMIT_EXEMPT_PATHS = new Set<string>([
 // Configurable via RATE_LIMIT_WINDOW_MS; default 60s matches the per-min limits.
 const WINDOW_MS = appConfig.rateLimitWindowMs;
 
+// CORS is applied here (runtime) rather than in next.config.ts `headers()`,
+// which Next bakes at build time — that would freeze CORS_ORIGIN into the
+// Docker image. Reading appConfig.corsOrigin here means CORS_ORIGIN is
+// honored from the runtime environment (e.g. Railway service vars).
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': appConfig.corsOrigin,
+  'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers':
+    'authorization,content-type,x-request-id,x-aitp-namespace',
+  'Access-Control-Expose-Headers': 'x-request-id',
+  Vary: 'Origin',
+};
+
+function applyCors(response: NextResponse): NextResponse {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) response.headers.set(k, v);
+  return response;
+}
+
 function newRequestId(): string {
   return `cp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -96,7 +114,7 @@ function passThrough(request: NextRequest): NextResponse {
   forwarded.set('x-request-id', requestId);
   const response = NextResponse.next({ request: { headers: forwarded } });
   response.headers.set('x-request-id', requestId);
-  return response;
+  return applyCors(response);
 }
 
 function deny(
@@ -111,7 +129,7 @@ function deny(
   if (extraHeaders) {
     for (const [k, v] of Object.entries(extraHeaders)) response.headers.set(k, v);
   }
-  return response;
+  return applyCors(response);
 }
 
 interface RateLimitChoice {
@@ -159,7 +177,14 @@ export function middleware(request: NextRequest) {
   const { method } = request;
 
   if (!pathname.startsWith('/api/')) return NextResponse.next();
-  if (method === 'OPTIONS') return passThrough(request);
+  // CORS preflight: answer directly with the CORS headers and a 204 so the
+  // browser proceeds to the real request. Never reaches a route handler.
+  if (method === 'OPTIONS') {
+    const requestId = resolveRequestId(request);
+    const response = new NextResponse(null, { status: 204 });
+    response.headers.set('x-request-id', requestId);
+    return applyCors(response);
+  }
 
   const isPublic = isPublicRequest(pathname, method);
 

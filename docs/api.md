@@ -15,7 +15,7 @@ spec rather than restate it.
 
 - **Content type:** `application/json` on POST/PATCH.
 - **Request ID:** Every response carries `x-request-id`. Clients may pre-set the header; the CP echoes it.
-- **CORS:** `Access-Control-Allow-Origin` is set to `CORS_ORIGIN` (defaults to `http://localhost:3000`; falls back to `*` with a warning in production if unset).
+- **CORS:** `Access-Control-Allow-Origin` is set to `CORS_ORIGIN` (defaults to `http://localhost:3000`). Applied per-request by the middleware, so it reads from the runtime environment — set it to the UI console's origin. A single origin is supported.
 - **Filter key casing:** List filters are accepted in **both** camelCase and snake_case where noted (e.g. `runId` or `run_id`). The playground emits snake_case; UI clients tend to use camelCase. Both resolve to the same column.
 - **Error shape:**
   ```json

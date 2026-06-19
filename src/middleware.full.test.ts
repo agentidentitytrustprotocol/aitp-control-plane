@@ -15,6 +15,7 @@ interface MockConfig {
   rateLimitEnrollPerIpMin: number;
   rateLimitPublicPerIpMin: number;
   rateLimitApiKeyMin: number;
+  corsOrigin: string;
 }
 
 const DEFAULTS: MockConfig = {
@@ -27,6 +28,7 @@ const DEFAULTS: MockConfig = {
   rateLimitEnrollPerIpMin: 5,
   rateLimitPublicPerIpMin: 60,
   rateLimitApiKeyMin: 600,
+  corsOrigin: 'https://console.example.com',
 };
 
 type Decision = {
@@ -90,11 +92,23 @@ describe('middleware — routing & request id', () => {
     expect(res.headers.get('x-request-id')).toBe('trace-abc');
   });
 
-  it('passes OPTIONS preflight through without auth or rate limiting', () => {
+  it('answers OPTIONS preflight with 204 + CORS headers, no auth or rate limiting', () => {
     const { middleware, check } = load({ apiKeys: ['k1'] });
     const res = middleware(req('/api/sessions', { method: 'OPTIONS' }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://console.example.com',
+    );
+    expect(res.headers.get('access-control-allow-methods')).toContain('POST');
     expect(check).not.toHaveBeenCalled();
+  });
+
+  it('stamps the runtime CORS origin on passed-through API responses', () => {
+    const { middleware } = load();
+    const res = middleware(req('/api/health'));
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://console.example.com',
+    );
   });
 });
 
