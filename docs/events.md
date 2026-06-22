@@ -67,7 +67,7 @@ Handled by the TCT monitor; drives the `issuedTcts` and `delegations` tables and
 | `tct.issued` | Project a row into `issuedTcts` | `payload.tcts[]` or `payload.tct` — each with `jti`, `issuer_aid`, `subject_aid`, `audience_aid`, `grants`, `issued_at`, `expires_at`, `binding.cnf` |
 | `handshake.complete` | Same projection, for TCTs carried on the completion event | as above, from `payload` |
 | `tct.revoked` | Mark the TCT revoked; cascade-revoke descendant delegations | `payload.jti`, `payload.reason?` |
-| `delegation.issued` | Project a row into `delegations` | `payload.jti` (or `child_jti`), `parent_jti`, `delegator_aid`, `delegatee_aid`, `scope`, `issued_at`, `expires_at` |
+| `delegation.issued` | Project a row into `delegations` | `payload.jti` (or `child_jti`), `parent_jti`, `delegator_aid`, `delegatee_aid`, `scope`, `issued_at`, `expires_at`. For an SDK v0.2 single-hop token (`payload.tct = { token, claims }`) these are derived: `parent_jti` from the embedded grant **voucher**'s `src_jti` claim, `delegator`/`delegatee` from `iss`/`sub`, and — since a single-hop token carries no protocol `jti` — `jti` is a deterministic synthetic UUIDv5 over the opaque token (stable + idempotent). |
 | `delegation.revoked` | Mark the delegation revoked (`reason=explicit`); cascade to descendants | `payload.jti` |
 
 ### CP-emitted events

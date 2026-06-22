@@ -20,6 +20,7 @@
  * `token` is intentionally discarded — `jti` is all revocation needs.
  */
 
+import { createHash } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { delegations, issuedTcts } from '../db/schema';
@@ -98,6 +99,69 @@ function claimsOf(raw: Record<string, unknown>): Record<string, unknown> {
   return raw;
 }
 
+/**
+ * base64url-decode the payload segment of a compact JWS and parse its
+ * claims. The CP is a trustless observer — it never verifies the
+ * signature, it only reads the claims a peer reported. Returns `null`
+ * for anything that is not a decodable compact-JWS payload.
+ */
+function decodeJwsClaims(jws: unknown): Record<string, unknown> | null {
+  if (typeof jws !== 'string') return null;
+  const seg = jws.split('.')[1];
+  if (!seg) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(seg, 'base64url').toString('utf8'));
+    return typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The grant voucher embedded in a delegation's claims, as a compact-JWS
+ * string. Single-hop tokens carry it directly as `claims.voucher`;
+ * multi-hop (RFC-AITP-0011) chains carry per-hop JWS under `claims.chain`,
+ * and the outer hop's voucher is the first chain entry's `voucher` claim.
+ * Returns `undefined` when no voucher is present.
+ */
+function embeddedVoucher(claims: Record<string, unknown>): string | undefined {
+  if (typeof claims.voucher === 'string') return claims.voucher;
+  const chain = claims.chain;
+  if (Array.isArray(chain) && chain.length > 0) {
+    const hop = decodeJwsClaims(chain[0]);
+    if (hop && typeof hop.voucher === 'string') return hop.voucher;
+  }
+  return undefined;
+}
+
+/** The opaque compact-JWS token carried alongside claims in a v0.2
+ * `{ token, claims }` wrapper, or `undefined` for a flat/legacy shape. */
+function wrapperToken(wrapper: unknown): string | undefined {
+  if (typeof wrapper === 'object' && wrapper !== null) {
+    const t = (wrapper as Record<string, unknown>).token;
+    if (typeof t === 'string' && t.length > 0) return t;
+  }
+  return undefined;
+}
+
+/**
+ * Deterministic RFC-4122 v5 UUID over a delegation token. SDK v0.2
+ * single-hop delegation tokens carry no protocol `jti` (per
+ * `aitp-delegation`, `jti` is REQUIRED only for multi-hop chains), but the
+ * projection row still needs a stable, unique primary key. Hashing the
+ * exact token bytes makes the jti idempotent: re-ingesting the same event
+ * yields the same jti, so `onConflictDoNothing` continues to dedupe.
+ */
+function syntheticDelegationJti(token: string): string {
+  const b = createHash('sha1').update(`aitp-delegation:${token}`).digest().subarray(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50; // version 5
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC-4122 variant
+  const x = b.toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
+}
+
 /** Field projection of one TCT, ready for `issued_tcts`. */
 export interface ParsedTct {
   jti: string;
@@ -152,9 +216,23 @@ export interface ParsedDelegation {
  * Project a `delegation.issued` payload into column values, or `null`
  * if it lacks `jti`/`parent` identifiers. v0.2 may wrap the delegation
  * claims under `payload.tct`/`payload.delegation` (`{ token, claims }`)
- * or carry them flat. The parent reference is the grant voucher's
- * `src_jti` claim in v0.2 (replacing v0.1's `parent_jti`); delegator and
- * delegatee fall back to the `iss`/`sub` JWT claims. Pure — no DB.
+ * or carry them flat. Pure — no DB.
+ *
+ * The shape this must handle is the real SDK v0.2 **single-hop** token,
+ * whose claims are `{ aud, cnf, exp, iss, scope, sub, ver, voucher }`:
+ *
+ * - **parent jti** — resolved in order: an explicit event field
+ *   (`payload.parent_jti`/`parentJti`), then outer claims
+ *   (`src_jti`/`parent_jti` — v0.1 and future-flat), then the embedded
+ *   grant **voucher**'s `src_jti` claim. Single-hop tokens carry the
+ *   originating TCT's jti *only* inside the voucher (a nested compact
+ *   JWS), so the CP decodes the voucher to read it.
+ * - **jti** — resolved in order: an explicit event field
+ *   (`payload.jti`/`child_jti`), then outer claims `jti` (the multi-hop
+ *   per-hop handle), then a deterministic synthetic UUIDv5 over the
+ *   opaque delegation token. Single-hop tokens carry no protocol `jti`,
+ *   yet the row still needs a stable, idempotent primary key.
+ * - **delegator/delegatee** fall back to the `iss`/`sub` JWT claims.
  */
 export function parseDelegation(
   payload: Record<string, unknown>,
@@ -166,10 +244,28 @@ export function parseDelegation(
       ? claimsOf(wrapper as Record<string, unknown>)
       : claimsOf(payload);
 
-  const jti = readString(claims, 'jti', 'child_jti');
-  const parentJti = readString(claims, 'src_jti', 'parent_jti', 'parentJti');
-  const delegator = readString(claims, 'delegator', 'delegator_aid', 'iss');
-  const delegatee = readString(claims, 'delegatee', 'delegatee_aid', 'sub');
+  const delegator =
+    readString(payload, 'delegator_aid', 'delegator') ??
+    readString(claims, 'delegator', 'delegator_aid', 'iss');
+  const delegatee =
+    readString(payload, 'delegatee_aid', 'delegatee') ??
+    readString(claims, 'delegatee', 'delegatee_aid', 'sub');
+
+  let parentJti =
+    readString(payload, 'parent_jti', 'parentJti', 'src_jti') ??
+    readString(claims, 'src_jti', 'parent_jti', 'parentJti');
+  if (!parentJti) {
+    const voucherClaims = decodeJwsClaims(embeddedVoucher(claims));
+    if (voucherClaims) parentJti = readString(voucherClaims, 'src_jti', 'parent_jti');
+  }
+
+  let jti =
+    readString(payload, 'jti', 'child_jti') ?? readString(claims, 'jti', 'child_jti');
+  if (!jti) {
+    const token = wrapperToken(wrapper);
+    if (token) jti = syntheticDelegationJti(token);
+  }
+
   if (!jti || !UUID_RE.test(jti) || !parentJti || !UUID_RE.test(parentJti)) return null;
   if (!delegator || !delegatee) return null;
 
