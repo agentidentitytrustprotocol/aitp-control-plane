@@ -238,6 +238,89 @@ describe('integration: tctMonitor revocation cascade', () => {
     }
   });
 
+  it('delegation.issued (real single-hop): parent from voucher.src_jti, synthetic jti written', async () => {
+    // Reproduces the projection bug: the real SDK single-hop token has no
+    // top-level jti and no top-level src_jti — the parent TCT jti lives
+    // only inside the embedded grant voucher. A row must still be written.
+    const parent = randomUUID();
+    const now = new Date().toISOString();
+    const voucher = (() => {
+      const header = Buffer.from(JSON.stringify({ alg: 'EdDSA' })).toString('base64url');
+      const body = Buffer.from(
+        JSON.stringify({ src_jti: parent, iss: 'aid:test:grantor', grants: ['demo.echo'] }),
+      ).toString('base64url');
+      return `${header}.${body}.sig`;
+    })();
+    const token = 'eyJhbGciOiJFZERTQSJ9.ZGVsZWdhdGlvbg.sig';
+    try {
+      await db.insert(issuedTcts).values({
+        jti: parent,
+        issuerAid: 'aid:test:grantor',
+        subjectAid: 'aid:test:delegator',
+        audienceAid: 'aid:test:delegator',
+        grants: ['demo.echo'],
+        issuedAt: now,
+      });
+      const event: AuditEventRecord = {
+        id: randomUUID(),
+        type: 'delegation.issued',
+        ts: now,
+        payload: {
+          tct: {
+            token,
+            claims: {
+              ver: 'aitp/0.2',
+              iss: 'aid:test:delegator',
+              sub: 'aid:test:delegatee',
+              aud: 'aid:test:grantor',
+              scope: ['demo.echo'],
+              exp: 1_750_003_600,
+              cnf: { jkt: 'thumb' },
+              voucher,
+            },
+          },
+        },
+      };
+      await tctMonitor.onEvent(event);
+
+      const res = await db.execute(
+        sql`select jti, parent_jti, delegator_aid, delegatee_aid, scope
+            from delegations where parent_jti = ${parent}`,
+      );
+      const rows = (res as unknown as {
+        rows: {
+          jti: string;
+          parent_jti: string;
+          delegator_aid: string;
+          delegatee_aid: string;
+          scope: string[];
+        }[];
+      }).rows;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        parent_jti: parent,
+        delegator_aid: 'aid:test:delegator',
+        delegatee_aid: 'aid:test:delegatee',
+        scope: ['demo.echo'],
+      });
+      expect(rows[0].jti).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+      const synthetic = rows[0].jti;
+
+      // Idempotent: re-ingesting the same event is a no-op (same synthetic
+      // jti collides on the primary key, onConflictDoNothing).
+      await tctMonitor.onEvent(event);
+      const again = await db.execute(
+        sql`select count(*)::int as n from delegations where jti = ${synthetic}`,
+      );
+      expect((again as unknown as { rows: { n: number }[] }).rows[0].n).toBe(1);
+    } finally {
+      await db.delete(delegations).where(sql`${delegations.parentJti} = ${parent}`);
+      await db.delete(issuedTcts).where(sql`${issuedTcts.jti} = ${parent}`);
+    }
+  });
+
   it('rejects payloads with a malformed jti without touching the DB', async () => {
     const ids = await seedChain();
     try {

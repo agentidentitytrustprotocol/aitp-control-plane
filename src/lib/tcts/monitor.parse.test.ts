@@ -15,6 +15,18 @@ const JTI = '11111111-1111-4111-8111-111111111111';
 const PARENT = '22222222-2222-4222-8222-222222222222';
 const TS = '2026-06-13T00:00:00.000Z';
 
+// Matches a synthetic delegation jti: an RFC-4122 v5 UUID.
+const UUID_V5_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Encode claims as a minimal unsigned compact JWS (header.payload.sig).
+ *  The CP never verifies the signature, so a placeholder `sig` is fine. */
+function jws(claims: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'EdDSA' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${header}.${body}.sig`;
+}
+
 describe('parseTct', () => {
   it('projects a v0.2 { token, claims } TCT with JWT claim names', () => {
     const raw = {
@@ -108,6 +120,92 @@ describe('parseDelegation', () => {
       issuedAt: new Date(1_750_000_000 * 1000).toISOString(),
       expiresAt: new Date(1_750_003_600 * 1000).toISOString(),
     });
+  });
+
+  it('projects a real single-hop token: parent from voucher.src_jti, synthetic jti', () => {
+    // The real SDK v0.2 single-hop delegation: no top-level jti, no
+    // top-level src_jti — the parent TCT jti lives only inside the
+    // embedded grant voucher.
+    const voucher = jws({
+      ver: 'aitp/0.2',
+      iss: 'aid:test:grantor',
+      sub: 'aid:test:delegator',
+      src_jti: PARENT,
+      grants: ['demo.echo'],
+      iat: 1_750_000_000,
+      exp: 1_750_003_600,
+    });
+    const payload = {
+      tct: {
+        token: 'eyJhbGciOiJFZERTQSJ9.ZGVsZWdhdGlvbi1ib2R5.sig',
+        claims: {
+          ver: 'aitp/0.2',
+          iss: 'aid:test:delegator',
+          sub: 'aid:test:delegatee',
+          aud: 'aid:test:grantor',
+          scope: ['demo.echo'],
+          exp: 1_750_003_600,
+          cnf: { jkt: 'delegateeThumbprint' },
+          voucher,
+        },
+      },
+    };
+
+    const out = parseDelegation(payload, TS);
+    expect(out).not.toBeNull();
+    expect(out).toMatchObject({
+      parentJti: PARENT,
+      delegatorAid: 'aid:test:delegator',
+      delegateeAid: 'aid:test:delegatee',
+      scope: ['demo.echo'],
+      issuedAt: TS, // no top-level iat on a single-hop token → event ts
+      expiresAt: new Date(1_750_003_600 * 1000).toISOString(),
+    });
+    expect(out?.jti).toMatch(UUID_V5_RE);
+
+    // Idempotent: re-ingesting the same token yields the same synthetic
+    // jti, so onConflictDoNothing keeps deduping.
+    expect(parseDelegation(payload, TS)?.jti).toBe(out?.jti);
+
+    // A different token yields a different synthetic jti.
+    const other = {
+      tct: { ...payload.tct, token: 'eyJhbGciOiJFZERTQSJ9.b3RoZXI.sig' },
+    };
+    expect(parseDelegation(other, TS)?.jti).not.toBe(out?.jti);
+  });
+
+  it('reads voucher.src_jti for a single-hop token even with an explicit jti', () => {
+    const voucher = jws({ src_jti: PARENT });
+    const payload = {
+      tct: {
+        token: 'eyJ0.b2s.sig',
+        claims: { jti: JTI, iss: 'aid:d', sub: 'aid:e', voucher },
+      },
+    };
+    expect(parseDelegation(payload, TS)).toMatchObject({ jti: JTI, parentJti: PARENT });
+  });
+
+  it('projects an explicit-field delegation event verbatim', () => {
+    const payload = {
+      jti: JTI,
+      parent_jti: PARENT,
+      delegator_aid: 'aid:test:delegator',
+      delegatee_aid: 'aid:test:delegatee',
+      scope: ['demo.echo'],
+    };
+    expect(parseDelegation(payload, TS)).toMatchObject({
+      jti: JTI,
+      parentJti: PARENT,
+      delegatorAid: 'aid:test:delegator',
+      delegateeAid: 'aid:test:delegatee',
+      scope: ['demo.echo'],
+    });
+  });
+
+  it('drops a single-hop shape with no opaque token (no jti can be synthesized)', () => {
+    const voucher = jws({ src_jti: PARENT });
+    const payload = { tct: { claims: { iss: 'aid:d', sub: 'aid:e', voucher } } };
+    expect(parseDelegation(payload, TS)).toBeNull();
   });
 
   it('projects a v0.1 flat delegation (parent_jti/delegator/delegatee)', () => {
