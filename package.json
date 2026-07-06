@@ -16,7 +16,7 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "aitp": "npm:@agentidentitytrustprotocol/aitp@^0.3.0",
+    "aitp": "npm:@agentidentitytrustprotocol/aitp@^0.4.0",
     "next": "15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
