@@ -10,13 +10,13 @@
     "typecheck": "tsc --noEmit",
     "test": "jest --passWithNoTests",
     "test:integration": "jest --config jest.integration.config.js --passWithNoTests",
-    "test:conformance": "jest --config jest.integration.config.js --passWithNoTests --testPathPattern conformance|cp-manifest",
+    "test:conformance": "jest --config jest.integration.config.js --passWithNoTests --testPathPattern 'conformance|cp-manifest'",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "aitp": "npm:@agentidentitytrustprotocol/aitp@^0.3.0",
+    "aitp": "npm:@agentidentitytrustprotocol/aitp@^0.4.0",
     "next": "15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
