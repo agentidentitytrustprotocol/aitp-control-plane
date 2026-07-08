@@ -125,6 +125,7 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 - `expires_at` is **Unix seconds**. It must be ≥ 5 minutes in the future or you get `400 MANIFEST_EXPIRED`.
 - **Namespace** is taken from the `X-Aitp-Namespace` header (wins) or `manifest.extensions.namespace`, defaulting to `default`.
 - The token is consumed atomically; a second presentation returns `401 TOKEN_REPLAYED`. An invalid/expired token or AID mismatch returns `401 TOKEN_INVALID`.
+- A missing `manifest.aid`, or a non-string `manifest.extensions.namespace`, returns `400 BODY_INVALID`.
 
 Response `201`: `{ "aid": "...", "displayName": "...", "registeredAt": "..." }`. Emits an `agent.registered` audit event.
 
@@ -196,11 +197,15 @@ Accepts either a bare array or `{ "events": [...] }`. Each event:
 
 Response `200`: `{ "ingested": <n> }`.
 
-Limits: a single batch must be ≤ 256 KiB on the wire and each event's `payload` ≤ 64 KiB. Over-cap requests return `413 PAYLOAD_TOO_LARGE` (the offending `eventType` is included when a single event is too big). Split large batches into multiple requests.
+Limits: a single batch must be ≤ 256 KiB on the wire, contain ≤ 500 events, and each event's `payload` must be ≤ 64 KiB. Over-cap requests return `413 PAYLOAD_TOO_LARGE` (the offending `eventType` is included when a single event is too big). Split large batches into multiple requests.
+
+#### `GET /api/events/history` response
+
+`{ "events": [...], "count": <n> }`. An unparseable filter value returns `400 FILTER_INVALID`.
 
 #### `GET /api/events/stream`
 
-`text/event-stream`; each event is delivered as a `data: <json>\n\n` frame, replaying the in-memory backlog (`MAX_AUDIT_EVENTS_MEMORY`) then streaming live. Returns `503 SSE_CAPACITY` once `MAX_SSE_CONNECTIONS` (default 500) streams are already open — back off and retry.
+`text/event-stream`; each event is delivered as a `data: <json>\n\n` frame, replaying up to the last **100** backlog events then streaming live. (`MAX_AUDIT_EVENTS_MEMORY`, default 500, sizes the bus's total in-memory retention — not the per-subscriber replay.) Returns `503 SSE_CAPACITY` once `MAX_SSE_CONNECTIONS` (default 500) streams are already open — back off and retry.
 
 ### Audit
 
@@ -241,7 +246,7 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 
 `url` must be `http(s)` and pass the SSRF guard (private/loopback/link-local ranges and hosts outside `WEBHOOK_URL_ALLOWLIST` are rejected `400 URL_NOT_ALLOWED`). An empty/omitted `events` array means **all deliverable event types**. Only a fixed set of event types is deliverable — see [`events.md`](events.md#webhook-deliverable-events).
 
-Deliveries are POSTed with header `X-AITP-Signature: sha256=<hex>` — an HMAC-SHA256 over the canonical body bytes using the webhook's `secret`. Retries follow `WEBHOOK_RETRY_ATTEMPTS` (default 3) with exponential backoff; a circuit breaker trips a repeatedly-failing endpoint open.
+Deliveries are POSTed with headers `X-AITP-Signature: sha256=<hex>` — an HMAC-SHA256 over the canonical body bytes using the webhook's `secret` — plus `X-Aitp-Event` (the event type) and `X-Aitp-Delivery` (the delivery id). Retries follow `WEBHOOK_RETRY_ATTEMPTS` (default 3) with exponential backoff; a circuit breaker trips a repeatedly-failing endpoint open (thresholds configurable via `WEBHOOK_BREAKER_FAILURE_THRESHOLD` / `WEBHOOK_BREAKER_RESET_MS` — see [`operations.md`](operations.md)).
 
 ### Dashboard JSON
 

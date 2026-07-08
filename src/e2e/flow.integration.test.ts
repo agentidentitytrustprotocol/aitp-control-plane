@@ -39,8 +39,10 @@ import { GET as revocationListGet } from '@/app/api/well-known/aitp-revocation-l
 
 import { db, pool } from '@/lib/db';
 import {
+  adminAuditLog,
   agents as agentsTable,
   auditEvents,
+  handshakeSessions,
   revocationEntries,
 } from '@/lib/db/schema';
 
@@ -56,6 +58,9 @@ function mkReq(
 }
 
 const RUN_ID = `e2e-${randomUUID()}`;
+// Suite-level so afterAll can clean the tct.revoked audit event even if
+// the revocation test fails midway.
+const REVOKED_JTI = randomUUID();
 
 describe('integration: enroll → register → discover → event → revoke flow', () => {
   const researcher = AitpAgent.generate();
@@ -83,11 +88,37 @@ describe('integration: enroll → register → discover → event → revoke flo
   });
 
   afterAll(async () => {
-    // Targeted cleanup so this test doesn't pollute the test DB across runs.
+    // Targeted cleanup so this test doesn't pollute the test DB across
+    // runs. Beyond the run-tagged rows, the flow also emits CP-sourced
+    // audit events with NO run_id (agent.registered on register,
+    // tct.revoked on revocation), a projected handshake_sessions row,
+    // and admin_audit_log rows keyed by target — sweep those by the
+    // run-unique AIDs/JTI.
     await db
       .delete(agentsTable)
       .where(sql`${agentsTable.aid} in (${researcher.aid}, ${writer.aid})`);
-    await db.delete(auditEvents).where(sql`${auditEvents.runId} = ${RUN_ID}`);
+    await db
+      .delete(auditEvents)
+      .where(
+        sql`${auditEvents.runId} = ${RUN_ID}
+          or ${auditEvents.aidA} in (${researcher.aid}, ${writer.aid})
+          or ${auditEvents.aidB} in (${researcher.aid}, ${writer.aid})
+          or ${auditEvents.payload}->>'jti' = ${REVOKED_JTI}`,
+      );
+    await db
+      .delete(handshakeSessions)
+      .where(
+        sql`${handshakeSessions.aidA} in (${researcher.aid}, ${writer.aid})
+          or ${handshakeSessions.aidB} in (${researcher.aid}, ${writer.aid})`,
+      );
+    await db
+      .delete(revocationEntries)
+      .where(sql`${revocationEntries.jti} = ${REVOKED_JTI}`);
+    await db
+      .delete(adminAuditLog)
+      .where(
+        sql`${adminAuditLog.targetId} in (${researcher.aid}, ${writer.aid}, ${REVOKED_JTI})`,
+      );
     await pool.end();
   });
 
@@ -199,11 +230,10 @@ describe('integration: enroll → register → discover → event → revoke flo
   });
 
   it('records a revocation and serves a signed list containing the JTI', async () => {
-    const jti = randomUUID();
     const res = await revocationPost(
       mkReq('http://localhost/api/revocation/entries', {
         method: 'POST',
-        body: JSON.stringify({ jti, reason: 'e2e-test' }),
+        body: JSON.stringify({ jti: REVOKED_JTI, reason: 'e2e-test' }),
         headers: { 'content-type': 'application/json' },
       }),
     );
@@ -212,11 +242,8 @@ describe('integration: enroll → register → discover → event → revoke flo
     const listRes = await revocationListGet();
     expect(listRes.status).toBe(200);
     const listText = await listRes.text();
-    expect(listText).toContain(jti);
-
-    // Cleanup
-    await db
-      .delete(revocationEntries)
-      .where(sql`${revocationEntries.jti} = ${jti}`);
+    expect(listText).toContain(REVOKED_JTI);
+    // Cleanup happens in afterAll (keyed by REVOKED_JTI) so a failure
+    // above still leaves nothing behind.
   });
 });

@@ -195,12 +195,12 @@ database from a checkout (the runtime image does not bundle `drizzle-kit`).
 
 | File | Adds |
 |---|---|
-| `0000_init.sql` | Initial schema: agents, sessions, audit_events, revocation_entries, webhooks, webhook_deliveries, admin_audit_log, issued_tcts, delegations, trust_anchors, pinned_keys |
-| `0001_plan_v0_2.sql` | Backfill legacy `inactive` → `deregistered` |
+| `0000_init.sql` | Initial schema: agents, handshake_sessions, audit_events, revocation_entries, webhooks, webhook_deliveries, admin_audit_log |
+| `0001_plan_v0_2.sql` | Backfill legacy `inactive` → `deregistered`; add `agents.last_enrolled_at`, `agents.namespace` (NOT NULL default `default`) + `agents_namespace_idx` |
 | `0002_offered_caps_gin.sql` | GIN index on `agents.offered_caps` |
 | `0003_webhook_delivery_body.sql` | `body` + `signature` on `webhook_deliveries` |
 | `0004_idempotency_keys.sql` | `idempotency_keys` table |
-| `0005_aitp_depth.sql` | Delegation-depth support |
+| `0005_aitp_depth.sql` | `issued_tcts`, `delegations`, `trust_anchors`, `pinned_keys` tables + their indexes |
 | `0006_trust_anchors_uniq.sql` | Unique `(namespace, issuer_url)` |
 | `0007_enrollment_jtis.sql` | `enrollment_jtis` table |
 

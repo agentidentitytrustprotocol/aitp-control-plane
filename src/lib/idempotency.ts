@@ -29,7 +29,7 @@
  * here; staleness is bounded by `IDEMPOTENCY_KEY_TTL_DAYS`.
  */
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { db } from './db';
 import { idempotencyKeys } from './db/schema';
@@ -53,14 +53,19 @@ function isCacheable(status: number): boolean {
   return CACHEABLE_STATUSES.has(status);
 }
 
+/** Sentinel for a body that JSON cannot represent (BigInt, circular).
+ * Distinct from `null`, which is a perfectly cacheable body (204s). */
+const UNENCODABLE = Symbol('unencodable');
+
 /** JSONB round-trip normalization. Dates become ISO strings,
- * `undefined` keys disappear, `BigInt` throws — but if it throws we
- * skip caching this response rather than corrupting state. */
-function normalizeBody(body: unknown): unknown | null {
+ * `undefined` keys disappear, `BigInt`/circular refs yield UNENCODABLE —
+ * in which case we skip caching rather than corrupting state. */
+function normalizeBody(body: unknown): unknown | typeof UNENCODABLE {
+  if (body === undefined || body === null) return null;
   try {
     return JSON.parse(JSON.stringify(body));
   } catch {
-    return null;
+    return UNENCODABLE;
   }
 }
 
@@ -75,12 +80,28 @@ function normalizeKey(raw: string): string | null {
   return trimmed;
 }
 
+// Statuses the Fetch spec forbids a body on — Response.json() throws
+// for these, so they must be constructed bodyless.
+const NULL_BODY_STATUSES = new Set<number>([101, 204, 205, 304]);
+
 function makeResponse(
   status: number,
   body: unknown,
   replayed: boolean,
 ): Response {
-  const r = Response.json(body, { status });
+  let r: Response;
+  if (NULL_BODY_STATUSES.has(status)) {
+    r = new Response(null, { status });
+  } else {
+    try {
+      r = Response.json(body, { status });
+    } catch {
+      // Un-JSON-encodable body (BigInt, circular). The status is the
+      // contract the caller depends on; carry it with a null body
+      // rather than crashing the request.
+      r = Response.json(null, { status });
+    }
+  }
   if (replayed) r.headers.set('Idempotency-Replayed', 'true');
   return r;
 }
@@ -138,7 +159,7 @@ export async function withIdempotency(
   }
 
   const normalizedBody = normalizeBody(result.body);
-  if (normalizedBody === null) {
+  if (normalizedBody === UNENCODABLE) {
     // Body had something un-JSON-encodable (BigInt etc.). Don't cache,
     // but still return the original response — the caller already
     // observed exec()'s side effects.
@@ -158,7 +179,12 @@ export async function withIdempotency(
         scope,
         key,
         responseStatus: result.status,
-        responseBody: normalizedBody as Record<string, unknown>,
+        // A null body (204s etc.) is stored as JSON null, not SQL NULL —
+        // the column is NOT NULL and jsonb 'null' reads back as JS null.
+        responseBody:
+          normalizedBody === null
+            ? sql`'null'::jsonb`
+            : (normalizedBody as Record<string, unknown>),
       })
       .onConflictDoNothing();
   } catch (err) {

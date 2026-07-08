@@ -1,31 +1,34 @@
 # Playground integration contract
 
-This document describes the API surface that
-[`aitp-playground`](https://github.com/agentidentitytrustprotocol/aitp-playground)
-depends on. It is the integration contract — changes to anything marked
-**load-bearing** below must be coordinated with the playground.
+This document is the **CP side** of the contract with
+[`aitp-playground`](https://github.com/agentidentitytrustprotocol/aitp-playground):
+which of *this service's* endpoints and fields the playground depends on, and
+what the CP may or may not change without coordinating. Anything marked
+**load-bearing** below is a breaking change if altered.
 
-The playground talks to the CP through a single client,
-`aitp_playground/cp_client/client.py` (`CpClient`). That client has grown well
-beyond its original two calls: it now exercises **~18 CP endpoints** across
-discovery, telemetry, revocation, webhooks, sessions, observation projections
-(TCTs/delegations), the dashboard, and the trust store.
+It is deliberately **not** a description of how the playground works. The
+playground-side map — which playground feature calls which CP endpoint, the
+`CpClient` methods, the scenario step types that drive them, and the
+degradation mechanics — is owned by and documented in the playground repo:
+[`aitp-playground/docs/control-plane.md`][pg-cp] (see its "CP endpoints the
+playground uses" and "What lives where" sections). This page links there rather
+than restating it, exactly as that page links back here for endpoint shapes.
 
 ## The one invariant: everything degrades gracefully
 
-**No CP call is required for a scenario to run.** Every method on `CpClient`:
+**No CP call is required for a scenario to run.** The playground treats every CP
+call as optional and best-effort — when `CP_BASE_URL` is unset, or any call
+times out or errors, it falls back to a no-op and the run still completes,
+losing only the CP-backed discovery, telemetry, and inspection features. The
+exact fallback values and per-call timeout are the playground's concern; see
+[`control-plane.md`][pg-cp].
 
-- returns a no-op value (`[]` / `None` / `False` / `{}`) when `cp_base_url` is empty, and
-- wraps the request in `try/except`, logs a warning, and returns the same no-op value on any failure (timeout, 4xx, 5xx, malformed body).
+The CP obligation this implies — and the only part of the invariant this repo
+owns — is: **return 2xx quickly** on the hot-path calls (discovery and
+`POST /api/events`) and never require the playground to send anything it can't
+cheaply produce.
 
-So the CP is an **optional, best-effort coordination surface** for the
-playground. It can be down, slow, or unconfigured and runs still complete — they
-just lose the CP-backed discovery, telemetry, and inspection features. The
-playground times out each call at `cp_timeout_ms` (default 5000 ms).
-
-This invariant is itself part of the contract: the CP should **return 2xx
-quickly** on the hot-path calls and never require the playground to send
-anything it can't cheaply produce.
+[pg-cp]: https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/control-plane.md
 
 ## Load-bearing endpoints
 
@@ -62,6 +65,11 @@ to camelCase internally; de-dupe on event `id` (`ON CONFLICT DO NOTHING`); and
 tolerate unknown event types (record as-is, never 4xx). See
 [`events.md`](events.md) for which types drive projections and webhooks.
 
+Batch limits still apply: ≤ 256 KiB per request, **≤ 500 events per batch**,
+≤ 64 KiB per event `payload` — an over-cap batch gets `413 PAYLOAD_TOO_LARGE`,
+not a fire-and-forget 2xx. Runners producing more than 500 events per run must
+split the batch.
+
 > ⚠️ The playground emits `handshake.completed` (past tense), but the CP's
 > session/TCT projection and webhook fan-out key on `handshake.complete`. Events
 > are stored and streamed either way, but `completed` projects **no** session.
@@ -69,38 +77,41 @@ tolerate unknown event types (record as-is, never 4xx). See
 > [`events.md` § naming nuance](events.md#sessions-projection). Resolve it on one
 > side before relying on session projections from playground telemetry.
 
-## Full endpoint surface
+## Endpoints the playground depends on
 
-Everything `CpClient` calls, grouped by feature. "Driver" is the scenario step
-type or playground API proxy that triggers it; all are best-effort.
+The CP endpoints the playground currently calls, with the **CP-side contract**
+for each — the request keys it sends and response keys it reads that must not
+break. The playground-internal mapping (client method, the scenario step type or
+API proxy that drives each call) lives in [`control-plane.md`][pg-cp]; treat that
+as the source of truth for the current call list, and this table as the CP's
+record of what those calls depend on.
 
-| # | Endpoint | Client method | Driver | Notes |
-|---|---|---|---|---|
-| 1 | `GET /api/registry/agents?capability=` | `discover_by_capability` | `trust.discovery: cp_registry` | **load-bearing** (see above) |
-| 2 | `POST /api/events` | `ingest_events` | post-run, fire-and-forget | **load-bearing** (snake_case) |
-| 3 | `POST /api/revocation/entries` | `publish_revocation` | `revoke_tct` step with `via_cp: true` | body `{jti, reason?}`; idempotent |
-| 4 | `GET /.well-known/aitp-revocation-list` | `fetch_revocation_list` | agent deny-set refresh | **public, no auth**; client reads `entries[].jti` (tolerates a `revocation_list` wrapper) |
-| 5 | `GET /api/events/history` | `fetch_events_history` | `GET /runs/{id}/cp-audit` proxy | params `run_id`, `aid`, `type`, `limit` |
-| 6 | `GET /api/sessions` | `fetch_sessions` | `GET /runs/{id}/cp-sessions` proxy | params `run_id`, `aid`, `status`, `limit` |
-| 7 | `GET /api/sessions/{id}/replay` | `replay_session` | `/cp` inspection proxy | params `since`, `until`, `limit`; reads `events` |
-| 8 | `POST /api/webhooks` | `create_webhook` | `cp_subscribe_webhook` step | run-scoped delivery URL; `events: []` ⇒ all deliverable types |
-| 9 | `DELETE /api/webhooks/{id}` | `delete_webhook` | webhook teardown | 404 treated as success |
-| 10 | `GET /api/tcts` | `fetch_tcts` | `/cp/tcts` proxy | sends `sessionId` (camelCase), `active=true` as string |
-| 11 | `GET /api/delegations` | `fetch_delegations` | `cp_delegation_tree` step | `root_jti` walks the tree |
-| 12 | `GET /api/dashboard/overview` | `fetch_dashboard_overview` | `/cp/dashboard` proxy | ⚠️ param drift — see below |
-| 13 | `GET /api/dashboard/agents` | `fetch_dashboard_agents` | `/cp/agents` proxy | reads `agents` |
-| 14 | `GET /api/trust-anchors` | `list_trust_anchors` | provisioning confirm | reads `trustAnchors`; `namespace` filter |
-| 15 | `POST /api/trust-anchors` | `upsert_trust_anchor` | `cp_provision_trust_anchor` step | body `{issuerUrl, namespace?, jwksUrl?, label?}` |
-| 16 | `GET /api/pinned-keys` | `list_pinned_keys` | provisioning confirm | reads `pinnedKeys`; `namespace` filter |
-| 17 | `POST /api/pinned-keys` | `upsert_pinned_key` | `cp_provision_trust_anchor` step | body `{aid, pubkey, namespace?, label?}` |
+| Endpoint | Load-bearing? | CP-side contract the playground relies on |
+|---|---|---|
+| `GET /api/registry/agents?capability=` | **yes** | reads `agents[0].handshakeEndpoint` (see above) |
+| `POST /api/events` | **yes** | snake_case envelope keys; 2xx quickly (see above) |
+| `POST /api/revocation/entries` | no | body `{jti, reason?}`; idempotent |
+| `GET /.well-known/aitp-revocation-list` | no | **public, no auth**; reads `entries[].jti` (tolerates a `revocation_list` wrapper) |
+| `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit` |
+| `GET /api/sessions` | no | params `run_id`, `aid`, `status`, `limit` |
+| `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
+| `POST /api/webhooks` | no | run-scoped delivery URL; `events: []` ⇒ all deliverable types |
+| `DELETE /api/webhooks/{id}` | no | 404 treated as success |
+| `GET /api/tcts` | no | sends `sessionId` (camelCase), `active=true` as string |
+| `GET /api/delegations` | no | `root_jti` walks the tree |
+| `GET /api/dashboard/overview` | no | ⚠️ param drift — see below |
+| `GET /api/dashboard/agents` | no | reads `agents` |
+| `GET /api/trust-anchors` | no | reads `trustAnchors`; `namespace` filter |
+| `POST /api/trust-anchors` | no | body `{issuerUrl, namespace?, jwksUrl?, label?}` |
+| `GET /api/pinned-keys` | no | reads `pinnedKeys`; `namespace` filter |
+| `POST /api/pinned-keys` | no | body `{aid, pubkey, namespace?, label?}` |
 
-The playground also **receives** webhook deliveries the CP POSTs to its
-run-scoped `POST /webhooks/cp/{run_id}` URL (created via #8); it records them as
-`cp.webhook.delivered` events. The CP signs those with `X-AITP-Signature` — see
-[`api.md` § Webhooks](api.md#webhooks).
+The playground also **receives** webhook deliveries the CP POSTs to a run-scoped
+URL it registers via `POST /api/webhooks`. The CP signs those with
+`X-AITP-Signature` — see [`api.md` § Webhooks](api.md#webhooks).
 
 Enrollment (`POST /api/registry/enroll` → `POST /api/registry/agents`) is **not**
-called by the playground client — agents enroll themselves; the playground only
+called by the playground — agents enroll themselves; the playground only
 discovers them.
 
 ## Known contract drift
@@ -108,11 +119,11 @@ discovers them.
 Surfaced while reconciling this doc with the live client — fix on whichever side
 owns the field:
 
-- **Dashboard window is ignored.** `fetch_dashboard_overview` sends
-  `?window=<window>`, but the CP route reads **`?range=`**
-  (`/api/dashboard/overview`). The CP therefore always returns the default `24h`
-  window regardless of what the playground requests. Either rename the client
-  param to `range` or have the CP accept `window` as an alias.
+- **Dashboard window is ignored.** The playground sends `?window=<window>` to
+  `GET /api/dashboard/overview`, but the CP route reads **`?range=`**. The CP
+  therefore always returns the default `24h` window regardless of what the
+  playground requests. Fix on either side: rename the playground param to
+  `range`, or have the CP accept `window` as an alias.
 
 ## Configuration mapping
 
@@ -135,27 +146,30 @@ allowed, breaking changes need coordination.
 ## Verifying locally
 
 ```bash
-# Start CP
+# Start the CP
 docker compose up -d postgres
 npm run db:migrate
 npm run dev
+```
 
-# Start playground (in another dir)
-cd ../aitp-playground
+Then start the playground pointed at it — the run command, ports, and scenario
+payloads are playground-owned; follow
+[`aitp-playground/docs/getting-started.md`][pg-gs] and point it at the CP with:
+
+```bash
 export CP_BASE_URL=http://localhost:4000
-export CP_API_KEY=""   # leave empty for local dev (no API_KEYS set on CP)
-uvicorn aitp_playground.main:app --port 8000
+export CP_API_KEY=""   # leave empty for local dev (no API_KEYS set on the CP)
+```
 
-# Trigger a run
-curl -X POST http://localhost:8000/runs \
-  -H 'content-type: application/json' \
-  -d '{"pack":"intra-org","scenario":"research-and-write","version":"v1"}'
+After a run, confirm the load-bearing telemetry path from the CP side:
 
-# Confirm telemetry arrived
+```bash
 curl 'http://localhost:4000/api/events/history?limit=10' | jq
 ```
 
-If the events show up, the load-bearing integration is healthy. To exercise the
-broader surface, run scenarios that use the `cp_subscribe_webhook`,
-`revoke_tct` (`via_cp: true`), `cp_provision_trust_anchor`, and
-`cp_delegation_tree` step types.
+If the events show up, the load-bearing integration is healthy. The broader
+surface is exercised by scenarios using the `cp_subscribe_webhook`, `revoke_tct`
+(`via_cp: true`), `cp_provision_trust_anchor`, and `cp_delegation_tree` step
+types — all defined and documented in the playground repo.
+
+[pg-gs]: https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/getting-started.md

@@ -78,11 +78,27 @@ or are trivially bypassed. Match them to your actual edge.
 
 - **`MAX_SSE_CONNECTIONS`** (default 500) caps concurrent streams per process;
   over the cap returns `503 SSE_CAPACITY`. Clients should back off and retry.
-- **`MAX_AUDIT_EVENTS_MEMORY`** (default 500) is the in-memory backlog each new
-  subscriber replays before going live.
+- **`MAX_AUDIT_EVENTS_MEMORY`** (default 500) sizes the bus's total in-memory
+  retention (older events are evicted and counted as dropped). Each new
+  subscriber replays at most the last **100** events before going live,
+  regardless of this setting.
 
 If you front the CP with a fan-out proxy that opens its own upstream pool, raise
 `MAX_SSE_CONNECTIONS` accordingly.
+
+## Webhook delivery
+
+Each delivery retries up to `WEBHOOK_RETRY_ATTEMPTS` (default 3) with
+exponential backoff. A per-endpoint circuit breaker sits in front of the
+retries:
+
+- **`WEBHOOK_BREAKER_FAILURE_THRESHOLD`** (default 5) — consecutive failures
+  before the breaker opens and deliveries to that endpoint are skipped.
+- **`WEBHOOK_BREAKER_RESET_MS`** (default 60000) — how long the breaker stays
+  open before a half-open probe is allowed.
+
+Inspect or reset a breaker via `GET /api/webhooks/:id/circuit-breaker` and
+`POST /api/webhooks/:id/circuit-breaker/reset` (see [`api.md`](api.md#webhooks)).
 
 ## Data retention
 

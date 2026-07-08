@@ -64,7 +64,7 @@ rate-limit, retention, and telemetry subsystems behave.
 | `DB_POOL_MAX` | no | `20` | Connection pool size |
 | `API_KEYS` | **prod** | empty | Comma-separated allowlist. Empty in prod returns 503 on gated routes (fail-safe). Empty in dev disables auth. |
 | `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret for minting/verifying one-time enrollment tokens (callers never present it) |
-| `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Falls back to `*` with a warning in prod if unset. |
+| `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Defaults to `http://localhost:3000` if unset (including in prod) — set it to the UI plane origin. |
 | `REVOCATION_LIST_TTL_SECS` | no | `3600` | TTL on the signed revocation snapshot |
 | `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
 
@@ -73,6 +73,8 @@ rate-limit, retention, and telemetry subsystems behave.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `WEBHOOK_RETRY_ATTEMPTS` | no | `3` | Per-delivery retry budget |
+| `WEBHOOK_BREAKER_FAILURE_THRESHOLD` | no | `5` | Consecutive failures before an endpoint's circuit breaker opens |
+| `WEBHOOK_BREAKER_RESET_MS` | no | `60000` | How long an open breaker waits before a half-open probe |
 | `WEBHOOK_URL_ALLOWLIST` | no | empty | Comma-separated host allowlist for webhook targets. Empty = any public host (private/loopback/link-local ranges are always rejected as SSRF). Leading `.` matches subdomains. |
 | `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog replayed to each new subscriber |
 | `MAX_SSE_CONNECTIONS` | no | `500` | Concurrent `/api/events/stream` cap per process; over-limit returns `503 SSE_CAPACITY` |
@@ -164,11 +166,17 @@ See [`docs/integration-playground.md`](docs/integration-playground.md) for the e
 ## Development
 
 ```bash
-npm run typecheck     # tsc --noEmit
-npm run lint          # eslint
-npm test              # jest unit
+npm run typecheck         # tsc --noEmit
+npm run lint              # eslint
+npm test                  # jest unit suite (no DB; coverage thresholds enforced with --coverage)
 npm run test:integration  # jest against real Postgres on :5433
+npm run test:conformance  # protocol-conformance subset of the integration suite
 ```
+
+Unit tests (`*.test.ts`) are colocated with the code and mock the database;
+integration tests (`*.integration.test.ts`) run against a real Postgres and
+exercise routes/services end-to-end. CI runs both plus a production
+`next build`, a dependency audit, and a Docker image build check on PRs.
 
 Bring up the test database:
 
@@ -185,16 +193,19 @@ src/
   app/api/        Next.js App Router route handlers (the only thing rendered)
   lib/
     audit/        Event store, in-memory SSE bus
+    audit-log/    Admin-action audit log (who did what via the API)
+    dashboard/    Aggregation queries behind /api/dashboard/*
     db/           Drizzle schema + connection
+    http/         Request-body reading helpers
     identity/     CP's own AITP keypair + manifest
     registry/     Agent CRUD, enrollment tokens, expiry job
     revocation/   Signed revocation snapshot producer
     sessions/     Handshake-session monitor (from audit events)
-    webhooks/     Outbox dispatcher, HMAC signing, retry reaper
+    tcts/         Observed-TCT / delegation projection from audit events
+    webhooks/     Outbox dispatcher, HMAC signing, circuit breaker, retry reaper
 drizzle/          SQL migrations
 docs/             Published docs: API reference, events, data model, ops runbook, integration contract
 internal_docs/    Internal-only docs (deployment/CI) — NOT published to the website
-plans/            Forward-looking roadmap
 ```
 
 ## Deployment

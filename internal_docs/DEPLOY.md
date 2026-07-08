@@ -9,13 +9,23 @@ build or run.
 
 ## CI/CD pipeline
 
-`.github/workflows/ci.yml` runs on every push/PR to `main`:
+`.github/workflows/ci.yml` runs on every push/PR to `main` (plus manual
+`workflow_dispatch` runs from the Actions tab; in-flight PR runs are
+cancelled when a new commit lands):
 
-1. **build-and-test** — `npm ci`, typecheck, lint, Drizzle migrations
-   against an ephemeral Postgres 16, unit + integration tests, and a
+1. **build-and-test** (20 min timeout) — `npm ci`, typecheck, lint, Drizzle
+   migrations against an ephemeral Postgres 16, unit tests **with coverage**
+   (thresholds enforced by `jest.config.js`; `coverage/lcov.info` uploaded
+   as a `coverage` artifact, 14-day retention), integration tests, and a
    production `next build` smoke test.
-2. **docker-publish** (push to `main` only) — builds a multi-arch
-   (`linux/amd64` + `linux/arm64`) image and pushes it to:
+2. **audit** — `npm audit --omit=dev --audit-level=high`: fails only on
+   high+ advisories in production dependencies, so dev-tooling advisories
+   don't block merges.
+3. **docker-build-check** (PRs only) — builds the image single-arch
+   (`linux/amd64`, no push) with the shared GHA layer cache, so Dockerfile
+   or standalone-output breakage is caught before merge.
+4. **docker-publish** (`main` only, gated on build-and-test) — builds a
+   multi-arch (`linux/amd64` + `linux/arm64`) image and pushes it to:
 
    ```
    ghcr.io/agentidentitytrustprotocol/aitp-control-plane:latest
@@ -94,7 +104,7 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. |
 | `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens.                     |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
-| `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `*` with a warning if unset.          |
+| `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
 | `CP_BASE_URL`      | recommended         | Public base URL; used in the manifest's handshake endpoint.        |
 | `PORT`             | auto                | Set by Railway; server defaults to 4000.                           |
 | `DB_POOL_MAX`      | no                  | Connection pool size (default 20).                                 |

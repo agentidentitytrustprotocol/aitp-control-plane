@@ -34,38 +34,21 @@ npm run start
 
 ### 2. Playground
 
-The playground (separate repo at `../../aitp-playground`) is the
-runtime that calls OpenAI. Wire it up via its own `.env`:
+The playground (separate repo at `../../aitp-playground`) is the runtime
+that calls OpenAI. Install, configure (OpenAI/LLM keys, agent ports, the
+venv interpreter), and start it per its own
+[getting-started guide][pg-gs] — this driver does not restate the
+playground's setup, which changes on its schedule. The **only**
+CP-facing requirements for the e2e run are these two values in the
+playground's `.env`:
 
 ```bash
-# in aitp-playground/.env
+# in aitp-playground/.env — must match this CP instance
 CP_BASE_URL=http://localhost:4000/api
-CP_API_KEY=e2e-playground-key
-OPENAI_API_KEY=sk-…              # the playground process consumes this
-LLM_PROVIDER=openai
-OPENAI_MODEL=gpt-4o-mini
-
-# Pick a port range that's free on your machine; defaults to 9100
-# because 81xx is taken on the maintainer's box. The agent processes
-# bind sequentially from this base port.
-AGENT_BASE_PORT=9100
-
-# Use the venv interpreter for agent subprocesses (they need uvicorn /
-# crewai / langchain). The .yaml in scenarios/_shared/agents/*.yaml
-# may also pin `python:` per agent — make sure it points at a venv.
-AGENT_PYTHON=/absolute/path/to/aitp-playground/.venv/bin/python
+CP_API_KEY=e2e-playground-key      # must be one of the CP's API_KEYS (below)
 ```
 
-Then start the playground:
-
-```bash
-cd ../aitp-playground
-.venv/bin/python -m uvicorn aitp_playground.main:create_app --factory --port 8000
-```
-
-(If you previously ran the Dockerized playground, stop it first:
-`docker stop aitp-playground-playground-1`. The native process won't
-be able to bind 8000 otherwise.)
+[pg-gs]: https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/getting-started.md
 
 ## Run
 
