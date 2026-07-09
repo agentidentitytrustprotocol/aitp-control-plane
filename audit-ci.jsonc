@@ -1,0 +1,23 @@
+{
+  // Fail CI on high (and critical) advisories in PRODUCTION dependencies.
+  // Moderate/low advisories in transitive deps don't block merges — they
+  // are handled by the weekly Dependabot updates instead.
+  "high": true,
+  "skip-dev": true,
+  "report-type": "important",
+
+  // Documented, reviewed exceptions. Each entry MUST have a reason and,
+  // ideally, a tracking path to removal. Re-audit these whenever the
+  // OpenTelemetry deps are bumped.
+  "allowlist": [
+    // GHSA-q7rr-3cgh-j5r3 — "Prometheus exporter process crash via
+    // malformed HTTP request" in @opentelemetry/{auto-instrumentations-node,
+    // sdk-node}. NOT reachable here: this service exports traces over
+    // OTLP HTTP and never instantiates the OTel Prometheus exporter
+    // (its /api/metrics endpoint is hand-rolled Prometheus text), and
+    // OTel is off by default (OTEL_ENABLED=false). The only fix is a
+    // semver-major OTel bump that breaks the instrumentation bootstrap;
+    // tracked for a dedicated upgrade PR, not this one.
+    "GHSA-q7rr-3cgh-j5r3"
+  ]
+}

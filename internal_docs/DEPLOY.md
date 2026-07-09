@@ -18,9 +18,11 @@ cancelled when a new commit lands):
    (thresholds enforced by `jest.config.js`; `coverage/lcov.info` uploaded
    as a `coverage` artifact, 14-day retention), integration tests, and a
    production `next build` smoke test.
-2. **audit** — `npm audit --omit=dev --audit-level=high`: fails only on
+2. **audit** — `npx audit-ci --config ./audit-ci.jsonc`: fails only on
    high+ advisories in production dependencies, so dev-tooling advisories
-   don't block merges.
+   don't block merges. Reviewed exceptions (currently an unreachable OTel
+   Prometheus-exporter advisory) are allowlisted with a rationale in
+   `audit-ci.jsonc`; a genuinely new high-sev prod advisory still fails.
 3. **docker-build-check** (PRs only) — builds the image single-arch
    (`linux/amd64`, no push) with the shared GHA layer cache, so Dockerfile
    or standalone-output breakage is caught before merge.
