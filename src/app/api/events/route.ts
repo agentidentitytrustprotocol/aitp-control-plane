@@ -97,10 +97,15 @@ const WEBHOOK_DISPATCH_CONCURRENCY = 8;
 export async function POST(req: NextRequest) {
   // Lazy startup hooks — idempotent, .unref()'d intervals. Run BEFORE
   // the idempotency wrapper so they fire even on replayed requests
-  // (the periodic jobs are also re-arm-on-call).
-  startExpiryJob();
-  startWebhookReaper();
-  startRetentionJob();
+  // (the periodic jobs are also re-arm-on-call). Suppressed under Jest:
+  // every worker's first ingest would fire a boot sweep / retry flush
+  // against the shared test DB, racing the suites that seed those
+  // tables and exercise the sweeps directly.
+  if (process.env.JEST_WORKER_ID === undefined) {
+    startExpiryJob();
+    startWebhookReaper();
+    startRetentionJob();
+  }
 
   // Reject obviously-too-large bodies before consuming them. The
   // per-event check after parse catches the case where Content-Length

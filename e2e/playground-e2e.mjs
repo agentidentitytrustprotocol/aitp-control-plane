@@ -13,8 +13,8 @@
 //     by the playground process, not by this script.
 //
 // Run:
-//   node e2e/playground-e2e.mjs                  # default cross-org pack
-//   PACK=intra-org node e2e/playground-e2e.mjs   # other packs
+//   node e2e/playground-e2e.mjs                  # default intra-org pack
+//   PACK=cross-org node e2e/playground-e2e.mjs   # other packs
 //
 // Exit code: 0 on success, 1 on any failed assertion.
 //

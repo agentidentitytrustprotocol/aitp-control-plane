@@ -26,7 +26,8 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ aid: string }> },
 ) {
-  const { aid } = await params;
+  const { aid: rawAid } = await params;
+  const aid = decodeURIComponent(rawAid);
   const sp = new URL(req.url).searchParams;
   const format = sp.get('format') ?? 'json';
   const eventLimit = Math.min(

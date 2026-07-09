@@ -6,6 +6,11 @@ info:
     Registry, audit log, revocation list, and webhook fan-out for an AITP
     (Agent Identity Trust Protocol) deployment. See README.md and
     docs/api.md for the prose reference.
+
+    Rate limiting: every `/api/*` route except `/api/health`, `/api/readyz`,
+    and `/api/metrics` may return `429 RATE_LIMITED` with `Retry-After` and
+    `X-RateLimit-*` headers. The per-path `429` responses below are only
+    spelled out where limits are most likely to be hit (enrollment).
   license:
     name: See LICENSE
 
@@ -527,6 +532,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/EventIngestResponse" }
         "400": { description: Body not JSON }
+        "413":
+          description: >-
+            PAYLOAD_TOO_LARGE — batch over 256 KiB on the wire, more than 500
+            events in one batch, or a single event payload over 64 KiB (the
+            offending eventType is included in the response body).
 
   /api/events/history:
     get:
@@ -536,7 +546,9 @@ paths:
         - { name: type, in: query, schema: { type: string } }
         - { name: aid, in: query, schema: { type: string } }
         - { name: sessionId, in: query, schema: { type: string } }
+        - { name: session_id, in: query, schema: { type: string }, description: "snake_case alias for sessionId" }
         - { name: runId, in: query, schema: { type: string } }
+        - { name: run_id, in: query, schema: { type: string }, description: "snake_case alias for runId" }
         - { name: since, in: query, schema: { type: string, format: date-time } }
         - { name: until, in: query, schema: { type: string, format: date-time } }
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
@@ -552,6 +564,9 @@ paths:
                   events:
                     type: array
                     items: { $ref: "#/components/schemas/AuditEvent" }
+                  count:
+                    type: integer
+        "400": { description: FILTER_INVALID — unparseable filter value }
 
   /api/events/stream:
     get:
@@ -562,6 +577,7 @@ paths:
           description: text/event-stream
           content:
             text/event-stream: { schema: { type: string } }
+        "503": { description: SSE_CAPACITY — MAX_SSE_CONNECTIONS streams already open; back off and retry }
 
   /api/revocation/entries:
     post:

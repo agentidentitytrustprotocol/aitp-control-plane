@@ -77,7 +77,7 @@ The CP emits these itself (`source: "cp"`) as a side effect of registry/revocati
 | Type | Emitted by | `aidA` / payload |
 |---|---|---|
 | `agent.registered` | `POST /api/registry/agents` | agent AID; `payload.displayName`, `payload.namespace` |
-| `agent.expired` | periodic expiry sweep, when a manifest TTL lapses | agent AID; `payload.reason="manifest_expired"` |
+| `agent.expired` | periodic expiry sweep, when a manifest TTL lapses | agent AID; `payload.reason="manifest_expired"`, `payload.displayName`, `payload.namespace` |
 | `agent.deregistered` | `DELETE /api/registry/agents/:aid` | agent AID; `payload.reason="admin_deregister"` |
 | `tct.revoked` | `POST /api/revocation/entries` | the revoked `jti` (also drives the projection above) |
 
@@ -103,5 +103,5 @@ body bytes; see [`api.md`](api.md#webhooks).
 
 - **Fire-and-forget is fine.** Ingest is best-effort and returns `2xx` quickly. Duplicate `id`s are de-duped; unknown types are tolerated.
 - **Use `handshake.complete`** (not `completed`) for the session/TCT/webhook path.
-- **Batch within limits:** ≤ 256 KiB per request, ≤ 64 KiB per event `payload` (see [`api.md`](api.md#post-apievents-body)).
+- **Batch within limits:** ≤ 256 KiB per request, ≤ 500 events per batch, ≤ 64 KiB per event `payload` (see [`api.md`](api.md#post-apievents-body)).
 - **Idempotency:** pass an `Idempotency-Key` header to make a retried batch a no-op at the request level, in addition to the per-event `id` de-dupe.
