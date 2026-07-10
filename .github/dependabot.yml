@@ -8,15 +8,22 @@ updates:
       interval: weekly
       day: monday
     groups:
+      # The aitp SDK (real name + npm: alias) is normally adopted the moment
+      # aitp-rs publishes, via the event-driven bump-aitp workflow. This group
+      # is the backstop: if a dispatch is ever missed, Dependabot opens the same
+      # bump PR on its weekly run.
+      aitp-sdk:
+        patterns:
+          - aitp
+          - '@agentidentitytrustprotocol/aitp'
       # Routine minor/patch bumps arrive as one PR; majors stay separate.
       minor-and-patch:
         update-types:
           - minor
           - patch
-    ignore:
-      # The aitp SDK is adopted deliberately, version-by-version
-      # (see e.g. the 0.4.0 adoption PR) — don't auto-bump it.
-      - dependency-name: aitp
+        exclude-patterns:
+          - aitp
+          - '@agentidentitytrustprotocol/aitp'
 
   - package-ecosystem: github-actions
     directory: /
