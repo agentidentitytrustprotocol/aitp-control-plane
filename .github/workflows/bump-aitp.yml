@@ -1,0 +1,21 @@
+name: bump aitp
+# Event-driven adoption of a new aitp SDK release (npm). Dispatched by aitp-rs's
+# bindings-release on publish; also runnable manually. bump-consume rewrites both
+# the real package name and the `npm:@agentidentitytrustprotocol/aitp@…` alias.
+on:
+  repository_dispatch:
+    types: [aitp-released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact aitp version (blank = latest / event payload)'
+        required: false
+        default: ''
+jobs:
+  bump:
+    uses: agentidentitytrustprotocol/aitp-ci/.github/workflows/bump-consume.yml@v1
+    with:
+      ecosystem: npm
+      package: '@agentidentitytrustprotocol/aitp'
+      version: ${{ github.event.inputs.version }}
+    secrets: inherit
