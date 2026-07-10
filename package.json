@@ -44,6 +44,6 @@
     "jest": "^30.4.2",
     "pino-pretty": "^13.0.0",
     "ts-jest": "^29.3.0",
-    "typescript": "^5.8.0"
+    "typescript": "^7.0.2"
   }
 }
