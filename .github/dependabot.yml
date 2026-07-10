@@ -5,8 +5,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     groups:
       # The aitp SDK (real name + npm: alias) is normally adopted the moment
       # aitp-rs publishes, via the event-driven bump-aitp workflow. This group
@@ -28,8 +27,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
