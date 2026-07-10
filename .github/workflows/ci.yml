@@ -138,7 +138,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -190,7 +190,7 @@ jobs:
       # prebuilt binaries for both linux/amd64 (x64-gnu) and linux/arm64
       # (arm64-gnu), so the image builds cleanly on both platforms.
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
