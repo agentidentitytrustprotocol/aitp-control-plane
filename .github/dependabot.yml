@@ -16,17 +16,20 @@ updates:
         patterns:
           - aitp
           - '@agentidentitytrustprotocol/aitp'
-      # Routine minor/patch bumps arrive as one PR; majors stay separate.
+      # Everything else: one PR for minor+patch, majors held separately.
       minor-and-patch:
         update-types:
           - minor
           - patch
-        exclude-patterns:
-          - aitp
-          - '@agentidentitytrustprotocol/aitp'
+      major-updates:
+        update-types:
+          - major
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
       day: monday
+    groups:
+      actions:
+        patterns: ["*"]
