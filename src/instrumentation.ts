@@ -35,7 +35,7 @@ export async function register(): Promise<void> {
   const { getNodeAutoInstrumentations } = await import(
     '@opentelemetry/auto-instrumentations-node'
   );
-  const { Resource } = await import('@opentelemetry/resources');
+  const { resourceFromAttributes } = await import('@opentelemetry/resources');
   const semconv = await import('@opentelemetry/semantic-conventions');
 
   const serviceName = process.env.OTEL_SERVICE_NAME ?? 'aitp-control-plane';
@@ -44,7 +44,7 @@ export async function register(): Promise<void> {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
   const sdk = new NodeSDK({
-    resource: new Resource({
+    resource: resourceFromAttributes({
       [semconv.ATTR_SERVICE_NAME]: serviceName,
       [semconv.ATTR_SERVICE_VERSION]: process.env.npm_package_version ?? 'unknown',
       'deployment.environment': process.env.NODE_ENV ?? 'development',
