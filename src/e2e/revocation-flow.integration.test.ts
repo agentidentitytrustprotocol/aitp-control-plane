@@ -7,9 +7,11 @@
  *     list served by /.well-known/aitp-revocation-list reflects it
  *     (structure: version, issuer, published_at/expires_at, entries)
  *   - the envelope's Ed25519 signature verifies over
- *     sha256(JCS({"revocation_list": ...})) under the public key
- *     embedded in the issuer AID (and the issuer matches the AID
- *     derived from CP_AID_SEED_HEX when that env var is set)
+ *     sha256(JCS(<revocation_list body>)) — the inner body — under the
+ *     public key embedded in the issuer AID (and the issuer matches the
+ *     AID derived from CP_AID_SEED_HEX when that env var is set), and
+ *     does NOT verify over the pre-0.5.0 wrapped form
+ *     sha256(JCS({"revocation_list": ...}))
  *   - posting a second entry invalidates the producer's 60s cache so
  *     the next GET re-signs and includes it
  *   - re-posting the same JTI is idempotent (single entry in the list)
@@ -95,10 +97,32 @@ function jcs(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** Verify the envelope signature: Ed25519 over
- * sha256(JCS({"revocation_list": ...})), public key taken from the
- * base64url segment of the `aid:pubkey:<b64url>` issuer AID. */
-function verifyEnvelopeSignature(env: RevocationEnvelope): boolean {
+/** The two candidate signing inputs for a revocation envelope.
+ *
+ * `signature` is a *sibling* of `revocation_list` in the envelope, not a
+ * member of it, so nothing is stripped before canonicalizing. (The session
+ * bundle and the manifest put `signature` *inside* the signed body and
+ * exclude it — do not generalize from this file.)
+ *
+ * `wrapped` is the pre-0.5.0 convention. It is kept here for exactly one
+ * reason: so the suite can assert it is *rejected*. An exclusion that isn't
+ * written down is an exclusion that silently stops being tested — a
+ * positive-only test is what let the wrapped form survive a full release. */
+const SIGNING_INPUTS = {
+  /** aitp >= 0.5.0 / RFC-AITP-0008: sign the inner revocation_list body. */
+  innerBody: (env: RevocationEnvelope) => jcs(env.revocation_list),
+  /** Pre-0.5.0 wrapped form. Present ONLY to be asserted against. */
+  wrapped: (env: RevocationEnvelope) => jcs({ revocation_list: env.revocation_list }),
+} as const;
+
+/** Verify the envelope signature: Ed25519 over sha256(<canonical bytes>),
+ * public key taken from the base64url segment of the `aid:pubkey:<b64url>`
+ * issuer AID. The signing input is supplied by the caller so both the
+ * accepted and the rejected shape are named explicitly. */
+function verifyEnvelopeSignatureOver(
+  env: RevocationEnvelope,
+  canonicalize: (env: RevocationEnvelope) => string,
+): boolean {
   const rawKey = Buffer.from(env.revocation_list.issuer.split(':').pop()!, 'base64url');
   // Ed25519 SubjectPublicKeyInfo DER prefix + 32 raw key bytes.
   const spki = Buffer.concat([
@@ -106,10 +130,13 @@ function verifyEnvelopeSignature(env: RevocationEnvelope): boolean {
     rawKey,
   ]);
   const key = createPublicKey({ key: spki, format: 'der', type: 'spki' });
-  const digest = createHash('sha256')
-    .update(Buffer.from(jcs({ revocation_list: env.revocation_list })))
-    .digest();
+  const digest = createHash('sha256').update(Buffer.from(canonicalize(env))).digest();
   return edVerify(null, digest, key, Buffer.from(env.signature, 'base64url'));
+}
+
+/** Verify under the current (aitp >= 0.5.0) inner-body convention. */
+function verifyEnvelopeSignature(env: RevocationEnvelope): boolean {
+  return verifyEnvelopeSignatureOver(env, SIGNING_INPUTS.innerBody);
 }
 
 const RUN_ID = `rev-flow-${randomUUID()}`;
@@ -182,9 +209,15 @@ describe('integration: revocation entry → signed well-known list → delegatio
     expect(entry!.reason).toBe('rev-flow-test');
   });
 
-  it('the envelope signature verifies under the issuer AID key (aitp signing scheme)', async () => {
+  it('the envelope signature is over the inner body, not the wrapper', async () => {
     const env = await fetchList();
     expect(verifyEnvelopeSignature(env)).toBe(true);
+
+    // The negative half, and the reason this test exists. Without it the
+    // suite cannot tell "the SDK signs the inner body" apart from "the SDK
+    // signs something both sides happen to agree on" — which is precisely
+    // how the pre-0.5.0 wrapped convention survived a full release.
+    expect(verifyEnvelopeSignatureOver(env, SIGNING_INPUTS.wrapped)).toBe(false);
 
     // Tampering must break the signature.
     const tampered: RevocationEnvelope = JSON.parse(JSON.stringify(env)) as RevocationEnvelope;
