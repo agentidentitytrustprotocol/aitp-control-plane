@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 4000",
-    "build": "next build",
+    "dev": "next dev --webpack --port 4000",
+    "build": "next build --webpack",
     "start": "next start --port 4000",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
@@ -24,16 +24,14 @@
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "aitp": "npm:@agentidentitytrustprotocol/aitp@^0.5.0",
     "drizzle-orm": "^0.45.0",
-    "next": "15.5.23",
+    "next": "16.3.2",
     "pg": "^8.13.0",
     "pino": "^10.3.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
-  "//overrides": "Transitive security floors for `npx audit-ci --config ./audit-ci.jsonc` (the CI gate: prod deps, high+). next 15.5.x hard-pins postcss 8.4.31 and ships sharp ^0.34.3; both now carry high-severity advisories, and neither can be cleared by a next patch bump. The floors chosen are exactly what next 16.3.x ships natively (postcss 8.5.23, sharp ^0.35.3), so this backports a combination upstream already runs rather than inventing one. brace-expansion is a SEPARATE chain (@opentelemetry/auto-instrumentations-node -> resource-detector-gcp -> gcp-metadata -> gaxios -> rimraf -> glob -> minimatch@9) and is deliberately SCOPED, not global: this tree legitimately resolves three majors of brace-expansion -- minimatch@10 (top level, used by eslint) needs ^5.0.5, minimatch@9 needs ^2.0.2, minimatch@3 needs ^1.1.7 -- and a global pin to 2.x breaks eslint, because only 5.x exports a named `expand`. Remove postcss/sharp when this repo moves to next >= 16.3.0; remove the OTel entry when that dependency stops resolving a vulnerable brace-expansion. Tracked in issue #47.",
+  "//overrides": "Transitive security floor for `npx audit-ci --config ./audit-ci.jsonc` (the CI gate: prod deps, high+). The postcss and sharp floors that used to live here are GONE as of the next 16.3.2 upgrade (#47): they existed only because next 15.5.x hard-pinned postcss 8.4.31 and shipped sharp ^0.34.3, and next 16.3.x ships the fixed versions natively -- which was always the stated removal condition. brace-expansion is a SEPARATE chain (@opentelemetry/auto-instrumentations-node -> resource-detector-gcp -> gcp-metadata -> gaxios -> rimraf -> glob -> minimatch@9), unrelated to next, and is deliberately SCOPED, not global: this tree legitimately resolves three majors of brace-expansion -- minimatch@10 (top level, used by eslint) needs ^5.0.5, minimatch@9 needs ^2.0.2, minimatch@3 needs ^1.1.7 -- and a global pin to 2.x breaks eslint with `TypeError: (0 , brace_expansion_1.expand) is not a function`, because only 5.x exports a named `expand`. Remove this entry when @opentelemetry/auto-instrumentations-node stops resolving a vulnerable brace-expansion.",
   "overrides": {
-    "postcss": "^8.5.26",
-    "sharp": "^0.35.3",
     "@opentelemetry/auto-instrumentations-node": {
       "brace-expansion": "^2.1.4"
     }
