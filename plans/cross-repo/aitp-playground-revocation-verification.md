@@ -807,11 +807,8 @@ operation, if that table tracks binding coverage.
 
 ### Phase 6 — Verify the snapshot in the production revocation path
 
-**Status:** BLOCKED on an aitp-sdk **release**, not a merge (2026-08-25). Phase 5 is
-implemented (`aitp-rs#90`, open); `verify_revocation_list` is absent from every published
-wheel — PyPI's latest is 0.5.0. Not attempted: see `aitp-playground/PENDING.md` P8 for the
-unblock sequence and for why landing only the deny-set restructure would be worse than
-waiting.
+**Status:** DONE (2026-08-26, verifier Fable, both axes). Axis A `43bfffe`, Axis B
+`94a4826`, floor bump `037ae5f`. 490 tests pass with zero skips against `aitp-sdk` 0.6.0.
 **Depends on:** Phase 5 (SDK binding), Phase 2 (the convention interlock lands first)
 **Delivers:** The playground actually enforces RFC-AITP-0008's trust model, per Decision D1:
 an unverifiable snapshot is *discarded* — never applied, never trusted — and the absence of
@@ -984,6 +981,29 @@ with the Phase 2 test-only signer, never pasted from output. Integration:
 `test_protocol_e2e.py::_check_revocation_via_cp` extended to assert that
 `revocation.list_fetched` now carries `verified: true` and the pinned issuer AID — the event
 is the proof that verification ran, not merely that entries arrived.
+
+**[IMPL] What implementation revealed — three of the plan's own statements were wrong.**
+
+1. **"CP configured ⇒ `fail_closed` default" is too coarse.** Applied literally it rejects
+   every capability call on any deployment that has not set `CP_AID` — which is every
+   deployment at the moment the setting ships. The boundary is *`can_verify`*: a CP **and** a
+   pinned issuer. "Verification was never configured" and "configured but currently stale"
+   are different states, and only the second is degraded. A federated e2e test caught this,
+   not review.
+2. **But the SDK's capability must NOT be part of that boundary.** Folding
+   `hasattr(aitp, "verify_revocation_list")` into `can_verify` silently downgrades a
+   deployment that *did* opt in but runs an old wheel — a capability probe treated as
+   consent, which is the posture this phase exists to remove. Pin set + old SDK ⇒ **degraded**.
+3. **The poll must refresh after a short grace period** — not after a full interval (which
+   leaves a `fail_closed` agent 403ing for `poll_secs` after start-up, making D1's
+   "start-up is not flake" claim false) and not immediately (which connects to a socket
+   uvicorn has not bound yet, because the loop refreshes via this agent's own admin route).
+
+Also: an unrecognized `fail_mode` now fails closed — §3.1 requires an explicit opt-in for
+availability-first behaviour, and a typo is not one. And `CP_AID` had to be pinned in
+`docker-compose.test.yml` (derived from the stack's deterministic `CP_AID_SEED_HEX`), without
+which the shipped stack runs unchecked and the CP half of `revocation-via-cp` goes quiet
+rather than failing.
 
 **Docs.** `docs/control-plane.md`, `docs/aitp-integration.md`.
 
