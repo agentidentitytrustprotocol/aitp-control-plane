@@ -15,4 +15,8 @@ yarn-debug.log*
 yarn-error.log*
 
 temp/
-plans/
+plans/*
+# Cross-repo plans are tracked: written here, but read by a sibling repo, so a
+# GitHub blob URL has to resolve from that repo's issues and PRs. Local working
+# plans stay ignored.
+!plans/cross-repo/
