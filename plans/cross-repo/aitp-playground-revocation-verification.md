@@ -166,7 +166,7 @@ writes it into the boundary doc so it reads as a decision rather than a violatio
 
 ### Phase 1 — Pin the SDK floor to the convention the repo actually ships
 
-**Status:** TODO
+**Status:** DONE (2026-08-25, verifier Sonnet, 1 round, PASS)
 **Depends on:** nothing
 **Delivers:** `pyproject.toml` states a floor that matches the wire format in `uv.lock`, so
 a 0.4.x resolution is a resolver error rather than a silent, signature-blind downgrade.
@@ -187,6 +187,13 @@ a diagnostic. A cap also silently defeats the `bump-aitp` automation rather than
 it. Take the floor, get the diagnostic from the interlock. Reconsider only if Phase 5 stalls
 indefinitely and the interlock never ships.
 
+**[IMPL] Also fixed in this phase, unplanned:** the block comment claimed "Floor pinned to
+0.3.0" while the dependency read `>=0.4.0` — a pre-existing drift confirmed against
+`git show HEAD:pyproject.toml`. The rewritten comment records both real floors (0.3.0
+compact-JWS, 0.5.0 inner-body) rather than layering a new one on a false one. Every factual
+claim in it was checked against `aitp-rs/CHANGELOG.md`, including "No dual-accept is
+implemented" verbatim.
+
 **Edge cases & failure modes.** `uv.lock` already resolves 0.5.0, so `uv sync --locked`
 stays green and no lockfile churn is expected — if the lock *does* change, that is a signal
 worth reading, not noise to commit past. The Docker build ignores `pyproject`'s floor
@@ -196,7 +203,15 @@ no effect on the e2e stack; that gap is Phase 3's problem, not this one's.
 **Acceptance criteria.**
 1. `pyproject.toml` reads `"aitp-sdk>=0.5.0"`.
 2. The floor comment names the inner-body change and why ≤0.4.x is wire-incompatible.
-3. `uv sync --locked` succeeds with **no** modification to `uv.lock`.
+3. ~~`uv sync --locked` succeeds with **no** modification to `uv.lock`.~~
+   **[IMPL] This criterion was wrong and is superseded.** It is unsatisfiable together with
+   criterion 1: `uv.lock` mirrors the *declared specifier string* in
+   `[package.metadata].requires-dist`, so editing `pyproject.toml`'s specifier makes the lock
+   stale by construction and `uv sync --locked` refuses until `uv lock` regenerates that one
+   line. Reproduced during verification. The criterion that actually carries the intent:
+   **`uv.lock`'s resolved `aitp-sdk` version does not move, and no other package's resolution
+   changes** — verified byte-for-byte on the `[[package]] name = "aitp-sdk"` block
+   (`0.5.0` before and after) with a 1-line total lock diff.
 4. `uv run pytest` is green; `uv run ruff check src agents tests` is clean.
 
 **Tests.** No new test — the assertion is the lockfile-consistency check in CI
@@ -208,7 +223,7 @@ no effect on the e2e stack; that gap is Phase 3's problem, not this one's.
 
 ### Phase 2 — A signing-convention interlock in the fast unit suite
 
-**Status:** TODO
+**Status:** DONE (2026-08-25, verifier Fable, 1 round, PASS)
 **Depends on:** Phase 1
 **Delivers:** A test that fails, by name, on **every PR** if the installed `aitp-sdk` moves
 its revocation signing input again. This is the interlock issue #46 asks for, at a tier
@@ -319,6 +334,30 @@ output as the expected value is the bug class this entire effort exists to remov
 **Tests.** This phase *is* the test. It must also not perturb `tests/unit/test_cp_client.py`
 (which mocks transport and asserts parse shape only) — that file should be unchanged.
 
+**[IMPL] What implementation revealed.**
+
+1. **Criterion 6's mutation check silently no-ops the obvious way.** `uv run` re-syncs the
+   venv to `uv.lock` before executing, so `uv pip install 'aitp-sdk==0.4.1' && uv run pytest`
+   quietly tests **0.5.0** and reports green — the exact false-confidence failure this phase
+   exists to remove, reproduced in the act of checking for it. Use
+   `uv run --no-sync`. Restore with `uv sync --locked`.
+2. **The empirical convention table** (probed under both wheels, not reasoned):
+   `0.4.1 -> wrapped=True, inner_body=False`; `0.5.0 -> inner_body=True, wrapped=False`.
+   The interlock discriminates the intended thing in both directions.
+3. **`self_inclusive` cannot be shown non-vacuous by construction, and that is structural.**
+   Firing it needs `sig = Sign(sha256(jcs(body ∪ {"signature": sig})))` — a fixed point no
+   signer can produce. The plan's [REV] text implied the same by-construction proof as
+   `wrapped`; it does not exist. Implemented instead as: a distinctness check across all
+   three inputs (so no assertion aliases another), a `"signature" not in body` shape guard,
+   and a test that records *why* the stronger proof is absent. The assertion remains
+   worthwhile — it guards a convention change, not a forgeable artifact.
+4. **The vendored canonicalizer is 201 lines**, stdlib-only, byte-identical to
+   `aitp_verifier/jcs.py` below the provenance header (verified programmatically by the
+   verifier, with `# ruff: noqa` confirmed to be hiding nothing).
+5. **Accepted residual:** a `skipif` skip keeps CI green — `pytest -q` with no `-ra` shows
+   `N skipped` and never prints the reason. "Loud" here means loud-when-read. Logged in
+   `ASSUMPTIONS.md`; a CI-failing guard would be a different design than the plan chose.
+
 **Docs.** None yet; Phase 7 records the boundary carve-out once the shape is settled.
 
 ---
@@ -410,7 +449,7 @@ delegation + handshake e2e must stay green unmodified.
 
 ### Phase 3 — Make the e2e stack — and the published image — use the pinned wheel [REV]
 
-**Status:** TODO
+**Status:** DONE (2026-08-25, verifier Sonnet, 2 rounds, PASS)
 **Depends on:** Phase 1
 **Delivers:** Two things, and the second is the larger one. (a) The `docker-compose e2e`
 stack runs the pinned `aitp-sdk`, so a pin/behaviour mismatch is observable at all — today
@@ -499,6 +538,28 @@ artifact from the shipped one, and adds a second pin to keep in sync with `uv.lo
 8. **[REV]** Rebuilding the same commit twice yields the same SDK version. Today it does not,
    and that is the defect this criterion retires.
 
+**[IMPL] What implementation revealed.**
+
+1. **A regression this phase introduced, caught in verification.** Dropping the sibling
+   `aitp-rs` checkout is correct for `build-and-push` but **wrong for `e2e`**:
+   `Dockerfile.cp-e2e:46-48` compiles the **control plane's** own napi binding from
+   `aitp-rs` source — a dependency entirely separate from the playground's SDK, because the
+   CP repo checks in only a `darwin-arm64` `.node`. Removing it would have failed the
+   `aitp-cp` image in CI. Local testing could not see this: `aitp-rs` exists on disk here
+   regardless of what CI checks out. Restored to `e2e` only.
+2. **`aitp-cp` is a symlink to `aitp-control-plane`.** Switching branches in one changes the
+   control plane the e2e stack builds. CI has no such coupling (fresh checkout per path).
+3. **Criterion 4 is unverifiable on an arm64 host** — the CP image fails to build with
+   `bindings.lockfileTryAcquireSync is not a function` (a Next.js/`@next/swc` native-binding
+   fault), reproduced with `--no-cache`, before the playground image is reached. Tracked as
+   `PENDING.md` P5; CI runs it on `linux/amd64`.
+4. **`aitp` exposes no `__version__`.** The plan's criterion 2 said "`aitp.__version__` (or
+   equivalent)" — the equivalent is `importlib.metadata.version("aitp-sdk")`, which
+   `/capabilities` already reports.
+5. **Verified empirically against real images:** pinned wheel installed (`0.5.0`, matching
+   `uv.lock`); `/capabilities` **byte-identical** across `pypi` and `path` builds; `path`
+   still compiles; no `cargo`/`rustc`/`maturin` on the default path.
+
 **Tests.** Existing `tests/integration/test_protocol_e2e.py` must stay green. Add the
 version assertion from criterion 2 as a real check (extend
 `_check_revocation_via_cp`-adjacent setup, or a dedicated `test_sdk_version_matches_lock`).
@@ -509,7 +570,7 @@ version assertion from criterion 2 as a real check (extend
 
 ### Phase 4 — Run the e2e stack pre-merge on SDK-bump PRs
 
-**Status:** TODO
+**Status:** DONE (2026-08-25, verifier Sonnet, PASS with criterion 4 deferred)
 **Depends on:** Phase 3 (running e2e on a PR is only meaningful once it tests the pinned wheel)
 **Delivers:** The cross-implementation check runs **before** an SDK bump merges, not after.
 
@@ -551,13 +612,30 @@ auto-merge armed, detection lands after the change is already on `main`.
 **Tests.** CI-configuration change; the evidence is observed job behaviour on a real PR of
 each kind, recorded in the PR description.
 
+**[IMPL] What implementation revealed.**
+
+1. **Criterion 4 is unmet and cannot be met from inside this diff.** `docker-compose e2e` is
+   absent from `main`'s required status checks (only lint, the two test matrices, and
+   integration are), so the widened job runs pre-merge and blocks nothing. Adding it is a
+   repo-wide branch-protection change affecting every contributor — recorded as `PENDING.md`
+   P7 with the reproduction and the skipped-vs-required trap, not silently applied.
+2. **The filter should be `uv.lock` alone, not `uv.lock` + `pyproject.toml`.** Phase 1
+   established that uv mirrors the declared specifier into `[package.metadata].requires-dist`,
+   so *any* dependency edit necessarily moves `uv.lock`. Adding `pyproject.toml` buys nothing
+   and costs a ~6-minute two-checkout job on every `[tool.ruff]` or LLM-extras bump — the cost
+   regression criterion 2 exists to prevent.
+3. **`needs:` on a filter job silently weakens the push path.** Gating `e2e` on `changes`
+   means a transient failure of the filter turns into "e2e did not run on main". `always()`
+   in the condition restores independence.
+
 **Docs.** `internal_docs/testing.md` — when e2e runs and why.
 
 ---
 
 ### Phase 5 — Bind `verify_revocation_list` in the Python and Node SDKs [REV — rewritten]
 
-**Status:** TODO — **implementation phase in `aitp-rs`**, not an issue to file.
+**Status:** DONE (2026-08-25, verifier Fable, 2 rounds, PASS). Implemented in `aitp-rs` on
+`feat/bind-verify-revocation-list`.
 **Depends on:** nothing
 **Delivers:** The prerequisite for Phase 6, and — independently of this plan — the missing
 half of a Tier C conformance operation in two shipped SDKs.
@@ -698,6 +776,29 @@ each gain the criterion-2 pair and the criterion-5 committed-vector check. Do **
 criterion 5 by minting with the same SDK and verifying it back — that is the circularity
 Phase 2's Context section is about, and it is what let the 0.5.0 divergence ship.
 
+**[IMPL] What implementation revealed.**
+
+1. **Node's cause channel was wrong on the first pass, in the exact way this phase exists to
+   prevent.** `Error::new(Status::GenericFailure, format!("{code}: {message}"))` makes
+   `error.code` **always** `"GenericFailure"` — the cause was recoverable only by parsing
+   `error.message`, i.e. the binding shipped the anti-pattern it was written to remove, with
+   a code comment claiming otherwise. Fixed with `Env::throw_error(&msg, Some(code))` +
+   `Status::PendingException`. Verified live: `err.code` is now the cause and the message
+   carries no prefix.
+2. **`TctError::IssuerMismatch` already existed** (`crates/aitp-tct/src/error.rs`) — the plan's
+   earlier claim that a new variant was needed was wrong. One-line fix at `revocation.rs:134`.
+3. **One emitted value did move.** The conformance adapter maps through `tct_error_code`, so a
+   revocation issuer mismatch now reports `TCT_SIGNATURE_INVALID` instead of
+   `INVALID_ENVELOPE`. No fixture pins it (`rev-001`..`rev-004` cover staleness, soft-fail,
+   success, ordering), but "matching callers are unaffected" was too strong and the CHANGELOG
+   now says so.
+4. **pyo3 0.22's `create_exception!` trips `unexpected_cfgs`**, which fails CI's
+   `clippy -D warnings`. Scoped an `#[allow]` to a private module rather than loosening the
+   lint crate-wide.
+5. **`aitp-example-two-agents::demo_runs_end_to_end` is flaky** — it binds port `:0`, drops the
+   listeners, then rebinds in child processes (TOCTOU) with a fixed 300ms sleep. Pre-existing,
+   unrelated to this phase; noted so the next red run is not misdiagnosed.
+
 **Docs.** `bindings/aitp-py/aitp.pyi`, `bindings/aitp-node/index.d.ts`, `CHANGELOG.md`. Note
 in `docs/conformance.md` that the bindings now cover the `verify_revocation_snapshot`
 operation, if that table tracks binding coverage.
@@ -706,8 +807,11 @@ operation, if that table tracks binding coverage.
 
 ### Phase 6 — Verify the snapshot in the production revocation path
 
-**Status:** BLOCKED on Phase 5 (which is now an aitp-rs implementation phase, not an
-upstream request — see its rewrite). **[REV]**
+**Status:** BLOCKED on an aitp-sdk **release**, not a merge (2026-08-25). Phase 5 is
+implemented (`aitp-rs#90`, open); `verify_revocation_list` is absent from every published
+wheel — PyPI's latest is 0.5.0. Not attempted: see `aitp-playground/PENDING.md` P8 for the
+unblock sequence and for why landing only the deny-set restructure would be worse than
+waiting.
 **Depends on:** Phase 5 (SDK binding), Phase 2 (the convention interlock lands first)
 **Delivers:** The playground actually enforces RFC-AITP-0008's trust model, per Decision D1:
 an unverifiable snapshot is *discarded* — never applied, never trusted — and the absence of
@@ -887,7 +991,8 @@ is the proof that verification ran, not merely that entries arrived.
 
 ### Phase 7 — Correct the docs that describe a boundary the code does not hold
 
-**Status:** TODO (the corrective half can ship with Phase 2; the rest tracks Phases 2B and 6)
+**Status:** DONE (2026-08-25, verifier Opus, 2 rounds, PASS) — the corrective half shipped;
+the "verification is real" claims for revocation still track Phase 6.
 **Depends on:** Phase 2 for the carve-out; Phase 2B for the manifest half of the `:67`
 correction **[REV]**; Phase 6 for the revocation half and the "verification is real" claims
 **Delivers:** Docs that match the code, including the honest interim state.
