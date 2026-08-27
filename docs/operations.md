@@ -39,6 +39,44 @@ signing key, not a config toggle.
 
 See [`api.md`](api.md#authentication) for the full auth matrix.
 
+### Verifying the request gate
+
+Auth, rate limiting, CORS and `x-request-id` injection all live in one file
+(`src/middleware.ts`). Unit tests call its exported function directly, which
+proves the *logic* but cannot prove Next actually **attached** it — a gate file
+in a location Next does not recognise builds green, emits no warning, and leaves
+every `/api/*` route unauthenticated and unthrottled.
+
+```sh
+npm run verify:gate
+```
+
+Builds the app and boots it, then asserts the whole contract over HTTP: 15
+checks covering rejection of unauthenticated requests, acceptance of valid keys,
+all three rate-limit buckets with their `Retry-After` / `X-RateLimit-*` headers,
+probe-path exemption, preflight handling, fail-closed behaviour when `API_KEYS`
+is unset in production, and that the gate is attached with an unchanged matcher.
+
+Two properties make it worth more than a smoke test:
+
+- **It runs with a different `CORS_ORIGIN` than it built with**, and asserts the
+  served header matches the *runtime* value. Asserting mere presence would pass
+  on an artifact that had frozen the value at build time.
+- **It enumerates the public route set from the built manifest, never from
+  `PUBLIC_PATHS`**, and diffs it against `scripts/request-gate-baseline.json`.
+  Re-deriving the expectation from the code under test would be a tautology that
+  reports green while the gate is open.
+
+If a route's classification legitimately changes, review every line of the
+printed diff — each `public` entry is a route reachable with no credentials —
+then regenerate:
+
+```sh
+node scripts/verify-request-gate.mjs --build --update-baseline
+```
+
+CI runs this on every push; a non-zero exit fails the build.
+
 ## Rate limiting
 
 In-memory, per-process token buckets on every `/api/*` route except the probes
