@@ -21,3 +21,14 @@ temp/
 # blob URL. An issue in another repo that wants the content should quote it
 # rather than link to it.
 plans/
+
+# /drive process artifacts. Same rule as plans/ above: working documents, never
+# committed. These were untracked but NOT ignored, so a `git add -A` swept them
+# into PRs (DECISIONS.md O2). Anything here that must outlive a session gets
+# promoted deliberately — to an issue, a PR body, or an inline code comment
+# next to the thing it explains (see package.json's `//overrides` key and the
+# comment blocks in next.config.ts).
+PROGRESS.md
+ASSUMPTIONS.md
+DECISIONS.md
+.drive.lock
