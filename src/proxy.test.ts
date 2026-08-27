@@ -1,5 +1,5 @@
 /**
- * Regression tests for middleware's public/private routing.
+ * Regression tests for proxy's public/private routing.
  *
  * The original `PUBLIC_GET_PREFIXES` array used startsWith() — that
  * accidentally exposed `/api/registry/agents/{aid}/export` (an admin
@@ -8,7 +8,7 @@
  * another sub-route under /agents/" doesn't reintroduce the leak.
  */
 
-import { isPublicRequest } from './middleware';
+import { isPublicRequest } from './proxy';
 
 describe('isPublicRequest', () => {
   describe('explicit public collection paths', () => {

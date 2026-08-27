@@ -3,7 +3,7 @@ import type { NextConfig } from 'next';
 // Gate `output: 'standalone'` behind an env var so the Docker build
 // (which copies .next/standalone into the runner image) gets it while
 // local `next start` workflows are not regressed — `next start` is
-// incompatible with the standalone output and crashes the middleware
+// incompatible with the standalone output and crashes the proxy
 // bundle with "Native module not found" on every request.
 const standalone = process.env.NEXT_OUTPUT === 'standalone';
 
@@ -54,14 +54,19 @@ const nextConfig: NextConfig = {
   //     Also externalize the `aitp` NAPI loader so webpack never tries
   //     to parse `aitp.<platform>.node`.
   //
-  //   - Edge runtime (middleware bundle): can NEITHER bundle these
-  //     packages (no fs/path) NOR do `commonjs require()` at runtime
-  //     (that's what threw "Native module not found:
-  //     @opentelemetry/api" on every request and 500'd the service).
-  //     Stub them out with empty modules. middleware.ts never reaches
-  //     OTel code in practice — the import graph only sees these
-  //     packages because webpack statically traces instrumentation.ts
-  //     before the runtime guard runs.
+  //   - Edge runtime: as of the proxy migration (#58), the gate at
+  //     src/proxy.ts is Node-runtime-only, so nothing in this app
+  //     targets the Edge runtime anymore. This `nextRuntime === 'edge'`
+  //     branch below still executes on every build — webpack still
+  //     invokes this config function with nextRuntime='edge' — but the
+  //     edge compiler pass it configures now receives zero entrypoints
+  //     and emits nothing: unreachable, not uninvoked. It used to stub
+  //     the Node-only OTel/gRPC/aitp packages that neither bundle (no
+  //     fs/path) nor work via `commonjs require()` at runtime — that's
+  //     what threw "Native module not found: @opentelemetry/api" on
+  //     every request and 500'd the service, back when this compiled
+  //     the Edge middleware bundle. Removing this now-inert branch is
+  //     tracked in #54; out of scope here.
   webpack: (config, { isServer, nextRuntime, webpack }) => {
     if (isServer && nextRuntime === 'nodejs') {
       const externals = Array.isArray(config.externals)
@@ -114,7 +119,7 @@ const nextConfig: NextConfig = {
   // `headers()` at BUILD time and freezes the result into
   // routes-manifest.json, so CORS_ORIGIN would be baked into the image
   // (defeating runtime config on Railway/Docker). CORS is instead applied
-  // per-request in src/middleware.ts, which reads CORS_ORIGIN at runtime.
+  // per-request in src/proxy.ts, which reads CORS_ORIGIN at runtime.
 };
 
 export default nextConfig;

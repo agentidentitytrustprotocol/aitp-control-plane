@@ -1,6 +1,6 @@
 /**
  * End-to-end flow exercise. Drives the route handlers directly (no
- * HTTP listener, no middleware) but uses a real Postgres and real
+ * HTTP listener, no proxy) but uses a real Postgres and real
  * AITP cryptography via the Rust binding.
  *
  * Flow:
