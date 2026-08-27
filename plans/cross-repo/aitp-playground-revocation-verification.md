@@ -5,7 +5,7 @@
 they're written; the target repo *reads* this file, it is never written into)
 **Tracking issue:** `aitp-playground#46`
 **Companion (issuer side, shipped):** `aitp-control-plane` PR #46 (`cd35220`), issue #44
-**Date:** 2026-08-25
+**Date:** 2026-08-25 · **Refreshed:** 2026-08-27 (**[R3]**, see header)
 **Revised:** 2026-08-25 — verification pass against all five sibling checkouts. Every
 factual claim in the original draft held. The revision closes five open items that turned
 out to be checkable (marked **RESOLVED** in place), widens Phase 3 to cover the published
@@ -33,6 +33,36 @@ since #87/#88 opened), and drifted line numbers in `docker.yml`, `agent_admin.py
 transition-window MAY (rejecting the wrapped form is family policy, stricter than the spec's
 floor), an expired-manifest failure mode in Phase 2B, and a fourth blind ingest — the CP's
 own registry — in Enterprise concerns.
+
+**[R3] Refresh, 2026-08-27 — the plan is COMPLETE; reconciled against the repo.**
+All eight phases are shipped. Phase 2B's `Status: TODO` was **stale**, not outstanding — it
+landed in `aitp-playground#47` (`3107e8f`), flipped in place below with evidence. Every
+`PENDING.md` item is closed, `aitp-playground#46` is **CLOSED**, and the repo has **no open
+issues**.
+
+What moved underneath this plan since it was written:
+
+| Then (2026-08-25) | Now (2026-08-27) |
+|---|---|
+| `aitp-sdk>=0.5.0` floor (Phase 1) | **`>=0.7.0`** (`pyproject.toml:37`) |
+| `verify_revocation_list` unbound — Phase 5's whole subject | Bound and **published in 0.6.0**; called at `agents/base/revocation_refresh.py:117` |
+| Failure causes were prose | **0.6.0/0.7.0 ship typed errors with a stable `.code`** on both the revocation and manifest paths |
+| — | **New work beyond this plan:** `#50` (`c7f8fc1`) enforces delegation revocation and branches on those SDK error codes. Enabled by 0.7.0; not a phase here |
+
+**Upstream vindicated Decision D1 rather than invalidating it.** `aitp-rs`'s 0.6.0 binding
+notes keep `VerifyRevocationListContext` at `{expected_issuer, now}` and state that
+`published_at` staleness belongs to the caller, because "collapsing authenticity and
+freshness into one switch is how a `soft_fail` mode ends up reporting a *forged* snapshot as
+not-revoked" — D1's two-axis split, reached independently. It is live in
+`src/aitp_playground/config.py:61,68` as `revocation_fail_mode="fail_closed"` /
+`revocation_max_staleness_secs=300`.
+
+**One residual, found by this refresh — see the new Phase 8.** `agents/` verifies; `src/`
+does not. `src/aitp_playground/cp_client/client.py:206` still parses a snapshot
+signature-blind, and its own docstring says so while citing two references that are now
+closed.
+
+---
 
 ---
 
@@ -364,7 +394,18 @@ output as the expected value is the bug class this entire effort exists to remov
 
 ### Phase 2B — Verify peer manifests at both ingest sites [REV — new phase]
 
-**Status:** TODO
+**Status:** DONE (shipped in `aitp-playground#47` / `3107e8f`; status corrected by the
+**[R3]** refresh on 2026-08-27, which found it had been left at TODO).
+
+**[R3] Evidence, checked against the tree.** Both ingest sites the phase named are covered,
+through a shared `_verify_peer_manifest` helper rather than two call sites:
+- Handshake: `agents/base/agent_admin.py:78` — `aitp.verify_manifest_json(envelope_json)`.
+- Delegation: `agents/base/agent_admin.py:516` — `_verify_peer_manifest(r.text, …)` called
+  **before** `delegatee_aid = delegatee_manifest["aid"]` is read, which is the ordering the
+  phase insisted on. The in-code comment states the reason in the phase's own terms:
+  *"Verify BEFORE reading the AID: this value is the delegation's recipient."*
+
+Covered by `tests/unit/test_manifest_verification.py` (358 lines in #47, +67 in #50).
 **Depends on:** nothing (deliberately not Phase 1 — it is orthogonal to the SDK floor)
 **Delivers:** The playground stops trusting an unauthenticated fetch to tell it *who it is
 delegating to*. This is the one real security fix in the whole plan that is **not blocked
@@ -1060,6 +1101,74 @@ the caveat when Phase 6 lands.
 
 ---
 
+### Phase 8 — Close the second revocation ingest, in `src/` [R3 — new phase]
+
+**Status:** TODO — the only outstanding work in this plan.
+**Depends on:** nothing. Phase 5's binding shipped in 0.6.0 and the floor is already
+`>=0.7.0`, so there is no upstream blocker.
+
+**Delivers.** One story about snapshot trust in this repo instead of two contradictory ones.
+
+**The finding.** Phase 6 verified *"the production revocation path"* — and it did, in
+`agents/`. There is a **second** ingest, in `src/`, that Phase 6 never covered:
+
+```
+src/aitp_playground/cp_client/client.py:206   fetch_revocation_list()
+    inner = data.get("revocation_list") or data      # :236 — signature never checked
+```
+
+Its docstring is explicit — *"**The signature is not checked** … the deny-set this populates
+is only as trustworthy as the transport that delivered it (aitp-playground#46, PENDING.md
+P8)"* — and **both references it defers to are now closed**: `#46` is CLOSED, and P8 is
+struck through as *"CLOSED 2026-08-26 · Resolved by: aitp-sdk 0.6.0 published; floor raised;
+both axes shipped"*. The comment points a reader at resolved tickets as the reason a hole is
+still open.
+
+**Severity: low today, and stating why matters more than the rating.** `fetch_revocation_list`
+has **no production callers** — only `tests/unit/test_cp_client.py`. Verified by grep across
+every `*.py` outside `.venv`. So this is not a live bypass of the deny-set; the enforcing
+path is `agents/base/revocation_refresh.py`, which verifies.
+
+That is exactly what makes it worth closing rather than noting. It is a method that *looks*
+like the way to fetch revocations, sits in the client an integrator would reach for first,
+and carries a docstring disclaiming verification on the authority of two closed tickets. It
+becomes a real vulnerability on the day someone wires it up — and nothing in the repo would
+flag that.
+
+**Approach — decide which of two, do not do both.**
+
+1. **Delete it.** Dead code whose only consumers are its own tests. The honest option if
+   nothing is meant to call it. Cheapest, and removes the trap outright.
+2. **Verify it**, matching `revocation_refresh.py`: call
+   `aitp.verify_revocation_list(envelope_json, expected_issuer)` before reading `entries`,
+   branch on the typed `.code` (0.6.0+), and discard on failure per RFC-AITP-0008 §1.5 —
+   Axis A of Decision D1, unconditionally, with no `fail_mode` switch at this layer.
+
+**Recommendation: (1), delete.** Two ingest paths for the same artifact is the condition
+that produced this divergence in the first place, and `RevocationState` in `agents/` is
+already the single place that owns snapshot trust. Re-verifying a second path preserves the
+duplication that caused the problem. Choose (2) only if a caller is actually planned.
+
+**Do NOT simply update the docstring.** Rewording it to cite the *current* state leaves the
+hole and removes the marker pointing at it — strictly worse than today.
+
+**Acceptance criteria.**
+1. `grep -rn 'revocation_list' src/ --include='*.py'` returns either nothing, or only lines
+   inside a verified path.
+2. No docstring anywhere in `src/` or `agents/` states that a signature is unchecked. (This
+   is the check that would have caught the drift: the claim outlived the condition.)
+3. No reference to `aitp-playground#46` or `PENDING.md P8` survives as a *justification* —
+   both are closed.
+4. If (2) was chosen: a forged-envelope test proves the path rejects, mirroring
+   `tests/unit/test_revocation_freshness.py:233`.
+5. `uv run pytest` green; the e2e stack unaffected either way, since nothing calls it.
+
+**Docs.** The boundary doc Phase 7 corrected names `agents/` as where snapshot trust lives.
+Whichever option is taken, that statement becomes unambiguous rather than approximately
+true.
+
+---
+
 ## Long-term posture
 
 **The real defect is upstream and structural.** Both SDK bindings expose
@@ -1110,6 +1219,20 @@ PyPI, replace the copy with a dev-group dependency and delete the helper.
 ---
 
 ## Adjacent in-flight work — the same defect class, one artifact over [REV]
+
+**[R3] `aitp-control-plane#60` — the same defect class, one repo over.** Filed 2026-08-27
+after the 0.5.0 -> 0.7.0 bump. `aitp-rs`'s changelog named three downstream repos that
+worked around the missing verify binding: *"one hand-rolled a verifier in a test, one
+skipped verification entirely, one rendered 'signed by CP' from the presence of a JSON
+key."* This plan's repo was the **skipped-verification** one, now fixed. The control plane
+is the **hand-rolled-in-a-test** one.
+
+Worth reading alongside this plan's own carve-out, because #60 reaches the *opposite*
+conclusion from the same premise and both are right. The carve-out keeps a hand-written
+oracle in Phase 2 **because** an SDK-signs/SDK-verifies test is circular. #60 argues the
+control plane should **add** the SDK verifier alongside its hand-rolled one rather than
+replace it — same reasoning, applied to a repo that already has the independent half. The
+shared rule: *never let the only verifier be the thing that produced the artifact.*
 
 Spec `45b5ef9` moves the **session bundle's** `signature` from a sibling of the
 `{"session_bundle": …}` wrapper into the inner body, matching what RFC-AITP-0010 §3 always
