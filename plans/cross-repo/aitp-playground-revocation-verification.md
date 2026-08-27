@@ -57,7 +57,28 @@ not-revoked" — D1's two-axis split, reached independently. It is live in
 `src/aitp_playground/config.py:61,68` as `revocation_fail_mode="fail_closed"` /
 `revocation_max_staleness_secs=300`.
 
-**One residual, found by this refresh — see the new Phase 8.** `agents/` verifies; `src/`
+**[R4] Refresh, 2026-08-27 (later same day) — the adjacent work all landed, and two of this
+plan's own instructions were wrong.**
+
+`aitp-rs#95` (superseding `#89`) and `#96` merged; `aitp-verifier-py#13` merged. `#87`, `#88`,
+`#89`, `aitp-verifier-py#10` and `#12` are all closed. **Phase 8 is still the only outstanding
+work in this plan** — re-verified, not assumed: `fetch_revocation_list` still has no
+production callers, and its docstring still cites `aitp-playground#46` and `PENDING.md P8` as
+justification, both closed.
+
+Three corrections, kept in place below because the corrections are the durable value:
+
+| This plan said | What actually happened |
+|---|---|
+| Re-vendoring the spec "should need no production-code change" in `aitp-session-bundle`; a change there "means something else went wrong" | **Wrong, and self-contradictory** — it folded in `#87`, which *is* a change to that crate. The corrected fixtures could not deserialize without the `extensions` slot |
+| A verifier that forgets to exclude `signature` "passes everything as long as it is self-consistent" | **Wrong** — that state is circular and unconstructible. The *positive* test catches it, not the self-inclusion negative |
+| Criterion 3 (cross-implementation) already load-bearing | **True for revocation, false for the session bundle** — `aitp-rs`'s cross-check was reshaping the artifact to make the other side accept it, so it tested the signature and never the wire placement |
+
+The third is the one worth carrying forward: **a compatibility shim inside a
+cross-implementation check silently demotes it to a signature check.** Now closed in `#96`,
+both directions, with reproducible provenance.
+
+**One residual, found by the [R3] refresh — see the new Phase 8.** `agents/` verifies; `src/`
 does not. `src/aitp_playground/cp_client/client.py:206` still parses a snapshot
 signature-blind, and its own docstring says so while citing two references that are now
 closed.
@@ -1171,8 +1192,10 @@ true.
 
 ## Long-term posture
 
-**The real defect is upstream and structural.** Both SDK bindings expose
-`sign_revocation_list`; neither exposes `verify_revocation_list`. **Three** independent repos
+**The real defect is upstream and structural.** **[R4] Stated in the past tense now, because
+Phase 5 fixed it:** both SDK bindings exposed `sign_revocation_list` and *neither* exposed
+`verify_revocation_list` — bound and published in 0.6.0, so the root cause below is closed and
+the reasoning is kept as the record of why. **Three** independent repos
 **[REV]** then did the locally-reasonable thing — `aitp-control-plane` hand-rolled a verifier
 in a test, `aitp-playground` skipped verification entirely, and `aitp-ui-console` renders
 "signed by CP" off the presence of a JSON key — and a signing-convention change crossed a
@@ -1218,7 +1241,7 @@ PyPI, replace the copy with a dev-group dependency and delete the helper.
 
 ---
 
-## Adjacent in-flight work — the same defect class, one artifact over [REV]
+## Adjacent work, now landed — the same defect class, one artifact over [R4 — post-mortem]
 
 **[R3] `aitp-control-plane#60` — the same defect class, one repo over.** Filed 2026-08-27
 after the 0.5.0 -> 0.7.0 bump. `aitp-rs`'s changelog named three downstream repos that
@@ -1238,72 +1261,96 @@ Spec `45b5ef9` moves the **session bundle's** `signature` from a sibling of the
 `{"session_bundle": …}` wrapper into the inner body, matching what RFC-AITP-0010 §3 always
 specified — the schema and all three `bundle-*` fixtures had followed the schema instead.
 That is the same failure shape this plan exists for (a signing-input placement divergence
-that self-consistency hid), it is in flight right now, and it interacts with this plan in one
-dangerous way. Recorded here so neither effort surprises the other.
+that self-consistency hid), and it interacts with this plan in one dangerous way. Recorded
+here so neither effort surprised the other.
 
-### `aitp-rs#89` — adopt AITP spec @ `45b5ef9`
+**[R4] All of it has now landed** (`aitp-rs#95`, `#96`; `aitp-verifier-py#13`). The
+subsections below are kept rather than deleted: two of them recorded instructions that turned
+out to be **wrong**, and the corrections are the durable value. Read them as a post-mortem,
+not as pending work.
 
-**The load-bearing instruction is: do not merge on the green Rust tests.** Two checks are red
-— `vendored schemas in sync` and `conformance fixtures` — and both are *correct*, not flaky.
-The PR as opened bumps `tests/schemas/SPEC_VERSION` only; every test job passes because it is
-still running against the **old vendored copy**. The drift check is the only job actually
-looking at the new spec. A green Rust suite here is evidence of nothing.
+### `aitp-rs#89` -> superseded by `#95` — adopt AITP spec @ `45b5ef9` [R4 — RESOLVED 2026-08-27]
 
-The fix is to **re-vendor schemas + fixtures onto the same branch**, so the `SPEC_VERSION`
-bump and the content it names land together. A pin that points at content the repo has not
-absorbed is worse than no pin: it reads as adoption.
+**Outcome.** `#89` was closed and superseded by **`aitp-rs#95`** (merged), which landed the
+`SPEC_VERSION` bump, the re-vendored schemas and fixtures, `#87` and `#88` in one PR.
+Conformance ends at `51 passed, 0 failed, 2 skipped of 53`. `#87` and `#88` are closed.
 
-**The stop condition, stated as an instruction to whoever picks it up: if you find yourself
-changing `aitp-session-bundle` logic, stop.** That crate is already correct —
-`SessionTrustBundle` carries `signature` as a body field and `SessionBundleEnvelope` has no
-sibling slot, so the corrected schema *blesses* what the crate already emits. Re-vendoring
-should need no production-code change. A code change there means something else went wrong
-(a mis-vendored fixture, a mis-read diff), and the right move is to find that, not to make
-the crate match a broken input.
+**The instruction that held.** *"Do not merge on the green Rust tests"* was exactly right.
+`#89` sat red for a day on `vendored schemas in sync` and `conformance fixtures` while every
+Rust test job passed against the old vendored copy — a green suite proving nothing, as
+predicted.
 
-**Do not generalize the change to revocation.** This is the interaction that matters to *this*
-plan. The session bundle moves `signature` **inside** the body because it is redistributable —
-signed once by the coordinator, relayed to every participant, and it must carry its own proof
-across any hop that strips the wrapper. The **revocation snapshot keeps `signature` as a
-sibling** of the inner body; RFC-AITP-0001 §5.4.1 now states both rules normatively and
-explains why they differ. Someone who reads the bundle correction as "signatures belong
-inside the body" and applies it to revocation would break exactly what Phase 2 pins, in
-exactly the way that shipped in 0.5.0. Phase 2's `SIGNING_INPUTS.innerBody` / `.wrapped` pair
-is what would catch it — which is another argument for landing Phase 2 early.
+**The instruction that was wrong, and would have stalled whoever followed it.** The stop
+condition said: *"if you find yourself changing `aitp-session-bundle` logic, stop … That
+crate is already correct … Re-vendoring should need no production-code change. A code change
+there means something else went wrong."*
 
-**Folds in two tracked follow-ups, both sequence-sensitive:**
-- **`#88` — remove the dual-shape shim** in the conformance adapter
-  (`crates/aitp-rs-adapter/src/lib.rs` ~`:2885-2932`), which reassembles a sibling-shaped
-  bundle into the internal inner shape so the old fixtures would load. Dead code once the
-  corrected fixtures land. **Only after re-vendoring is green** — removing it first breaks
-  the conformance run against a stale fixture copy. Cleanup, no behaviour change.
-- **`#87` — add the optional `extensions` slot** to `SessionTrustBundle`, which today has
-  `deny_unknown_fields` and no `extensions` field, so a schema-valid bundle carrying one
-  fails to deserialize (RFC-AITP-0001 §7 reserves the slot on *every* signed object).
-  **The trap: model it as `Option<Map>`, never a defaulted empty map with skip-if-empty.**
-  Absent and present-empty canonicalize to different bytes under RFC 8785 — absent emits no
-  key, `{}` emits `"extensions":{}` — so a field that silently normalizes one into the other
-  changes the signing input and breaks verification against a conformant peer. Same class of
-  bug as everything else in this document: an invisible change to what gets hashed.
+Re-vendoring alone was **not** sufficient. `SessionTrustBundle` carried
+`#[serde(deny_unknown_fields)]` and no `extensions` field, so all three corrected `bundle-*`
+fixtures failed to **deserialize** and collapsed to `INVALID_REQUEST` — which is why a
+`BUNDLE_NOT_MEMBER` and a `BUNDLE_EXPIRED` assertion were never even reached. The crate did
+need a production-code change: precisely the one `#87` describes.
 
-### `aitp-verifier-py#12` — read and mint `signature` inside the inner body
+The section contradicted itself — it folded in `#87`, whose entire content is a change to
+that crate, while instructing the implementer to stop if they changed that crate.
 
-Three phases from the companion plan. **No signed bytes change** — both readings canonicalize
-the body with `signature` excluded; under the old shape the body simply never carried one.
-`kat-session-bundle-001` is untouched at 922 canonical bytes. This is wire placement only.
+**Corrected rule.** Re-vendoring must need no change to the **signing input or the wire
+shape**; it may well need the crate to become able to *represent* what the corrected schema
+already allows. Those are different things, and conflating them is what made the stop
+condition unsafe. The safe form of the original instinct: *if re-vendoring makes you change
+what bytes get hashed, stop.*
 
-**The exclusion trap is the whole change and it is easy to miss.**
-`aitp_verifier/sessionbundle.py:51` verifies over `sha256(canonicalize(body))`, which is
-correct **today only by accident**: the body never held a `signature`, so there was nothing
-to strip. Once the member moves in, leaving that line unchanged **hashes the signature into
-its own signing input** and every bundle fails. The signature must be read from `body` *and*
-excluded from the signing bytes — `aitp_verifier/manifest.py:43` already has the idiom
-(`{k: v for k, v in man.items() if k != "signature"}`); reuse it rather than reinventing it.
+**`#88` — remove the dual-shape shim.** Landed in `#95`, sequenced after re-vendoring as
+this plan required. Pure deletion, no behaviour change, as expected.
 
-"Correct by accident" is worth naming as a category. It is the same reason Phase 2 demands
-its negative assertion be **demonstrated** non-vacuous rather than reasoned about: a check
-that passes for a reason other than the one you believe will keep passing right up until the
-premise moves.
+**`#87` — the `extensions` slot.** The trap as stated here was right and was avoided: the
+field shipped as `Option<ExtensionsMap>` with `skip_serializing_if = "Option::is_none"`, so
+absent and present-but-empty stay distinct bytes.
+
+**[R4] The trap has a second layer this plan did not record, and the obvious test misses
+it.** The bundle's signing input is reconstructed **twice** — once in `builder.rs` when
+minting, once in `verifier.rs` when verifying (`BundleSigningBody`). A normalization applied
+in the *verifier's* copy is invisible to every serde- and canonicalization-level test: the
+struct still round-trips, absent and present-empty still canonicalize to different bytes, and
+only the digest silently stops matching what was signed.
+
+Demonstrated by mutation: rewriting the verifier's reconstruction as
+`bundle.extensions.as_ref().filter(|m| !m.is_empty())` left the suite green at **15/15**. The
+existing test that claimed to catch this trap
+(`absent_vs_present_empty_extensions_are_distinguishable_and_stable`) asserts serialization,
+canonical bytes and serde round-trip — but never calls the verifier, so it pins the
+distinction one layer above where it can actually break. Closed by
+`present_but_empty_extensions_still_verifies`, which builds with `Some(empty)` and verifies
+end to end; it fails only under that mutation.
+
+**Generalized, and this is the transferable part:** when a signing input is reconstructed in
+more than one place, a test that pins the artifact's *serialization* does not pin its
+*signing input*. Assert **through the verifier**, not through `serde_json::to_value`.
+
+### `aitp-verifier-py#12` -> merged as `#13` [R4 — RESOLVED 2026-08-27]
+
+**Outcome.** Merged. `signature` is read from `body` and excluded from the signing input,
+reusing `manifest.py:43`'s idiom; a body carrying none now raises `AitpError` rather than
+`KeyError`. `kat-session-bundle-001` is untouched at 922 canonical bytes. Mutation-verified
+on both halves — reverting the exclusion in either the verify path or the minter turns two
+tests red.
+
+**[R4] One piece of the shared reasoning is wrong, and correcting it changes which test you
+write.** This section and the upstream issue both claim a non-excluding implementation
+"passes everything as long as it is self-consistent." **It cannot be self-consistent.**
+Signing bytes that contain the signature you are about to produce is circular, so no minter
+can construct that artifact in the first place. A verifier that forgets the exclusion fails
+*every valid bundle* — and what catches it is the plain **positive** test, not the
+self-inclusion negative.
+
+The self-inclusion test is still worth having, as a forgery guard. It is simply not the thing
+that catches the omission, and believing otherwise means writing the negative and skipping
+the positive — the one combination that fails to detect the bug.
+
+Phase 2 already encodes the correct version of this for the revocation snapshot:
+`test_self_inclusive_shape_is_not_constructible_by_a_signer` names precisely why the shape is
+unreachable for a signer, rather than asserting a verifier rejects something no signer could
+emit.
 
 ### The three acceptance criteria both share — and why this plan should adopt them
 
@@ -1329,11 +1376,41 @@ family:
 
 Criteria 1 and 3 are already load-bearing in this plan: Phase 2's `wrapped`-form negative
 assertion is criterion 1, and Phase 5's acceptance criterion 5 (verify the committed
-`signed-examples/revocation/` vector without re-minting) is criterion 3. **Criterion 2 is
-not, and should be** — this plan currently has no test that a signature cannot be hashed
-into its own input. Add it to Phase 2 as a third `SIGNING_INPUTS` entry: an envelope whose
-canonical bytes were computed with `signature` *included*, asserted to fail. Cheap, and it is
-the one of the three the revocation path has never been tested against.
+`signed-examples/revocation/` vector without re-minting) is criterion 3.
+
+**[R4] Criterion 2 — DONE.** The recommendation to add it to Phase 2 as a third
+`SIGNING_INPUTS` entry landed: `self_inclusive` exists
+(`tests/unit/test_revocation_signing_convention.py:111`), is asserted not to verify (`:183`),
+the three inputs are asserted mutually distinct (`:190`), and `:240` names why the shape is
+unreachable for a signer rather than pretending a verifier is defending against it. No
+further work.
+
+**[R4] Criterion 3 was only *apparently* satisfied for the session bundle — and this is the
+sharpest example this document has of its own thesis.** `aitp-rs`'s
+`cross-impl acceptance (aitp-verifier-py)` job mints with Rust and verifies with the
+independent Python implementation. But
+`tools/mint-signed-examples/src/bin/xcheck_mint.rs` was **stripping `signature` out of the
+bundle body and re-framing it as a sibling** before handing the bytes over, to accommodate
+the Python side's older reading. Its comment was honest that the signed *bytes* did not move,
+and that was true. The consequence was still that the job validated the **signature** and
+never the **wire placement** — for the entire period this plan was being written, while
+citing cross-implementation checking as the remedy.
+
+Closed in `aitp-rs#96`: the pin moved to the post-`#13` verifier, the reframing was deleted,
+and the missing reverse direction was added — a bundle minted by `aitp-verifier-py`'s own
+`_mint_bundle`, verified by `aitp-rs` as committed bytes, with a negative twin rejecting the
+old sibling shape. Two properties were established rather than asserted: provenance is
+**reproducible** (running the fixture's documented regeneration recipe against the two pinned
+commits reproduces it byte-for-byte, which is what keeps direction (b) independent instead of
+circular), and the check is **non-vacuous** (re-introducing the reframing fails with
+`BUNDLE_INVALID_SIGNATURE: session bundle body has no signature`).
+
+**The lesson to carry into every future cross-check:** a cross-implementation test that
+*reshapes* an artifact so the other side will accept it has silently demoted itself from an
+interoperability test to a signature test. **If a compatibility shim lives inside the
+cross-check, the cross-check no longer tests the thing its name claims.** Criterion 3 should
+therefore be stated more strictly than "verify an artifact minted elsewhere": verify it
+**as committed, unmodified in shape as well as in bytes**.
 
 ---
 
@@ -1481,8 +1558,9 @@ as an explicit, Axis-B-only opt-in. Phase 6 is written against that decision.
 `aitp-rs` already have it planned?**
 **RESOLVED — build it; it is not planned, not a duplicate, and not somebody else's repo. [REV]** At the time of the
 draft `aitp-rs` had exactly one issue (#82, closed — the 0.5.0 signing-input change);
-**[F]** #87 and #88 have since been opened for the session-bundle follow-ups recorded in
-"Adjacent in-flight work", and neither touches a revocation-verify binding. Also,
+**[F]** #87 and #88 were since opened for the session-bundle follow-ups recorded in
+"Adjacent in-flight work" — **both closed 2026-08-27 in `aitp-rs#95`** — and neither touched
+a revocation-verify binding. Also,
 `verify_revocation_list` appears in its `plans/jcs-inner-body-signing-input.md` only as an
 internal Rust concern (colocating signer/verifier/KAT), never as a binding deliverable. The
 verify half is absent from `aitp.pyi` and `bindings/aitp-node/index.d.ts` at 0.5.0. The
@@ -1520,10 +1598,10 @@ working plans stay ignored — the narrowest fix; (b) paste this plan's body int
 recommendation**, but it edits repo config in `aitp-control-plane` and is not done here.
 Related to open item **O2** in that repo's `DECISIONS.md`.
 
-**[REV] Still open, and it is now the only thing blocking the handoff.** Everything else in
-this plan is actionable; this file remains untracked, so `aitp-playground#46` cannot link to
-it and Phase 5's PR description cannot cite it from `aitp-rs`. Both want the link. Pick (a)
-or (b) before Phase 5 opens, not after.
+**[R4] RESOLVED — option (a) was taken.** `aitp-control-plane#55` un-ignored
+`plans/cross-repo/` (`.gitignore:18-22`: `plans/*` with a `!plans/cross-repo/` negation), so
+this file is tracked and a GitHub blob URL resolves. The handoff is no longer blocked, and
+`aitp-playground#46` — which wanted the link — is itself now closed.
 
 ---
 
