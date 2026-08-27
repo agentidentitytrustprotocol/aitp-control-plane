@@ -15,8 +15,9 @@ yarn-debug.log*
 yarn-error.log*
 
 temp/
-plans/*
-# Cross-repo plans are tracked: written here, but read by a sibling repo, so a
-# GitHub blob URL has to resolve from that repo's issues and PRs. Local working
-# plans stay ignored.
-!plans/cross-repo/
+# Planning documents are working artifacts and are never committed — including
+# the cross-repo ones. They are written here and read from a sibling checkout by
+# relative path (../aitp-control-plane/plans/cross-repo/...), which needs no
+# blob URL. An issue in another repo that wants the content should quote it
+# rather than link to it.
+plans/
