@@ -162,6 +162,19 @@ async function build() {
 }
 
 // ── server lifecycle ────────────────────────────────────────────────────────
+//
+// `npx next start` spawns a GRANDCHILD that inherits the stdio pipes. Killing
+// only the direct child leaves those pipes open, so the 'data' listeners keep a
+// handle on the event loop and this process never exits — it passed every check
+// in CI and then hung for 18 minutes until the job was cancelled. Two fixes,
+// both needed: spawn detached so the whole process GROUP can be signalled, and
+// exit explicitly rather than trusting the loop to drain.
+
+/** Every server booted this run, so none can be orphaned on any exit path. */
+const spawned = new Set();
+
+/** Hard ceiling. A hang must fail loudly and fast, never burn a CI job slot. */
+const WATCHDOG_MS = 8 * 60_000;
 async function freePort() {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -177,6 +190,7 @@ async function boot(extraEnv = {}) {
   const port = await freePort();
   const child = spawn('npx', ['next', 'start', '--port', String(port)], {
     cwd: ROOT,
+    detached: true,
     env: {
       ...process.env,
       NODE_ENV: 'production',
@@ -195,6 +209,7 @@ async function boot(extraEnv = {}) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  spawned.add(child);
   const logs = [];
   child.stdout.on('data', (d) => logs.push(String(d)));
   child.stderr.on('data', (d) => logs.push(String(d)));
@@ -220,19 +235,51 @@ async function boot(extraEnv = {}) {
   return { base, child, logs };
 }
 
+function killGroup(child, signal) {
+  try {
+    // Negative pid signals the whole process group, reaching the `next start`
+    // grandchild that `npx` wraps.
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 async function shutdown(server) {
-  if (!server?.child || server.child.exitCode !== null) return;
-  server.child.kill('SIGTERM');
-  await new Promise((r) => {
-    const t = setTimeout(() => {
-      server.child.kill('SIGKILL');
-      r();
-    }, 5000);
-    server.child.on('exit', () => {
-      clearTimeout(t);
-      r();
+  const child = server?.child;
+  if (!child) return;
+  spawned.delete(child);
+  if (child.exitCode === null) {
+    killGroup(child, 'SIGTERM');
+    await new Promise((r) => {
+      const t = setTimeout(() => {
+        killGroup(child, 'SIGKILL');
+        r();
+      }, 5000);
+      child.on('exit', () => {
+        clearTimeout(t);
+        r();
+      });
     });
-  });
+  }
+  // The grandchild holds these fds; drop our end so they cannot pin the loop.
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
+/** Last-resort sweep, for any path that skipped a `finally`. */
+function killAllSpawned() {
+  for (const child of spawned) {
+    killGroup(child, 'SIGKILL');
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+  }
+  spawned.clear();
 }
 
 // ── manifests ───────────────────────────────────────────────────────────────
@@ -590,13 +637,34 @@ async function main() {
 
   const total = results.length + 1;
   if (failures) {
-    console.error(`\n${failures}/${total} request-gate checks FAILED`);
-    process.exit(1);
+    throw new Error(`${failures}/${total} request-gate checks FAILED`);
   }
   console.log(`\nall ${total} request-gate checks passed`);
 }
 
-main().catch((err) => {
-  console.error(`\nharness error: ${err.message}`);
+const watchdog = setTimeout(() => {
+  console.error(
+    `\nharness watchdog: exceeded ${WATCHDOG_MS / 60_000} minutes. Failing ` +
+      'rather than hanging the job.',
+  );
+  killAllSpawned();
   process.exit(1);
-});
+}, WATCHDOG_MS);
+watchdog.unref();
+
+process.on('exit', killAllSpawned);
+
+main()
+  .then(() => {
+    clearTimeout(watchdog);
+    killAllSpawned();
+    // Exit explicitly. A lingering handle must not turn a passing run into a
+    // silent hang — that failure mode already cost one 20-minute CI job.
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(`\nharness error: ${err.message}`);
+    clearTimeout(watchdog);
+    killAllSpawned();
+    process.exit(1);
+  });
