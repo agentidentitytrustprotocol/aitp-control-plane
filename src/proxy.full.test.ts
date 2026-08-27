@@ -1,4 +1,4 @@
-// End-to-end unit tests for the middleware() request gate: auth, rate
+// End-to-end unit tests for the proxy() request gate: auth, rate
 // limiting, client-IP resolution and the x-request-id contract. config and
 // the rate limiter are mocked per-scenario so we drive each branch
 // deterministically without env juggling or a real bucket store.
@@ -38,7 +38,7 @@ type Decision = {
   limit: number;
 };
 
-/** (Re)load middleware with a fresh mocked config + rate limiter. The
+/** (Re)load proxy with a fresh mocked config + rate limiter. The
  * check spy records (bucketName, key, limit) so IP/bucket selection can be
  * asserted without exporting the private helpers. */
 function load(
@@ -54,10 +54,10 @@ function load(
   jest.doMock('./lib/config', () => ({ config }));
   jest.doMock('./lib/rate-limit', () => ({ rateLimiter: { check } }));
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { middleware } = require('./middleware') as {
-    middleware: (r: NextRequest) => Response;
+  const { proxy } = require('./proxy') as {
+    proxy: (r: NextRequest) => Response;
   };
-  return { middleware, check };
+  return { proxy, check };
 }
 
 function req(
@@ -70,23 +70,23 @@ function req(
   });
 }
 
-describe('middleware — routing & request id', () => {
+describe('proxy — routing & request id', () => {
   it('ignores non-/api paths entirely', () => {
-    const { middleware, check } = load();
-    const res = middleware(req('/dashboard'));
+    const { proxy, check } = load();
+    const res = proxy(req('/dashboard'));
     expect(res.status).toBe(200);
     expect(check).not.toHaveBeenCalled();
   });
 
   it('stamps x-request-id on a passed-through public request', () => {
-    const { middleware } = load();
-    const res = middleware(req('/api/health'));
+    const { proxy } = load();
+    const res = proxy(req('/api/health'));
     expect(res.headers.get('x-request-id')).toBeTruthy();
   });
 
   it('preserves a caller-supplied x-request-id', () => {
-    const { middleware } = load();
-    const res = middleware(
+    const { proxy } = load();
+    const res = proxy(
       req('/api/health', { headers: { 'x-request-id': 'trace-abc' } }),
     );
     expect(res.headers.get('x-request-id')).toBe('trace-abc');
@@ -105,8 +105,8 @@ describe('middleware — routing & request id', () => {
   // is a permanent unauthenticated reflection endpoint on the auth path, added
   // for test convenience.
   it('forwards x-request-id downstream to the route handler, not just to the client', () => {
-    const { middleware } = load();
-    const res = middleware(
+    const { proxy } = load();
+    const res = proxy(
       req('/api/health', { headers: { 'x-request-id': 'trace-abc' } }),
     );
     expect(res.headers.get('x-middleware-override-headers')).toContain(
@@ -118,8 +118,8 @@ describe('middleware — routing & request id', () => {
   });
 
   it('answers OPTIONS preflight with 204 + CORS headers, no auth or rate limiting', () => {
-    const { middleware, check } = load({ apiKeys: ['k1'] });
-    const res = middleware(req('/api/sessions', { method: 'OPTIONS' }));
+    const { proxy, check } = load({ apiKeys: ['k1'] });
+    const res = proxy(req('/api/sessions', { method: 'OPTIONS' }));
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe(
       'https://console.example.com',
@@ -129,33 +129,33 @@ describe('middleware — routing & request id', () => {
   });
 
   it('stamps the runtime CORS origin on passed-through API responses', () => {
-    const { middleware } = load();
-    const res = middleware(req('/api/health'));
+    const { proxy } = load();
+    const res = proxy(req('/api/health'));
     expect(res.headers.get('access-control-allow-origin')).toBe(
       'https://console.example.com',
     );
   });
 });
 
-describe('middleware — auth', () => {
+describe('proxy — auth', () => {
   it('returns 401 INVALID_API_KEY when keys are set but token is missing', async () => {
-    const { middleware } = load({ apiKeys: ['secret-key'] });
-    const res = middleware(req('/api/sessions'));
+    const { proxy } = load({ apiKeys: ['secret-key'] });
+    const res = proxy(req('/api/sessions'));
     expect(res.status).toBe(401);
     await expect(res.json()).resolves.toMatchObject({ code: 'INVALID_API_KEY' });
   });
 
   it('returns 401 for a wrong token', async () => {
-    const { middleware } = load({ apiKeys: ['secret-key'] });
-    const res = middleware(
+    const { proxy } = load({ apiKeys: ['secret-key'] });
+    const res = proxy(
       req('/api/sessions', { headers: { authorization: 'Bearer nope' } }),
     );
     expect(res.status).toBe(401);
   });
 
   it('admits a valid Bearer token', () => {
-    const { middleware } = load({ apiKeys: ['secret-key'] });
-    const res = middleware(
+    const { proxy } = load({ apiKeys: ['secret-key'] });
+    const res = proxy(
       req('/api/sessions', {
         headers: { authorization: 'Bearer secret-key' },
       }),
@@ -164,8 +164,8 @@ describe('middleware — auth', () => {
   });
 
   it('returns 503 SERVER_MISCONFIGURED for a protected route in prod with no keys', async () => {
-    const { middleware } = load({ apiKeys: [], isProduction: true });
-    const res = middleware(req('/api/sessions'));
+    const { proxy } = load({ apiKeys: [], isProduction: true });
+    const res = proxy(req('/api/sessions'));
     expect(res.status).toBe(503);
     await expect(res.json()).resolves.toMatchObject({
       code: 'SERVER_MISCONFIGURED',
@@ -173,26 +173,26 @@ describe('middleware — auth', () => {
   });
 
   it('falls through (dev) for a protected route with no keys configured', () => {
-    const { middleware } = load({ apiKeys: [], isProduction: false });
-    const res = middleware(req('/api/sessions'));
+    const { proxy } = load({ apiKeys: [], isProduction: false });
+    const res = proxy(req('/api/sessions'));
     expect(res.status).toBe(200);
   });
 
   it('treats GET /api/registry/agents/{aid} as public discovery', () => {
-    const { middleware } = load({ apiKeys: ['k'] });
-    const res = middleware(req('/api/registry/agents/aid:pubkey:z:abc'));
+    const { proxy } = load({ apiKeys: ['k'] });
+    const res = proxy(req('/api/registry/agents/aid:pubkey:z:abc'));
     expect(res.status).toBe(200);
   });
 });
 
-describe('middleware — rate limiting', () => {
+describe('proxy — rate limiting', () => {
   it('returns 429 with Retry-After and X-RateLimit headers when denied', async () => {
     const resetAt = Date.now() + 30_000;
-    const { middleware } = load(
+    const { proxy } = load(
       { apiKeys: [] },
       { allowed: false, remaining: 0, resetAt, limit: 60 },
     );
-    const res = middleware(req('/api/sessions'));
+    const res = proxy(req('/api/sessions'));
     expect(res.status).toBe(429);
     await expect(res.json()).resolves.toMatchObject({ code: 'RATE_LIMITED' });
     expect(Number(res.headers.get('Retry-After'))).toBeGreaterThanOrEqual(1);
@@ -201,26 +201,26 @@ describe('middleware — rate limiting', () => {
   });
 
   it('does not rate-limit exempt probe paths', () => {
-    const { middleware, check } = load();
-    middleware(req('/api/readyz'));
+    const { proxy, check } = load();
+    proxy(req('/api/readyz'));
     expect(check).not.toHaveBeenCalled();
   });
 
   it('skips rate limiting entirely when disabled', () => {
-    const { middleware, check } = load({ rateLimitEnabled: false });
-    middleware(req('/api/health'));
+    const { proxy, check } = load({ rateLimitEnabled: false });
+    proxy(req('/api/health'));
     expect(check).not.toHaveBeenCalled();
   });
 
   it('uses the strict enroll-ip bucket for /api/registry/enroll', () => {
-    const { middleware, check } = load();
-    middleware(req('/api/registry/enroll', { method: 'POST' }));
+    const { proxy, check } = load();
+    proxy(req('/api/registry/enroll', { method: 'POST' }));
     expect(check).toHaveBeenCalledWith('enroll-ip', expect.any(String), 5, 60_000);
   });
 
   it('buckets authenticated traffic by api-key prefix', () => {
-    const { middleware, check } = load({ apiKeys: ['secret-key-value'] });
-    middleware(
+    const { proxy, check } = load({ apiKeys: ['secret-key-value'] });
+    proxy(
       req('/api/sessions', {
         headers: { authorization: 'Bearer secret-key-value' },
       }),
@@ -234,10 +234,10 @@ describe('middleware — rate limiting', () => {
   });
 });
 
-describe('middleware — client IP resolution', () => {
+describe('proxy — client IP resolution', () => {
   it('trusts a configured platform header over XFF', () => {
-    const { middleware, check } = load({ clientIpHeader: 'cf-connecting-ip' });
-    middleware(
+    const { proxy, check } = load({ clientIpHeader: 'cf-connecting-ip' });
+    proxy(
       req('/api/registry/enroll', {
         method: 'POST',
         headers: {
@@ -250,8 +250,8 @@ describe('middleware — client IP resolution', () => {
   });
 
   it('reads XFF from the right by trusted-proxy hop count', () => {
-    const { middleware, check } = load({ trustedProxyHops: 1 });
-    middleware(
+    const { proxy, check } = load({ trustedProxyHops: 1 });
+    proxy(
       req('/api/registry/enroll', {
         method: 'POST',
         // client, edge → with 1 trusted hop the real client is 1 from the end.
@@ -262,8 +262,8 @@ describe('middleware — client IP resolution', () => {
   });
 
   it('does not trust XFF at all with 0 hops, falling back to x-real-ip', () => {
-    const { middleware, check } = load({ trustedProxyHops: 0 });
-    middleware(
+    const { proxy, check } = load({ trustedProxyHops: 0 });
+    proxy(
       req('/api/registry/enroll', {
         method: 'POST',
         headers: {
@@ -276,8 +276,8 @@ describe('middleware — client IP resolution', () => {
   });
 
   it('buckets under "unknown" when no IP headers are present', () => {
-    const { middleware, check } = load();
-    middleware(req('/api/registry/enroll', { method: 'POST' }));
+    const { proxy, check } = load();
+    proxy(req('/api/registry/enroll', { method: 'POST' }));
     expect(check).toHaveBeenCalledWith('enroll-ip', 'unknown', 5, 60_000);
   });
 });
