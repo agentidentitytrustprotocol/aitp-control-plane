@@ -227,6 +227,8 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 
 `jti` must be a UUID; `reason` ≤ 500 chars; `revokedAt` is optional ISO-8601 (defaults to now). Invalid input → `400 JTI_INVALID` / `400 BODY_INVALID`. Recording a revocation also flips the matching `issuedTcts.revoked` flag and cascades to descendant delegations. The signed list at `/.well-known/aitp-revocation-list` refreshes every `REVOCATION_LIST_TTL_SECS` seconds.
 
+Consumers of the signed list should verify it with the `aitp` SDK's `verifyRevocationList(envelopeJson, expectedIssuerAid)` and branch on the thrown error's `.code` (`signature_invalid`, `issuer_mismatch`, `version_unknown`, `expired`, `malformed`), never on its message text.
+
 ### Webhooks
 
 | Method | Path | Auth | Purpose |

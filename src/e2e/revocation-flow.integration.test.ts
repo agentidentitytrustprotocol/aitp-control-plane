@@ -25,7 +25,7 @@
  * order-independent and re-runnable.
  */
 
-import { AitpAgent } from 'aitp';
+import { AitpAgent, revocationSigningBytes, verifyRevocationList } from 'aitp';
 import { NextRequest } from 'next/server';
 import { createHash, createPublicKey, randomUUID, verify as edVerify } from 'node:crypto';
 import { sql } from 'drizzle-orm';
@@ -76,11 +76,42 @@ interface RevocationEnvelope {
   signature: string;
 }
 
-async function fetchList(): Promise<RevocationEnvelope> {
+/** Fetch the served envelope as both the exact raw bytes (`res.text()`) and
+ * the parsed shape. The SDK's `verifyRevocationList` must be handed the raw
+ * bytes: re-serializing the parsed object would *probably* round-trip, and
+ * relying on that reintroduces the exact tautology this issue exists to
+ * remove (it demonstrably still passes when re-serialized — see the D2
+ * note in the plan — which is precisely why re-serializing proves less). */
+async function fetchListRaw(): Promise<{ raw: string; env: RevocationEnvelope }> {
   const res = await revocationListGet();
   expect(res.status).toBe(200);
   expect(res.headers.get('content-type')).toBe('application/json');
-  return (await res.json()) as RevocationEnvelope;
+  const raw = await res.text();
+  return { raw, env: JSON.parse(raw) as RevocationEnvelope };
+}
+
+async function fetchList(): Promise<RevocationEnvelope> {
+  return (await fetchListRaw()).env;
+}
+
+/** Call `fn` (expected to invoke the SDK's void-returning, synchronously-
+ * throwing `verifyRevocationList`) and assert it threw with exactly `code`.
+ * `verifyRevocationList` is NOT a Promise, so `await expect(...).rejects`
+ * silently never asserts, and a bare `.toThrow()` passes on the wrong
+ * error — this throws loudly if `fn` does not throw at all. */
+function expectVerifyCode(fn: () => void, code: string): void {
+  let threw = false;
+  try {
+    fn();
+  } catch (err) {
+    threw = true;
+    expect((err as { code?: unknown }).code).toBe(code);
+  }
+  if (!threw) {
+    throw new Error(
+      `expected verifyRevocationList to throw with code "${code}", but it did not throw`,
+    );
+  }
 }
 
 /** RFC 8785 (JCS) canonicalization — sufficient for this envelope: all
@@ -151,6 +182,13 @@ const issuerAid = `aid:test:rev-issuer-${RUN_ID}`;
 const delegatorAid = `aid:test:rev-delegator-${RUN_ID}`;
 const delegateeAid = `aid:test:rev-delegatee-${RUN_ID}`;
 const grandDelegateeAid = `aid:test:rev-grand-${RUN_ID}`;
+
+/** A fixed, real, seed-derived AID that is simply not the CP's issuer AID.
+ * A malformed AID *string* (e.g. `'aid:test:x'`) throws `GenericFailure`
+ * from the SDK, not `issuer_mismatch` — empirically confirmed against aitp
+ * 0.7.0 — so the issuer-binding negative below must use a real AID or it
+ * is green and vacuous. */
+const secondIdentityAid = AitpAgent.fromSeed(Buffer.alloc(32, 0x11)).aid;
 
 describe('integration: revocation entry → signed well-known list → delegation cascade', () => {
   afterAll(async () => {
@@ -229,6 +267,53 @@ describe('integration: revocation entry → signed well-known list → delegatio
     if (seedHex) {
       const expected = AitpAgent.fromSeed(Buffer.from(seedHex, 'hex')).aid;
       expect(env.revocation_list.issuer).toBe(expected);
+    }
+  });
+
+  it("the SDK's own verifyRevocationList agrees with the independent verifier above", async () => {
+    const { raw, env } = await fetchListRaw();
+    const issuer = env.revocation_list.issuer;
+
+    // Positive: the SDK's own verifier accepts the raw served bytes — the
+    // exact bytes on the wire, not a re-serialization of the parsed object.
+    expect(() => verifyRevocationList(raw, issuer)).not.toThrow();
+
+    // Cross-implementation equality: the SDK's own signing-bytes helper
+    // agrees with this suite's independently-derived inner-body
+    // canonicalization (SIGNING_INPUTS.innerBody, asserted against directly
+    // above). This is the one legitimate use of `revocationSigningBytes`
+    // here — a check that two independent implementations agree — never a
+    // replacement for the hand-rolled `jcs()` verification above.
+    expect(revocationSigningBytes(raw).toString('utf8')).toBe(SIGNING_INPUTS.innerBody(env));
+
+    // issuer_mismatch: verified against a real, seed-derived AID that is
+    // simply not the issuer (see secondIdentityAid comment above).
+    expectVerifyCode(() => verifyRevocationList(raw, secondIdentityAid), 'issuer_mismatch');
+
+    // signature_invalid: a tampered re-serialization of the parsed envelope.
+    const tampered: RevocationEnvelope = JSON.parse(raw) as RevocationEnvelope;
+    tampered.revocation_list.entries.push({ jti: randomUUID(), revoked_at: 0 });
+    expectVerifyCode(
+      () => verifyRevocationList(JSON.stringify(tampered), issuer),
+      'signature_invalid',
+    );
+
+    // expired: one second past the envelope's own expires_at.
+    expectVerifyCode(
+      () => verifyRevocationList(raw, issuer, env.revocation_list.expires_at + 1),
+      'expired',
+    );
+
+    // When the CP runs from a fixed seed, the pinned AID must also verify
+    // under the SDK's own verifier. src/test/setup-integration.ts does NOT
+    // default CP_AID_SEED_HEX, so locally the CP boots an ephemeral
+    // identity and this branch is skipped — guard on the env var rather
+    // than defaulting it (a default here would change the identity every
+    // other integration test runs under).
+    const seedHex = process.env.CP_AID_SEED_HEX;
+    if (seedHex) {
+      const pinnedAid = AitpAgent.fromSeed(Buffer.from(seedHex, 'hex')).aid;
+      expect(() => verifyRevocationList(raw, pinnedAid)).not.toThrow();
     }
   });
 
