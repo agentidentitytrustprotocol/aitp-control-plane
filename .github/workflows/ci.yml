@@ -98,6 +98,20 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
         run: npm run build
 
+      # The request gate (src/proxy.ts) is the API-key auth boundary, the rate
+      # limiter and the CORS layer for every /api/* request. Unit tests call the
+      # exported function directly, which cannot tell you whether Next actually
+      # ATTACHED it — a gate file in a location Next does not recognise builds
+      # green, emits no warning, and leaves the whole API unauthenticated. This
+      # step boots the built server and asserts the contract over HTTP.
+      #
+      # It runs its own build because it must bake in a CORS_ORIGIN that differs
+      # from the one the server is run with; that is the only way to catch the
+      # value being frozen into the artifact. Do not "optimise" it to reuse the
+      # smoke-test build above.
+      - name: Request-gate conformance
+        run: npm run verify:gate
+
   # Fail-fast dependency audit: production deps, high+ advisories only, so
   # routine dev-tooling advisories don't block merges. Reviewed exceptions
   # (with rationale) live in audit-ci.jsonc — new high-sev prod advisories

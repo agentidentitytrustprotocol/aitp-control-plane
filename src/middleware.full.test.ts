@@ -92,6 +92,31 @@ describe('middleware — routing & request id', () => {
     expect(res.headers.get('x-request-id')).toBe('trace-abc');
   });
 
+  // The two assertions above prove the CLIENT sees the request id. Nothing
+  // proved the id actually reaches the route handler — a different contract,
+  // and the one that matters for correlating a downstream log line.
+  //
+  // `NextResponse.next({ request: { headers } })` encodes forwarded headers as
+  // `x-middleware-override-headers` (the allowlist) plus one
+  // `x-middleware-request-<name>` per value. Next's own router consumes exactly
+  // those to rewrite the downstream request, so asserting them here is the real
+  // contract rather than a stand-in for it. Rejected alternative: adding an echo
+  // route to the app so an HTTP-level test could observe the id arriving — that
+  // is a permanent unauthenticated reflection endpoint on the auth path, added
+  // for test convenience.
+  it('forwards x-request-id downstream to the route handler, not just to the client', () => {
+    const { middleware } = load();
+    const res = middleware(
+      req('/api/health', { headers: { 'x-request-id': 'trace-abc' } }),
+    );
+    expect(res.headers.get('x-middleware-override-headers')).toContain(
+      'x-request-id',
+    );
+    expect(res.headers.get('x-middleware-request-x-request-id')).toBe(
+      'trace-abc',
+    );
+  });
+
   it('answers OPTIONS preflight with 204 + CORS headers, no auth or rate limiting', () => {
     const { middleware, check } = load({ apiKeys: ['k1'] });
     const res = middleware(req('/api/sessions', { method: 'OPTIONS' }));

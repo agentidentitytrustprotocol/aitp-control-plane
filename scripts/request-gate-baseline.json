@@ -1,0 +1,39 @@
+{
+  "_comment": "Effective request-gate contract, derived from a RUNNING built server (never from src/proxy.ts). Review every \"public\" entry by hand: each one is a route reachable with no credentials.",
+  "gate": {
+    "matcherSource": "/api/:path*",
+    "matcherRegexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?\\/api(?:\\/((?:[^\\/#\\?]+?)(?:\\/(?:[^\\/#\\?]+?))*))?(\\.json|\\.rsc|\\.segments\\/.+\\.segment\\.rsc)?[\\/#\\?]?$"
+  },
+  "routes": {
+    "/api/audit": "gated",
+    "/api/dashboard/agents": "gated",
+    "/api/dashboard/overview": "gated",
+    "/api/delegations": "gated",
+    "/api/events": "gated",
+    "/api/events/history": "gated",
+    "/api/events/stream": "gated",
+    "/api/health": "public",
+    "/api/metrics": "public",
+    "/api/pinned-keys": "gated",
+    "/api/readyz": "public",
+    "/api/registry/agents": "public",
+    "/api/registry/agents/[aid]": "public",
+    "/api/registry/agents/[aid]/export": "gated",
+    "/api/registry/agents/[aid]/manifest": "public",
+    "/api/registry/enroll": "public",
+    "/api/revocation/entries": "gated",
+    "/api/sessions": "gated",
+    "/api/sessions/[sessionId]": "gated",
+    "/api/sessions/[sessionId]/export": "gated",
+    "/api/sessions/[sessionId]/replay": "gated",
+    "/api/tcts": "gated",
+    "/api/trust-anchors": "gated",
+    "/api/trust-anchors/[id]": "gated",
+    "/api/webhooks": "gated",
+    "/api/webhooks/[id]": "gated",
+    "/api/webhooks/[id]/circuit-breaker": "gated",
+    "/api/webhooks/[id]/circuit-breaker/reset": "gated",
+    "/api/well-known/aitp-manifest": "public",
+    "/api/well-known/aitp-revocation-list": "public"
+  }
+}
