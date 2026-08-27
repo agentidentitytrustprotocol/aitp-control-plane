@@ -89,7 +89,7 @@ Across the whole run:
   the ingest pipeline received real bytes, not just a `run.started`).
 - The dashboard KPI deltas are logged for visibility.
 - Any `admin_audit_log` rows from agent registrations carry an
-  `X-Request-Id` (verifies the middleware injection chain).
+  `X-Request-Id` (verifies the proxy injection chain).
 
 At the end, the script dumps the longest LLM-produced string from each
 run's `outputs` so you can eyeball the actual generated artifact.

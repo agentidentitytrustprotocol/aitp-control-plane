@@ -118,7 +118,7 @@ package for its own identity and signing, not for any trust-path role.
 
 ## Source of truth
 
-For **control-plane behavior**, the code wins — `src/middleware.ts` (auth + rate
+For **control-plane behavior**, the code wins — `src/proxy.ts` (auth + rate
 limiting), `src/lib/config.ts` (env vars), `src/app/api/**/route.ts` (routes),
 `src/lib/db/schema.ts` (tables). Keep these docs in sync when those change. For
 **protocol behavior**, the RFCs win. This repo's `docs/**` and `README.md` are

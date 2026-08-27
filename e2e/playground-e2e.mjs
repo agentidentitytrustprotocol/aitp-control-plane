@@ -300,7 +300,7 @@ expect(cpEventTotal >= 3,
 const audit = JSON.parse((await cpGet('/api/audit?limit=200')).body);
 const agentRegisters = audit.entries.filter((e) => e.action === 'agent.register');
 if (agentRegisters.length > 0) {
-  log(`  admin_audit_log: ${agentRegisters.length} agent.register row(s) carry request IDs from middleware`);
+  log(`  admin_audit_log: ${agentRegisters.length} agent.register row(s) carry request IDs from the proxy`);
   expect(agentRegisters.every((r) => typeof r.requestId === 'string' && r.requestId.length > 0),
     `  every agent.register audit row carries an X-Request-Id`);
 }

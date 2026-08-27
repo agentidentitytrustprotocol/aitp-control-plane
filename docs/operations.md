@@ -34,7 +34,7 @@ signing key, not a config toggle.
   enrollment tokens. Required. Callers never see it.
 - **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
   to a single origin, e.g. `https://console.example.com`. Applied per-request at
-  runtime by the middleware, so it can be changed via the deploy environment
+  runtime by the proxy, so it can be changed via the deploy environment
   without rebuilding the image. Defaults to `http://localhost:3000` if unset.
 
 See [`api.md`](api.md#authentication) for the full auth matrix.
@@ -42,7 +42,7 @@ See [`api.md`](api.md#authentication) for the full auth matrix.
 ### Verifying the request gate
 
 Auth, rate limiting, CORS and `x-request-id` injection all live in one file
-(`src/middleware.ts`). Unit tests call its exported function directly, which
+(`src/proxy.ts`). Unit tests call its exported function directly, which
 proves the *logic* but cannot prove Next actually **attached** it — a gate file
 in a location Next does not recognise builds green, emits no warning, and leaves
 every `/api/*` route unauthenticated and unthrottled.
