@@ -9,15 +9,21 @@
   // Documented, reviewed exceptions. Each entry MUST have a reason and,
   // ideally, a tracking path to removal. Re-audit these whenever the
   // OpenTelemetry deps are bumped.
-  "allowlist": [
-    // GHSA-q7rr-3cgh-j5r3 — "Prometheus exporter process crash via
-    // malformed HTTP request" in @opentelemetry/{auto-instrumentations-node,
-    // sdk-node}. NOT reachable here: this service exports traces over
-    // OTLP HTTP and never instantiates the OTel Prometheus exporter
-    // (its /api/metrics endpoint is hand-rolled Prometheus text), and
-    // OTel is off by default (OTEL_ENABLED=false). The only fix is a
-    // semver-major OTel bump that breaks the instrumentation bootstrap;
-    // tracked for a dedicated upgrade PR, not this one.
-    "GHSA-q7rr-3cgh-j5r3"
-  ]
+  //
+  // Currently empty — and that is the desired steady state. An advisory
+  // that can be fixed should be fixed (see the `overrides` block in
+  // package.json) rather than allowlisted here.
+  //
+  // Removed 2026-08-25: GHSA-q7rr-3cgh-j5r3 ("Prometheus exporter process
+  // crash via malformed HTTP request" in @opentelemetry/{auto-
+  // instrumentations-node, sdk-node}). Its own comment named the exit
+  // condition — "the only fix is a semver-major OTel bump" — and that bump
+  // landed in #50, taking sdk-node to 0.221.0 and
+  // auto-instrumentations-node to 0.79.0. `npm audit` no longer reports the
+  // advisory against any package, and audit-ci had begun emitting
+  // "Consider not allowlisting advisory: GHSA-q7rr-3cgh-j5r3" because the
+  // entry matched nothing. A stale entry is worse than no entry: it would
+  // silently re-suppress the advisory if a future dependency reintroduced
+  // it, with no one having decided that.
+  "allowlist": []
 }
