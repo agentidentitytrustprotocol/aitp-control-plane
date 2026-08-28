@@ -161,6 +161,37 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Opt-in arm64 build check, gated on the `arch:arm64` PR label. arm64 is
+  # otherwise first exercised by docker-publish AFTER merge to main, which is
+  # the wrong side of the merge button for changes whose risk is arch-specific
+  # (e.g. native-binary resolution, see #54). Label a PR to run this manually;
+  # a label-gated job cannot be a required check (GitHub treats a skipped
+  # required check as permanently pending), so this is informational only.
+  docker-build-check-arm64:
+    name: Docker build check (arm64, opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'arch:arm64')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   docker-publish:
     name: Build & push image to GHCR
     runs-on: ubuntu-latest
