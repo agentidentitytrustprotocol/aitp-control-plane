@@ -21,6 +21,13 @@ const nextConfig: NextConfig = {
         // `.node` for the container — including for multi-arch images
         // built on a different host arch. Globs that don't match on the
         // build host (e.g. on macOS dev) are simply skipped.
+        //
+        // Re-verified under Turbopack on #54's removal of the manual
+        // bundler externalization hook below: the traced `node_modules/aitp`
+        // path resolves unhashed (not the `.next/node_modules/aitp-<hash>/`
+        // layout that would indicate vercel/next.js#88844) in the local
+        // standalone output and in both linux/amd64 (emulated) and
+        // linux/arm64 (native) container images built from this Dockerfile.
         outputFileTracingIncludes: {
           '*': [
             './node_modules/@agentidentitytrustprotocol/aitp-linux-x64-gnu/**',
@@ -31,9 +38,17 @@ const nextConfig: NextConfig = {
     : {}),
 
   // Packages that Node should `require()` at runtime instead of letting
-  // webpack bundle them. `aitp` ships a native NAPI binary; the OTel
+  // the bundler inline them. `aitp` ships a native NAPI binary; the OTel
   // SDK pulls in @grpc/grpc-js which uses Node built-ins (fs, net, tls)
-  // that webpack can't bundle for the server target.
+  // that can't be bundled for the server target. This is now the only
+  // externalization mechanism in the config — it used to duplicate a
+  // manual bundler callback's `config.externals` push for the Node
+  // runtime, plus a second branch stubbing these same packages for the
+  // Edge runtime (dead since the proxy migration, #58, made the gate
+  // Node-only). Both were removed in #54 once a 6-rung verification
+  // ladder confirmed this option alone is sufficient: the native module
+  // resolves cleanly, unhashed, in both the local standalone output and
+  // Linux amd64/arm64 container images.
   serverExternalPackages: [
     'aitp',
     '@opentelemetry/sdk-node',
@@ -43,65 +58,6 @@ const nextConfig: NextConfig = {
     '@opentelemetry/semantic-conventions',
     '@grpc/grpc-js',
   ],
-
-  // OTel / gRPC handling depends on which Next.js runtime is being
-  // compiled:
-  //
-  //   - Node.js runtime (route handlers + the Node side of
-  //     instrumentation.ts): externalize @opentelemetry/* and @grpc/*
-  //     as commonjs requires. Without this webpack tries to bundle
-  //     @grpc/proto-loader and chokes on Node built-ins (fs, path).
-  //     Also externalize the `aitp` NAPI loader so webpack never tries
-  //     to parse `aitp.<platform>.node`.
-  //
-  //   - Edge runtime: as of the proxy migration (#58), the gate at
-  //     src/proxy.ts is Node-runtime-only, so nothing in this app
-  //     targets the Edge runtime anymore. This `nextRuntime === 'edge'`
-  //     branch below still executes on every build — webpack still
-  //     invokes this config function with nextRuntime='edge' — but the
-  //     edge compiler pass it configures now receives zero entrypoints
-  //     and emits nothing: unreachable, not uninvoked. It used to stub
-  //     the Node-only OTel/gRPC/aitp packages that neither bundle (no
-  //     fs/path) nor work via `commonjs require()` at runtime — that's
-  //     what threw "Native module not found: @opentelemetry/api" on
-  //     every request and 500'd the service, back when this compiled
-  //     the Edge middleware bundle. Removing this now-inert branch is
-  //     tracked in #54; out of scope here.
-  webpack: (config, { isServer, nextRuntime, webpack }) => {
-    if (isServer && nextRuntime === 'nodejs') {
-      const externals = Array.isArray(config.externals)
-        ? config.externals
-        : config.externals
-          ? [config.externals]
-          : [];
-      externals.push({ aitp: 'commonjs aitp' });
-      externals.push(
-        ({ request }: { request?: string }, callback: (err?: Error | null, result?: string) => void) => {
-          if (request && (/^@opentelemetry\//.test(request) || /^@grpc\//.test(request))) {
-            return callback(null, `commonjs ${request}`);
-          }
-          callback();
-        },
-      );
-      config.externals = externals;
-    }
-    if (nextRuntime === 'edge') {
-      // Stub ONLY the Node-only OTel / gRPC / NAPI packages. The
-      // portable ones (@opentelemetry/api, @opentelemetry/core,
-      // resources, semantic-conventions) must remain real — Next's
-      // built-in middleware tracing wrapper imports
-      // `@opentelemetry/api` directly and crashes with
-      // "createContextKey is not a function" if it's stubbed.
-      config.plugins = config.plugins ?? [];
-      config.plugins.push(
-        new webpack.NormalModuleReplacementPlugin(
-          /^(@grpc\/|@opentelemetry\/(sdk-|exporter-|auto-instrumentations-|instrumentation-)|aitp$)/,
-          require.resolve('./src/lib/empty-shim.js'),
-        ),
-      );
-    }
-    return config;
-  },
 
   async rewrites() {
     return [

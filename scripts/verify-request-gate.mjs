@@ -135,9 +135,8 @@ async function build() {
   console.log('building with the sentinel CORS_ORIGIN...');
   await new Promise((resolve, reject) => {
     // Invoke the repo's own build script rather than `next build` directly, so
-    // this always builds the way the repo builds — including the explicit
-    // bundler flag, which is required while a `webpack:` config exists and
-    // which will change when #54 lands.
+    // this always builds the way the repo builds (Turbopack, the Next 16.x
+    // default, since #54 removed the explicit --webpack pin).
     const child = spawn('npm', ['run', 'build'], {
       cwd: ROOT,
       env: {
