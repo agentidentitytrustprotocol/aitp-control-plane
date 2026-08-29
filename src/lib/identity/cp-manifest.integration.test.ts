@@ -36,4 +36,31 @@ describe('integration: CP self-manifest conformance', () => {
       expect(() => verifyManifestJson(manifest)).not.toThrow();
     }
   });
+
+  // Regression for #73: the manifest is built once, at process start, with a
+  // 24h TTL, and previously was never rebuilt — any process alive longer than
+  // that served a manifest that verifies as `expired` forever. This test
+  // simulates that 24h+ uptime by mutating the cached manifest's expires_at
+  // directly, rather than faking the system clock: expires_at is stamped by
+  // the native buildManifest binding from the OS clock, which Jest's fake
+  // timers (a JS Date shim) cannot reach.
+  it('rebuilds the manifest once it nears its own expiry (24h+ uptime)', () => {
+    const fresh = getCpManifestJson();
+    const freshParsed = JSON.parse(fresh) as { manifest: { aid: string } };
+
+    const staleExpiresAt = Math.floor(Date.now() / 1000) - 1;
+    const stale = JSON.stringify({
+      manifest: { ...JSON.parse(fresh).manifest, expires_at: staleExpiresAt },
+    });
+    (globalThis as { __cpManifestJson?: string }).__cpManifestJson = stale;
+
+    const rebuilt = getCpManifestJson();
+    expect(rebuilt).not.toBe(stale);
+    expect(() => verifyManifestJson(rebuilt)).not.toThrow();
+
+    const rebuiltParsed = JSON.parse(rebuilt) as { manifest: { expires_at: number; aid: string } };
+    expect(rebuiltParsed.manifest.expires_at).toBeGreaterThan(staleExpiresAt);
+    // Same identity — a rebuild must not mint a new key.
+    expect(rebuiltParsed.manifest.aid).toBe(freshParsed.manifest.aid);
+  });
 });
