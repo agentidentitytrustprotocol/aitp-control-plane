@@ -63,4 +63,49 @@ describe('integration: CP self-manifest conformance', () => {
     // Same identity — a rebuild must not mint a new key.
     expect(rebuiltParsed.manifest.aid).toBe(freshParsed.manifest.aid);
   });
+
+  // Margin-boundary coverage for #73's fix: getCpManifestJson() rebuilds
+  // proactively once `expires_at` is within MANIFEST_REBUILD_MARGIN_SECS
+  // (3600, hardcoded here — it is not exported from cp-agent.ts, see that
+  // file's comment for why), not only once the manifest is already fully
+  // expired (the case the test above covers). The two tests below exercise
+  // both sides of that `<=` comparison. Same technique as above: mutate the
+  // cached manifest's expires_at directly rather than faking the system
+  // clock, since expires_at is stamped by the native buildManifest binding.
+  it('does not rebuild a manifest comfortably outside the rebuild margin', () => {
+    const fresh = getCpManifestJson();
+
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const outsideMarginExpiresAt = nowSecs + 3600 + 300;
+    const notStale = JSON.stringify({
+      manifest: { ...JSON.parse(fresh).manifest, expires_at: outsideMarginExpiresAt },
+    });
+    (globalThis as { __cpManifestJson?: string }).__cpManifestJson = notStale;
+
+    const result = getCpManifestJson();
+    // Reference-equal, not just deep-equal: proves getCpManifestJson()
+    // returned the same cached string in place, i.e. no rebuild fired.
+    expect(result).toBe(notStale);
+  });
+
+  it('rebuilds proactively once within the margin but before absolute expiry', () => {
+    const fresh = getCpManifestJson();
+    const freshParsed = JSON.parse(fresh) as { manifest: { aid: string } };
+
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const staleExpiresAt = nowSecs + 3600 - 300;
+    const stale = JSON.stringify({
+      manifest: { ...JSON.parse(fresh).manifest, expires_at: staleExpiresAt },
+    });
+    (globalThis as { __cpManifestJson?: string }).__cpManifestJson = stale;
+
+    const rebuilt = getCpManifestJson();
+    expect(rebuilt).not.toBe(stale);
+    expect(() => verifyManifestJson(rebuilt)).not.toThrow();
+
+    const rebuiltParsed = JSON.parse(rebuilt) as { manifest: { expires_at: number; aid: string } };
+    expect(rebuiltParsed.manifest.expires_at).toBeGreaterThan(staleExpiresAt);
+    // Same identity — a rebuild must not mint a new key.
+    expect(rebuiltParsed.manifest.aid).toBe(freshParsed.manifest.aid);
+  });
 });
