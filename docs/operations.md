@@ -20,6 +20,16 @@ The CP has its own AITP identity (Ed25519), served at
   ```
 - **`CP_BASE_URL`** — public URL embedded in the CP's own manifest. Set it to
   the externally reachable origin.
+- The CP's own manifest has a **86400s (24h) TTL** (`MANIFEST_TTL_SECS`) and
+  is rebuilt in place once it comes within **3600s** of expiry
+  (`MANIFEST_REBUILD_MARGIN_SECS`), on the next call to `getCpManifestJson()`
+  after that point — a long-lived process never serves a permanently expired
+  manifest and does not need a periodic restart to stay fresh. These are
+  hardcoded constants in `src/lib/identity/cp-agent.ts`, not environment
+  variables — there is nothing to configure here. (This applies only to the
+  CP's own self-published manifest at `/.well-known/aitp-manifest`; it has no
+  bearing on agent-submitted manifests handled by `POST
+  /api/registry/enroll`, a separate code path.)
 
 Rotating `CP_AID_SEED_HEX` rotates the control-plane identity — treat it like a
 signing key, not a config toggle.
