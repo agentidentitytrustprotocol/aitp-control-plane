@@ -24,9 +24,23 @@ describe('EnrollmentService', () => {
   });
 
   it('rejects an invalid manifest envelope', () => {
-    expect(() =>
-      service.verifyAndIssueToken('{"manifest":{"bogus":true}}'),
-    ).toThrow();
+    // Asserts .code is a string — the contract package.json's "//aitp"
+    // block (0.7.0 entry) documents for exactly this path, where
+    // enrollment.ts:55 calls verifyManifestJson on externally-supplied
+    // input — without pinning its current value ("malformed"). A future
+    // release may reclassify an unknown top-level field like `bogus` from
+    // `malformed` to `unknown_field` (see the UNKNOWN_FIELD batch tracked in
+    // plans/aitp-rs-breaking-changes-adoption.md); pinning today's value
+    // would manufacture a failure out of that improvement.
+    let threw = false;
+    try {
+      service.verifyAndIssueToken('{"manifest":{"bogus":true}}');
+    } catch (err) {
+      threw = true;
+      expect(typeof (err as { code?: unknown }).code).toBe('string');
+    }
+    expect(threw).toBe(true);
+
     expect(() => service.verifyAndIssueToken('not json at all')).toThrow();
   });
 
