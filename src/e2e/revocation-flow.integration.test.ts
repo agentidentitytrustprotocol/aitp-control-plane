@@ -43,6 +43,7 @@ import {
   issuedTcts,
   revocationEntries,
 } from '@/lib/db/schema';
+import { expectVerifyCode } from '@/test/expect-verify-code';
 
 function mkReq(
   url: string,
@@ -92,26 +93,6 @@ async function fetchListRaw(): Promise<{ raw: string; env: RevocationEnvelope }>
 
 async function fetchList(): Promise<RevocationEnvelope> {
   return (await fetchListRaw()).env;
-}
-
-/** Call `fn` (expected to invoke the SDK's void-returning, synchronously-
- * throwing `verifyRevocationList`) and assert it threw with exactly `code`.
- * `verifyRevocationList` is NOT a Promise, so `await expect(...).rejects`
- * silently never asserts, and a bare `.toThrow()` passes on the wrong
- * error — this throws loudly if `fn` does not throw at all. */
-function expectVerifyCode(fn: () => void, code: string): void {
-  let threw = false;
-  try {
-    fn();
-  } catch (err) {
-    threw = true;
-    expect((err as { code?: unknown }).code).toBe(code);
-  }
-  if (!threw) {
-    throw new Error(
-      `expected verifyRevocationList to throw with code "${code}", but it did not throw`,
-    );
-  }
 }
 
 /** RFC 8785 (JCS) canonicalization — sufficient for this envelope: all
