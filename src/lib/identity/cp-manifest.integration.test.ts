@@ -4,9 +4,10 @@
  * binding's `verifyManifestJson`. This catches schema drift between
  * the CP's manifest builder and the spec-aligned verifier.
  *
- * Full RFC conformance (the 44-fixture suite in aitp-conformance) is
- * out of scope here — that's a multi-language matrix. This test pins
- * the CP-specific surface: the manifest the CP itself publishes.
+ * Full RFC conformance (the fixture suite in aitp-conformance — see its
+ * docs/conformance.md for the current per-fixture matrix) is out of
+ * scope here — that's a multi-language matrix. This test pins the
+ * CP-specific surface: the manifest the CP itself publishes.
  */
 
 import { verifyManifestJson } from 'aitp';
