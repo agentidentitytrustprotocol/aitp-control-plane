@@ -44,6 +44,31 @@ describe('rateLimiter', () => {
     expect(rateLimiter.getDropTotals()).toEqual({});
   });
 
+  it('gc() drops only buckets whose window has already expired', () => {
+    const realDateNow = Date.now;
+    let t = 1_000_000;
+    Date.now = () => t;
+    try {
+      rateLimiter.check('test', 'stale', 5, 1000); // resetAt = t + 1000
+      t += 1001; // stale's window is now in the past
+      rateLimiter.check('test', 'fresh', 5, 1000); // resetAt = new t + 1000
+
+      rateLimiter.gc();
+
+      // 'stale' was collected: the next check for it starts a fresh
+      // window (count 1 of 5) rather than reusing a stale bucket.
+      const staleAfterGc = rateLimiter.check('test', 'stale', 1, 1000);
+      expect(staleAfterGc.allowed).toBe(true);
+      expect(staleAfterGc.remaining).toBe(0);
+
+      // 'fresh' survived gc and keeps its accumulated count.
+      const freshAfterGc = rateLimiter.check('test', 'fresh', 5, 1000);
+      expect(freshAfterGc.remaining).toBe(3);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
   it('refills after the window elapses', () => {
     const realDateNow = Date.now;
     let t = 1_000_000;
