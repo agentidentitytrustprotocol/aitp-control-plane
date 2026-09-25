@@ -7,6 +7,13 @@
  *   1. Generate two AITP agents (researcher, writer)
  *   2. Each builds a signed manifest
  *   3. POST /api/registry/enroll for each → enrollment token
+ *   3a. Enroll failure paths, real SDK, no mocks: an already-expired
+ *       manifest → 400 with a `verifyCode` string (the SDK rejected it);
+ *       a 60-second-TTL manifest the SDK *accepts* → 400 with NO
+ *       `verifyCode` (our own 5-minute registration guard rejected it).
+ *       Together these prove the biconditional the error body promises —
+ *       `verifyCode` present ⇔ the aitp SDK was the thing that rejected
+ *       the manifest.
  *   4. POST /api/registry/agents for each → registry rows
  *   5. GET /api/registry/agents?capability=demo.echo → both visible
  *   6. POST /api/events with a synthetic handshake.complete event
@@ -143,6 +150,78 @@ describe('integration: enroll → register → discover → event → revoke flo
     expect(res2.status).toBe(200);
     const body2 = (await res2.json()) as { token: string };
     writerToken = body2.token;
+  });
+
+  it('returns a real SDK verifyCode when enroll rejects an expired manifest', async () => {
+    // The only test in the suite that proves an actual aitp code reaches an
+    // actual HTTP body — every other enroll failure test mocks the service,
+    // so without this the whole `verifyCode` contract rests on hand-built
+    // errors that merely look like the SDK's.
+    const stale = AitpAgent.generate();
+    const expiredManifest = stale.buildManifest({
+      displayName: 'e2e-expired',
+      handshakeEndpoint: 'http://e2e-expired.local/aitp',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: -3600, // already past expires_at, so the SDK itself rejects it
+    });
+
+    const res = await enrollPost(
+      mkReq('http://localhost/api/registry/enroll', {
+        method: 'POST',
+        body: expiredManifest,
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: string;
+      code: string;
+      verifyCode?: string;
+    };
+    expect(body.code).toBe('MANIFEST_INVALID');
+    // Asserts the TYPE, not the literal 'expired'. The SDK owns this
+    // vocabulary and has already grown it 5 -> 8 codes; pinning today's
+    // value would manufacture a failure out of a future reclassification.
+    expect(typeof body.verifyCode).toBe('string');
+    expect(body.verifyCode).not.toBe('');
+    // Deliberately NOT asserted: body.error's wording. Two reasons — the SDK
+    // says the message is not a contract, and under Jest's vm realm
+    // route.ts's `err instanceof Error` is false for a native SDK error, so
+    // the message arrives here via String(err) with an "Error: " prefix that
+    // production never emits. Asserting the prose would bake in a
+    // Jest-only artifact. Non-empty is the strongest assertion left.
+    expect(typeof body.error).toBe('string');
+    expect(body.error).not.toBe('');
+  });
+
+  it('omits verifyCode when the in-repo guard, not the SDK, rejects the manifest', async () => {
+    // The other half of the biconditional the response shape promises:
+    // `verifyCode` present ⇔ the aitp SDK rejected the manifest. A 60-second
+    // TTL is validly signed and the SDK ACCEPTS it — only enrollment.ts's own
+    // 5-minute registration guard rejects it, with a plain Error carrying no
+    // `.code`. Without this test, absence is proven only against a mocked
+    // service, i.e. against our own assumption about what the SDK does.
+    const shortLived = AitpAgent.generate();
+    const shortManifest = shortLived.buildManifest({
+      displayName: 'e2e-short-ttl',
+      handshakeEndpoint: 'http://e2e-short.local/aitp',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 60, // inside the 5-minute guard, but NOT expired
+    });
+
+    const res = await enrollPost(
+      mkReq('http://localhost/api/registry/enroll', {
+        method: 'POST',
+        body: shortManifest,
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe('MANIFEST_INVALID');
+    expect('verifyCode' in body).toBe(false);
+    // The prose IS ours on this path (enrollment.ts, not the SDK), so it is
+    // safe to pin — and pinning it proves the SDK really did accept the
+    // manifest and our guard really is what rejected it.
+    expect(body.error).toContain('longer TTL');
   });
 
   it('registers both agents with their tokens', async () => {
