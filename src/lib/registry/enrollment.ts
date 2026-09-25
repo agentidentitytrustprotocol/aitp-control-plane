@@ -3,9 +3,19 @@ import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { ManifestRejectedError } from './verify-error';
 
-// Same 5-min guard as src/app/api/registry/agents/route.ts so callers
-// don't enroll a manifest that the immediately-following register call
-// would silently reject. Single source of truth here.
+// Same 5-min window as src/app/api/registry/agents/route.ts, so a caller does
+// not enroll a manifest that the immediately-following register call would
+// reject after a round trip. Both routes also return the same code
+// (MANIFEST_EXPIRED) and the same message, which src/e2e/flow.integration.test.ts
+// asserts across the two routes.
+//
+// NOT a single source of truth, despite what this comment used to claim:
+// agents/route.ts declares its own copy of this constant and inlines its own
+// copy of the code and message, and the two implementations genuinely disagree
+// on `expires_at: 0` (guarded here via `typeof === 'number'`, treated as absent
+// there via `if (manifest.expires_at)`). That divergence is pinned in
+// enrollment-guards.test.ts and documented in docs/api.md; de-duplicating the
+// guard is its own change, tracked as an open question on the #69 plan.
 const REGISTRATION_EXPIRY_GUARD_MS = 5 * 60 * 1000;
 
 // Enrollment tokens are short-lived bearer credentials. The lifetime is

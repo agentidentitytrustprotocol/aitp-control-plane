@@ -171,12 +171,16 @@ describe('POST /api/registry/enroll', () => {
     expect('verifyCode' in body).toBe(false);
   });
 
-  it('forwards whatever cpCode the rejection carries into the response `code`', async () => {
+  it('forwards an allowlisted cpCode into the response `code`', async () => {
     // Pins the PLUMBING, not a hardcoded constant: verified by mutation that
     // hardcoding `code: 'MANIFEST_INVALID'` in the route passes every other
-    // test in this file. This is the mechanism the expiry guard's own code
-    // rides on — `enrollment.ts` throws MANIFEST_EXPIRED and the route needs no
-    // knowledge of that condition.
+    // test in this file. "Allowlisted", not "whatever" — the next test covers a
+    // value outside the allowlist, which is NOT forwarded.
+    //
+    // This is the mechanism the expiry guard's own code rides on:
+    // `enrollment.ts` decides the condition and this route only has to accept
+    // the value. (The route does name MANIFEST_EXPIRED itself, but only for the
+    // separate SDK-`expired` translation, which never reaches this branch.)
     verifyAndIssueTokenMock.mockImplementation(() => {
       throw new ManifestRejectedError('expiring too soon', 'MANIFEST_EXPIRED');
     });

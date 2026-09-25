@@ -81,7 +81,9 @@ jobs:
       - name: Integration tests
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
-          # >= 32 chars (enforced by EnrollmentService at boot)
+          # >= 32 chars. NOT enforced at boot — EnrollmentService is constructed
+          # lazily on the first enrollment request, so a bad value here fails
+          # the enroll tests rather than startup.
           ENROLLMENT_SECRET: ci-integration-secret-min-thirty-two-chars
           CP_AID_SEED_HEX: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
           CP_BASE_URL: http://localhost:4000

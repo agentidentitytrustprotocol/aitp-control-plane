@@ -116,6 +116,8 @@ The CP verifies the manifest signature against the AID's key and returns a singl
 
 The `4xx`/`5xx` split is meaningful here: a `400` means *your* manifest is the problem and retrying it unchanged will not help, while a `503` means the **server** is broken and the same request is worth retrying once the deployment is fixed. The `503` body deliberately carries no configuration detail.
 
+A `500` is also reachable, and deliberately so: anything the route cannot classify as either the caller's bad manifest or a known server misconfiguration is **rethrown** rather than reported as a `400`. That means a genuine internal fault reaches you as a framework `500` with no `{ "error", "code" }` body at all, rather than as a `400` telling you to fix a manifest that was fine. Treat it like any `5xx` — retryable, and someone else's problem to fix.
+
 A `400` from this route may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable reason for rejecting the manifest:
 
 ```json

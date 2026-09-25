@@ -235,6 +235,18 @@ others.
 **`enroll_verification_failures`** is worth an alert: `POST /api/registry/enroll`
 is the only public, unauthenticated endpoint that runs cryptographic
 verification, and a spike is either a broken client fleet or someone probing.
+
+**Know what it does not count**, or you will read a flat line as "no problem":
+only failures that reached manifest verification are counted. A caller posting
+malformed JSON or a body with no `manifest` at all (`400 BODY_INVALID`,
+`400 MANIFEST_INVALID`) never reaches the SDK and is **not** counted, and neither
+is `503 SERVER_MISCONFIGURED` — a server with no usable `ENROLLMENT_SECRET`
+rejects every enrollment while this counter stays at zero. Both exclusions are
+deliberate (counting them would corrupt the code breakdown, which is the whole
+point of the metric), but they mean the two loudest fleet-wide breakages are
+invisible here. Watch `rate_limit_drops{bucket="enroll-ip"}` and the route's own
+log lines alongside it.
+
 Its `code` label is a bounded set of **ten** values — the eight codes the `aitp`
 SDK documents for manifest verification, plus:
 

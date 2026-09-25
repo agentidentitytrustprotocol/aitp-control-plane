@@ -447,6 +447,11 @@ paths:
           application/json:
             schema:
               type: object
+              # `required` matches POST /api/registry/agents. Without it a
+              # spec-valid `{}` is a guaranteed 400 MANIFEST_INVALID, which the
+              # 400 below documents — so the schema would describe a request the
+              # route always rejects as acceptable.
+              required: [manifest]
               properties:
                 manifest: { type: object }
       responses:
@@ -473,6 +478,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RateLimitError" }
+        "500":
+          description: >-
+            An internal fault. Documented because it is reachable **by design**
+            rather than only by accident: this route rethrows anything it cannot
+            classify as the caller's bad manifest or a known server
+            misconfiguration, so an unexpected failure surfaces as a `500`
+            instead of a `400` that blames a manifest which was fine. The body
+            is whatever the framework renders and is **not** the shared `Error`
+            shape, which is why no schema is declared here.
         "503":
           description: >-
             `code` is `SERVER_MISCONFIGURED`. The server cannot issue

@@ -209,9 +209,13 @@ describe('integration: enroll → register → discover → event → revoke flo
     // The other half of the biconditional the response shape promises:
     // `verifyCode` present ⇔ the aitp SDK rejected the manifest. A 60-second
     // TTL is validly signed and the SDK ACCEPTS it — only enrollment.ts's own
-    // 5-minute registration guard rejects it, with a plain Error carrying no
-    // `.code`. Without this test, absence is proven only against a mocked
-    // service, i.e. against our own assumption about what the SDK does.
+    // 5-minute registration guard rejects it, throwing a
+    // `ManifestRejectedError` whose `cpCode` is MANIFEST_EXPIRED and which
+    // carries no SDK `.code`. Note that "no `.code`" is not by itself what the
+    // route keys on: a plain `.code`-less Error is exactly what it rethrows as a
+    // 500. The positive `ManifestRejectedError` marker is what makes this a 400.
+    // Without this test, absence is proven only against a mocked service, i.e.
+    // against our own assumption about what the SDK does.
     const shortLived = AitpAgent.generate();
     const shortManifest = shortLived.buildManifest({
       displayName: 'e2e-short-ttl',
@@ -237,11 +241,15 @@ describe('integration: enroll → register → discover → event → revoke flo
   });
 
   it('agrees with the register route on the code for the same 60s manifest', async () => {
-    // The invariant enrollment.ts:6-8's comment claims ("same 5-min guard as
-    // agents/route.ts ... single source of truth here") and which nothing
+    // The agreement enrollment.ts's own header claims and which nothing
     // asserted until now. The two routes applied the same condition with the
     // same byte-identical message under two DIFFERENT codes, so the same
     // rejection was machine-detectable on register and prose-only on enroll.
+    //
+    // What this does NOT assert, deliberately: that the two guards are the same
+    // guard. They are not — each declares its own constant and they disagree on
+    // `expires_at: 0` (see enrollment.ts's header). This pins the wire contract
+    // the two routes present to a client, which is the part a client depends on.
     //
     // Driven end to end rather than by comparing constants: the codes are
     // emitted from two different files by two different mechanisms
