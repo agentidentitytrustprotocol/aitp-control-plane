@@ -177,7 +177,7 @@ What is swept (set any TTL to `0` to keep that table indefinitely):
 ## Observability
 
 - **Metrics:** `GET /api/metrics` exposes Prometheus text format (public, exempt
-  from rate limiting).
+  from rate limiting). See [Metrics](#metrics) below for the series it emits.
 - **Logs:** structured JSON via pino. `LOG_LEVEL` ∈ `trace|debug|info|warn|error|fatal`
   (default `info`). Every request/response carries `x-request-id` for correlation.
 - **Tracing (OpenTelemetry):** off by default. Set `OTEL_ENABLED=true` to export
@@ -185,6 +185,74 @@ What is swept (set any TTL to `0` to keep that table indefinitely):
   `/v1/traces` is appended unless `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set).
   `OTEL_SERVICE_NAME` defaults to `aitp-control-plane`. HTTP, `pg`, and `fetch`
   are auto-instrumented.
+
+### Metrics
+
+All series are prefixed `aitp_control_plane_`. Three different kinds of value sit
+in this table, and conflating them will give you wrong numbers:
+
+- **Process-local** — `rate_limit_drops`, `admin_audit_insert_failures`,
+  `event_backlog_dropped`, `enroll_verification_failures`,
+  `webhook_circuit_breaker_open`. Held in memory and **per replica**, so
+  aggregating across instances is the scraper's job, and all of them **reset on
+  restart**. For the four counters that is harmless (a Prometheus counter reset is
+  something the scraper handles). For `webhook_circuit_breaker_open` — a gauge
+  over an in-memory `Map` — it is a trap: after a rolling restart every breaker
+  reads `closed`, which looks identical to "the fleet recovered" and is not.
+  Confirm a breaker recovery against delivery success, not against this gauge
+  going quiet.
+- **Database-derived** — `agents_active`, `agents_expired`, `sessions_total`,
+  `webhook_deliveries`, `audit_events`. These are `COUNT(*)`/`GROUP BY` queries
+  against shared state, so they are *already* cluster-wide and survive restarts.
+  **Do not `sum()` them across replicas** — you would multiply the true value by
+  the replica count.
+- **Per-replica, per-scrape** — `db_up` alone. It is this instance's DB
+  reachability at the moment of the scrape, not a count of anything and not a
+  cluster-wide fact: replica A reaching the database while replica B cannot is
+  exactly what the series exists to show. Alert per instance, or on `min()` —
+  never `sum()`.
+
+| Series (`aitp_control_plane_`…) | Type | Labels | Meaning |
+|---|---|---|---|
+| `agents_active` | gauge | — | Agents with `status='active'` |
+| `agents_expired` | gauge | — | Agents whose manifest expired, awaiting re-enrollment |
+| `sessions_total` | counter | — | Handshake sessions ever observed |
+| `webhook_deliveries` | gauge | `status` | Deliveries `pending` / `failed` |
+| `audit_events` | counter | `type` | Audit events by event type |
+| `db_up` | gauge | — | `1` if the DB answered this scrape, else `0` |
+| `rate_limit_drops` | counter | `bucket` | Requests rejected by the limiter |
+| `webhook_circuit_breaker_open` | gauge | `state` | Webhooks with the breaker `open` / `half_open` |
+| `admin_audit_insert_failures` | counter | — | Admin-audit writes that failed (silent-degradation surface) |
+| `event_backlog_dropped` | counter | — | Audit events evicted from the in-memory SSE backlog |
+| `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
+
+The DB-derived series (`agents_*`, `sessions_total`, `webhook_deliveries`,
+`audit_events`) are **absent** from a scrape taken while the database is
+unreachable; `db_up 0` plus a `# DB unavailable` comment appears instead, and
+the scrape still returns `200`. Alert on `db_up`, not on the absence of the
+others.
+
+**`enroll_verification_failures`** is worth an alert: `POST /api/registry/enroll`
+is the only public, unauthenticated endpoint that runs cryptographic
+verification, and a spike is either a broken client fleet or someone probing.
+Its `code` label is a bounded set of **ten** values — the eight codes the `aitp`
+SDK documents for manifest verification, plus:
+
+- `none` — the manifest was rejected by *this service* rather than by the SDK
+  (a `manifest.aid` that is not an AID, or an `expires_at` inside the 5-minute
+  registration window). The SDK accepted it; we did not.
+- `other` — the SDK returned a code this build does not recognize. **`other`
+  becoming non-zero is itself a signal**: the SDK's code set has grown and this
+  service's label allowlist needs updating. Nothing breaks in the meantime —
+  the total stays correct and only the breakdown loses detail.
+
+The label is allowlisted deliberately. The wire field `verifyCode` passes an
+unknown SDK code through verbatim (the SDK owns that vocabulary), but a label
+value is a cardinality dimension derived from caller-supplied input, so passing
+unknown values through would let a caller mint unbounded time series. All ten of
+*this* metric's series are pre-seeded at `0`, so none of them is ever missing
+from a scrape — that guarantee is specific to `enroll_verification_failures`;
+`rate_limit_drops` and `audit_events` emit only labels they have actually seen.
 
 ## Health, readiness & graceful shutdown
 

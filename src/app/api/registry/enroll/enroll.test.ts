@@ -19,6 +19,11 @@
 //     ENROLLMENT_SECRET) -> 503 SERVER_MISCONFIGURED, with no config detail
 //     in the body, and without ever calling the service
 //
+//   • instrumentation: exactly one `logger.warn` per classified failure,
+//     carrying only the code pair and a length-capped request id — never the
+//     manifest body or the AID — plus one counter increment; neither is
+//     allowed to change the response, and neither may suppress the other
+//
 // `verifyCode`'s ABSENCE is asserted with `'verifyCode' in body`, never
 // `toBeUndefined()`, which would also pass on an explicitly-undefined key.
 //
@@ -36,6 +41,20 @@ let getServiceImpl: () => { verifyAndIssueToken: (body: string) => unknown };
 
 jest.mock('@/lib/registry/enrollment', () => ({
   getEnrollmentService: () => getServiceImpl(),
+}));
+
+const warnMock = jest.fn((..._args: unknown[]) => {});
+const childLoggerMock = jest.fn((_bindings: Record<string, unknown>) => ({
+  warn: (...args: unknown[]) => warnMock(...args),
+}));
+jest.mock('@/lib/logger', () => ({
+  childLogger: (bindings: Record<string, unknown>) => childLoggerMock(bindings),
+}));
+
+const recordEnrollFailureMock = jest.fn((_code: string | undefined) => {});
+jest.mock('@/lib/registry/enroll-metrics', () => ({
+  recordEnrollFailure: (code: string | undefined) =>
+    recordEnrollFailureMock(code),
 }));
 
 import { POST } from './route';
@@ -57,6 +76,12 @@ beforeEach(() => {
   getServiceImpl = () => ({
     verifyAndIssueToken: (body: string) => verifyAndIssueTokenMock(body),
   });
+  warnMock.mockReset();
+  childLoggerMock.mockReset();
+  childLoggerMock.mockImplementation(() => ({
+    warn: (...args: unknown[]) => warnMock(...args),
+  }));
+  recordEnrollFailureMock.mockReset();
 });
 
 describe('POST /api/registry/enroll', () => {
@@ -248,6 +273,197 @@ describe('POST /api/registry/enroll', () => {
     expect(body.code).toBe('SERVER_MISCONFIGURED');
     expect(body.error).not.toContain('ENROLLMENT_SECRET');
     expect(body.error).not.toContain('32');
+  });
+
+  describe('observability', () => {
+    function badManifestReq() {
+      return makeReq(JSON.stringify({ manifest: { aid: 'aid:pubkey:x' } }));
+    }
+
+    it('counts and logs an SDK verification failure exactly once, by code', async () => {
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+      });
+      await POST(badManifestReq());
+
+      expect(recordEnrollFailureMock).toHaveBeenCalledTimes(1);
+      expect(recordEnrollFailureMock).toHaveBeenCalledWith('signature_invalid');
+      expect(warnMock).toHaveBeenCalledTimes(1);
+      expect(warnMock).toHaveBeenCalledWith(
+        { code: 'MANIFEST_INVALID', verifyCode: 'signature_invalid' },
+        'enrollment verification failed',
+      );
+    });
+
+    it('counts our own rejection with no code, so the guard is visible', async () => {
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw new ManifestRejectedError('too soon', 'MANIFEST_INVALID');
+      });
+      await POST(badManifestReq());
+
+      expect(recordEnrollFailureMock).toHaveBeenCalledWith(undefined);
+      expect(warnMock).toHaveBeenCalledWith(
+        { code: 'MANIFEST_INVALID', verifyCode: undefined },
+        'enrollment verification failed',
+      );
+    });
+
+    it('logs no manifest content and no AID', async () => {
+      // The body is unauthenticated attacker-controlled input on a public
+      // route; logging it at warn level is a log-volume amplification vector.
+      const aid = 'aid:pubkey:z:secret-looking-value';
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('nope'), { code: 'aid_mismatch' });
+      });
+      await POST(makeReq(JSON.stringify({ manifest: { aid } })));
+
+      const logged = warnMock.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(Object.keys(logged).sort()).toEqual(['code', 'verifyCode']);
+      expect('manifest' in logged).toBe(false);
+      expect('aid' in logged).toBe(false);
+      expect(JSON.stringify(warnMock.mock.calls)).not.toContain(aid);
+    });
+
+    it('does not count or log a successful enrollment', async () => {
+      await POST(badManifestReq());
+      expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+      expect(warnMock).not.toHaveBeenCalled();
+    });
+
+    // BOTH pre-validation branches, deliberately. They return different codes
+    // (BODY_INVALID vs MANIFEST_INVALID) from two separate `return`s, so one
+    // case pins only one of them: verified by mutation that instrumenting the
+    // missing-`manifest` branch alone left the whole suite green.
+    it.each([
+      ['a non-JSON body', 'not json'],
+      ['a JSON body with no manifest', JSON.stringify({ foo: 'bar' })],
+    ])(
+      'does not count a pre-validation failure (%s) — the SDK was never reached',
+      async (_label, body) => {
+        await POST(makeReq(body));
+        expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+        expect(warnMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not count a 503: a broken server is not a verification failure', async () => {
+      getServiceImpl = () => {
+        throw new Error('ENROLLMENT_SECRET is required');
+      };
+      const res = await POST(badManifestReq());
+      expect(res.status).toBe(503);
+      expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+    });
+
+    it('does not count a rethrown internal error', async () => {
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw new Error('boom');
+      });
+      await expect(POST(badManifestReq())).rejects.toThrow('boom');
+      expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+      expect(warnMock).not.toHaveBeenCalled();
+    });
+
+    it('binds the request id so the line can be correlated to a request', async () => {
+      // Nothing else in this service puts a request id on a log line, so
+      // without this binding the warn could not be tied to a request at all —
+      // which would make "log only the code" useless rather than minimal.
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+      });
+      const req = new NextRequest(
+        new Request('http://localhost:4000/api/registry/enroll', {
+          method: 'POST',
+          body: JSON.stringify({ manifest: { aid: 'aid:pubkey:x' } }),
+          headers: { 'x-request-id': 'req-abc-123' },
+        }),
+      );
+      await POST(req);
+      expect(childLoggerMock).toHaveBeenCalledWith({ requestId: 'req-abc-123' });
+    });
+
+    it('binds no requestId when the header is absent', async () => {
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw new ManifestRejectedError('too soon', 'MANIFEST_INVALID');
+      });
+      await POST(badManifestReq());
+      expect(childLoggerMock).toHaveBeenCalledWith({});
+    });
+
+    it('caps a hostile request id rather than logging it whole', async () => {
+      // x-request-id is client-settable on a public route, so an unbounded
+      // value would be a log-volume amplification vector by itself.
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw new ManifestRejectedError('too soon', 'MANIFEST_INVALID');
+      });
+      const req = new NextRequest(
+        new Request('http://localhost:4000/api/registry/enroll', {
+          method: 'POST',
+          body: JSON.stringify({ manifest: { aid: 'aid:pubkey:x' } }),
+          headers: { 'x-request-id': 'z'.repeat(5000) },
+        }),
+      );
+      await POST(req);
+      const bound = childLoggerMock.mock.calls[0]?.[0] as { requestId: string };
+      expect(bound.requestId).toHaveLength(200);
+    });
+
+    it('still counts the failure when the logger throws, and vice versa', async () => {
+      // The two halves are guarded separately and the log runs first, so one
+      // fault must not cost us the other signal.
+      childLoggerMock.mockImplementation(() => {
+        throw new Error('logger exploded');
+      });
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+      });
+      const res = await POST(badManifestReq());
+      expect(res.status).toBe(400);
+      expect(recordEnrollFailureMock).toHaveBeenCalledWith('signature_invalid');
+    });
+
+    it('still logs when the counter throws', async () => {
+      recordEnrollFailureMock.mockImplementation(() => {
+        throw new Error('counter exploded');
+      });
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+      });
+      await POST(badManifestReq());
+      expect(warnMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('still returns its 400 body when the counter throws', async () => {
+      // Instrumentation must never change the response. A counter bug turning
+      // a clean 400 into an unhandled 500 is strictly worse than a lost metric.
+      recordEnrollFailureMock.mockImplementation(() => {
+        throw new Error('counter exploded');
+      });
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+      });
+      const res = await POST(badManifestReq());
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'bad sig',
+        code: 'MANIFEST_INVALID',
+        verifyCode: 'signature_invalid',
+      });
+    });
+
+    it('still returns its 400 body when the logger throws', async () => {
+      warnMock.mockImplementation(() => {
+        throw new Error('logger exploded');
+      });
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw new ManifestRejectedError('too soon', 'MANIFEST_INVALID');
+      });
+      const res = await POST(badManifestReq());
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as Record<string, string>).code).toBe(
+        'MANIFEST_INVALID',
+      );
+    });
   });
 
   it('rejects a bad body before ever constructing the service', async () => {

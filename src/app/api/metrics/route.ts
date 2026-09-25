@@ -9,6 +9,7 @@ import {
 import { rateLimiter } from '@/lib/rate-limit';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
+import { getEnrollFailureTotals } from '@/lib/registry/enroll-metrics';
 import { eventBus } from '@/lib/audit/stream';
 
 export const runtime = 'nodejs';
@@ -120,6 +121,24 @@ export async function GET() {
   lines.push(
     `aitp_control_plane_admin_audit_insert_failures ${getAdminAuditInsertFailures()}`,
   );
+
+  // Enrollment is the service's only public crypto-verification endpoint and
+  // had no failure signal at all before this — a credential-stuffing or
+  // misconfigured-fleet event was invisible until someone filed a ticket.
+  // Label values are allowlisted upstream in enroll-metrics.ts, so cardinality
+  // is bounded at ten regardless of what callers send.
+  lines.push(
+    '# HELP aitp_control_plane_enroll_verification_failures Failed enrollment manifest verifications since process start, by code ("none" = rejected by this service rather than the SDK, "other" = an SDK code this build does not recognize)',
+  );
+  lines.push(
+    '# TYPE aitp_control_plane_enroll_verification_failures counter',
+  );
+  for (const [code, total] of Object.entries(getEnrollFailureTotals())) {
+    const label = code.replace(/"/g, '\\"');
+    lines.push(
+      `aitp_control_plane_enroll_verification_failures{code="${label}"} ${total}`,
+    );
+  }
 
   lines.push(
     '# HELP aitp_control_plane_event_backlog_dropped Audit events evicted from the in-memory SSE backlog since process start',
