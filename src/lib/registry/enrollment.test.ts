@@ -1,6 +1,39 @@
 import { AitpAgent } from 'aitp';
-import { EnrollmentService } from './enrollment';
+import { EnrollmentService, getEnrollmentService } from './enrollment';
 import { ManifestRejectedError, sdkVerifyCode } from './verify-error';
+
+const USABLE_SECRET = 'config-boundary-secret-padded-past-the-32-char-minimum';
+
+/** Re-import `enrollment.ts` — and with it `config.ts` — with
+ *  `ENROLLMENT_SECRET` set to `secret` (`undefined` = unset), and the
+ *  module-level service cache cleared.
+ *
+ *  The env var MUST be set before the `require`, not inside the callback:
+ *  `config` is a `const` evaluated at import, so it snapshots `process.env`
+ *  once and a later assignment is invisible to it. That is the whole reason a
+ *  fresh module registry is needed here rather than a simple env poke, and
+ *  getting the order wrong silently tests the ambient environment instead —
+ *  which is how the first draft of these tests passed one assertion it had no
+ *  business passing. */
+function withEnrollmentSecret(
+  secret: string | undefined,
+  fn: (mod: typeof import('./enrollment')) => void,
+): void {
+  const saved = process.env.ENROLLMENT_SECRET;
+  globalThis.__enrollment = undefined;
+  if (secret === undefined) delete process.env.ENROLLMENT_SECRET;
+  else process.env.ENROLLMENT_SECRET = secret;
+  try {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      fn(require('./enrollment') as typeof import('./enrollment'));
+    });
+  } finally {
+    if (saved === undefined) delete process.env.ENROLLMENT_SECRET;
+    else process.env.ENROLLMENT_SECRET = saved;
+    globalThis.__enrollment = undefined;
+  }
+}
 
 describe('EnrollmentService', () => {
   const secret = 'unit-test-secret-key-padded-to-pass-min-length-check';
@@ -219,5 +252,75 @@ describe('EnrollmentService', () => {
     })();
     expect(err).not.toBeInstanceOf(ManifestRejectedError);
     expect(sdkVerifyCode(err)).toBeUndefined();
+  });
+});
+
+describe('getEnrollmentService — the config boundary', () => {
+  // The link the route's 503 rests on, and which nothing else in the suite
+  // crosses: `config.ts` defaults `enrollmentSecret` to `''` when the env var
+  // is absent, `getEnrollmentService()` constructs `EnrollmentService` with NO
+  // argument, and the constructor throws. Every other test either passes a
+  // secret explicitly (bypassing `config`) or mocks `getEnrollmentService`
+  // (bypassing both), so without these the two halves were each tested and
+  // their join was not. It matters because nothing validates this secret at
+  // startup — `config.ts` warns only about `API_KEYS`, and only in dev — so
+  // this throw is the entire protection against a silently broken deploy.
+
+  it('throws when ENROLLMENT_SECRET is unset, which is what the route turns into a 503', () => {
+    withEnrollmentSecret(undefined, (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow(
+        /ENROLLMENT_SECRET is required/,
+      );
+    });
+  });
+
+  it('throws when ENROLLMENT_SECRET is present but too short', () => {
+    // A *different* message from the unset case, asserted as such: this is the
+    // pair the route's single 503 covers, and both must reach it. The response
+    // body carries neither message.
+    withEnrollmentSecret('too-short', (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow(/at least 32/);
+    });
+  });
+
+  it('keeps throwing on every call, because it caches only on success', () => {
+    // Why a misconfigured server answers EVERY enrollment 503 rather than one:
+    // the cache is assigned after the constructor returns, so a throw is never
+    // memoised. If that were reversed, the first request would 503 and the rest
+    // would fail some other way, which is a far harder outage to read.
+    withEnrollmentSecret(undefined, (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow();
+      expect(() => mod.getEnrollmentService()).toThrow();
+      expect(globalThis.__enrollment).toBeUndefined();
+    });
+  });
+
+  it('returns one cached instance once the secret is usable', () => {
+    // The positive control. Without it the four negatives above would also pass
+    // against a `getEnrollmentService` that threw unconditionally.
+    withEnrollmentSecret(USABLE_SECRET, (mod) => {
+      const first = mod.getEnrollmentService();
+      // `mod.EnrollmentService`, not the top-level import: `jest.isolateModules`
+      // gives this require its own module registry, so the two are distinct
+      // class objects and a cross-registry `instanceof` is false. Same family of
+      // Jest artifact as the cross-realm `instanceof Error` documented in the
+      // SDK-code test above — and the same lesson: assert against the thing you
+      // actually loaded.
+      expect(first).toBeInstanceOf(mod.EnrollmentService);
+      expect(mod.getEnrollmentService()).toBe(first);
+    });
+  });
+
+  it('reads the secret from config, not from the ambient environment', () => {
+    // Non-vacuity for the helper itself. If the env var were being set too late
+    // to reach `config` — the exact mistake the helper's docblock describes —
+    // this would throw instead, and the negatives above would be passing for
+    // the wrong reason.
+    withEnrollmentSecret(USABLE_SECRET, (mod) => {
+      expect(() => mod.getEnrollmentService()).not.toThrow();
+    });
+    // And the module-under-test is genuinely importable the ordinary way, so
+    // the isolated requires above are not standing in for a broken import.
+    expect(typeof getEnrollmentService).toBe('function');
   });
 });
