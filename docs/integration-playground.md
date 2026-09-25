@@ -43,7 +43,7 @@ playground reads `agents[0].handshakeEndpoint` to point its peer-discovery
 TrustOrchestrator at the first match.
 
 ```json
-{ "agents": [ { "aid": "did:pubkey:z:...", "handshakeEndpoint": "http://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
+{ "agents": [ { "aid": "aid:pubkey:z:...", "handshakeEndpoint": "http://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
 ```
 
 The CP **must** include `handshakeEndpoint` on every record. If this call returns
@@ -57,7 +57,7 @@ Fire-and-forget after a run completes (`ingest_events`). Body is
 playground:
 
 ```json
-{ "events": [ { "type": "handshake.completed", "ts": "2026-05-25T12:00:00.000Z", "aid_a": "did:pubkey:z:...", "aid_b": "did:pubkey:z:...", "session_id": "uuid", "run_id": "run-abc", "grants": ["demo.echo"], "payload": { "...": "..." }, "playground": { "run_id": "run-abc", "scenario": "research-and-write" } } ] }
+{ "events": [ { "type": "handshake.completed", "ts": "2026-05-25T12:00:00.000Z", "aid_a": "aid:pubkey:z:...", "aid_b": "aid:pubkey:z:...", "session_id": "uuid", "run_id": "run-abc", "grants": ["demo.echo"], "payload": { "...": "..." }, "playground": { "run_id": "run-abc", "scenario": "research-and-write" } } ] }
 ```
 
 The CP must: return 2xx quickly; normalize `aid_a`/`aid_b`/`session_id`/`run_id`

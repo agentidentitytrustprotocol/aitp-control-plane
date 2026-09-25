@@ -21,6 +21,13 @@ spec rather than restate it.
   ```json
   { "error": "human message", "code": "MACHINE_CODE" }
   ```
+  `code` is the stable signal; `error` is human-facing prose and may be reworded
+  at any time. A few endpoints add one **machine-readable detail field**
+  alongside these two rather than nesting: `bucket` on a `429` (which limiter
+  tripped) and `verifyCode` on `POST /api/registry/enroll` (which manifest check
+  failed). Such a field is always optional and additive — absent means "not
+  applicable here", never "unknown".
+
   HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `409` (conflict), `413` (payload too large), `429` (rate limited), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
 
 ## Authentication
@@ -93,7 +100,7 @@ Body is a **ManifestEnvelope** — the agent's own signed manifest:
 ```json
 {
   "manifest": {
-    "aid": "did:pubkey:z:...",
+    "aid": "aid:pubkey:z:...",
     "display_name": "researcher-1",
     "handshake_endpoint": "http://agent-host:8101/aitp",
     "offered_capabilities": ["demo.echo"],
@@ -105,6 +112,18 @@ Body is a **ManifestEnvelope** — the agent's own signed manifest:
 
 The CP verifies the manifest signature against the AID's key and returns a single-use enrollment token. Errors: `400 MANIFEST_INVALID` (missing/unverifiable manifest), `400 BODY_INVALID` (not JSON).
 
+A `400 MANIFEST_INVALID` may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable reason for rejecting the manifest:
+
+```json
+{ "error": "signature verification failed", "code": "MANIFEST_INVALID", "verifyCode": "signature_invalid" }
+```
+
+Branch on `verifyCode`, never on `error` — the code is the contract, the message wording is not, and the SDK may reword it in any release. This is the same rule [the revocation-list section](#revocation) states for `verifyRevocationList`'s `.code`, applied here to the surface where the CP is the *producer* rather than the consumer. (The two code sets are not the same contract: that one belongs to a different SDK function, `verifyRevocationList`. Several spellings overlap — `signature_invalid`, `version_unknown`, `expired`, `malformed` appear in both — so do not reuse one set's handling for the other.)
+
+`verifyCode` is present **if and only if** the SDK was what rejected the manifest. It is absent whenever one of the CP's own guards rejected it instead — a `manifest.aid` that is missing or does not start with `aid:`, or an `expires_at` inside the 5-minute registration window (both of which run *after* the SDK has already accepted the manifest), as well as the pre-validation failures that never reach the SDK at all. Absence is therefore information, not a gap.
+
+The values as of `aitp` `0.12.0` are `signature_invalid`, `pop_failed`, `aid_mismatch`, `expired`, `version_unknown`, `identity_hint_malformed`, `incompatible_identity_type`, and `malformed` — see the SDK's `verifyManifestJson` docstring for the authoritative list. **Do not treat that list as closed.** The vocabulary belongs to the SDK rather than to this service and has already grown once (five values to these eight); a future SDK minor may add more, and this service passes an unrecognized value through verbatim rather than flattening it. Treat anything you do not recognize as a generic "manifest verification failed".
+
 > The `ManifestEnvelope` shape and its signature/verification are defined by the protocol — [RFC-AITP-0003 (Agent Manifest)](https://agentidentitytrustprotocol.io/spec/manifest) and [RFC-AITP-0007 (Key Resolution)](https://agentidentitytrustprotocol.io/spec/key-resolution). The CP caches and serves the manifest; it does not define the format. Use the [`aitp`](https://www.npmjs.com/package/@agentidentitytrustprotocol/aitp) SDK to build and sign one.
 
 #### `POST /api/registry/agents`
@@ -114,7 +133,7 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 ```json
 {
   "manifest": {
-    "aid": "did:pubkey:z:...",
+    "aid": "aid:pubkey:z:...",
     "display_name": "researcher-1",
     "handshake_endpoint": "http://agent-host:8101/aitp",
     "offered_capabilities": ["demo.echo"],
@@ -141,7 +160,7 @@ Each record:
 
 ```json
 {
-  "aid": "did:pubkey:z:...",
+  "aid": "aid:pubkey:z:...",
   "displayName": "researcher-1",
   "handshakeEndpoint": "http://agent-host:8101/aitp",
   "offeredCaps": ["demo.echo"],
@@ -185,8 +204,8 @@ Accepts either a bare array or `{ "events": [...] }`. Each event:
 {
   "type": "handshake.complete",
   "ts": "2026-05-25T12:00:00Z",
-  "aidA": "did:pubkey:z:...",
-  "aidB": "did:pubkey:z:...",
+  "aidA": "aid:pubkey:z:...",
+  "aidB": "aid:pubkey:z:...",
   "sessionId": "uuid-or-base64url",
   "runId": "run-123",
   "grants": ["demo.echo"],
