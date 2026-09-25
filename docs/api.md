@@ -110,7 +110,9 @@ Body is a **ManifestEnvelope** — the agent's own signed manifest:
 }
 ```
 
-The CP verifies the manifest signature against the AID's key and returns a single-use enrollment token. Errors: `400 MANIFEST_INVALID` (missing/unverifiable manifest), `400 BODY_INVALID` (not JSON).
+The CP verifies the manifest signature against the AID's key and returns a single-use enrollment token. Errors: `400 MANIFEST_INVALID` (missing/unverifiable manifest), `400 BODY_INVALID` (not JSON), `503 SERVER_MISCONFIGURED` (the server has no usable `ENROLLMENT_SECRET` and cannot issue tokens to anyone).
+
+The `4xx`/`5xx` split is meaningful here: a `400` means *your* manifest is the problem and retrying it unchanged will not help, while a `503` means the **server** is broken and the same request is worth retrying once the deployment is fixed. The `503` body deliberately carries no configuration detail.
 
 A `400 MANIFEST_INVALID` may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable reason for rejecting the manifest:
 

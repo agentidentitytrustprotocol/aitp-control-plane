@@ -1,6 +1,6 @@
 import { AitpAgent } from 'aitp';
 import { EnrollmentService } from './enrollment';
-import { sdkVerifyCode } from './verify-error';
+import { ManifestRejectedError, sdkVerifyCode } from './verify-error';
 
 describe('EnrollmentService', () => {
   const secret = 'unit-test-secret-key-padded-to-pass-min-length-check';
@@ -27,7 +27,7 @@ describe('EnrollmentService', () => {
   it('rejects an invalid manifest envelope', () => {
     // Asserts .code is a string — the contract package.json's "//aitp"
     // block (0.7.0 entry) documents for exactly this path, where
-    // enrollment.ts:55 calls verifyManifestJson on externally-supplied
+    // enrollment.ts calls verifyManifestJson on externally-supplied
     // input — without pinning its current value ("malformed"). A future
     // release may reclassify an unknown top-level field like `bogus` from
     // `malformed` to `unknown_field` (see the UNKNOWN_FIELD batch tracked in
@@ -131,7 +131,94 @@ describe('EnrollmentService', () => {
     expect(() => service.verifyAndIssueToken(shortLived)).toThrow(/longer TTL/);
   });
 
+  it('throws ManifestRejectedError, not a bare Error, for its own rejections', () => {
+    // Phase 4 is classification-only: the messages and the response codes are
+    // unchanged, so both are asserted here to prove nothing else moved. What
+    // changes is that these rejections are now positively identifiable as
+    // "the caller's fault" rather than inferred from the absence of a .code —
+    // which is equally true of a genuine internal error.
+    const agent = AitpAgent.generate();
+    const shortLived = agent.buildManifest({
+      displayName: 'short-ttl-agent',
+      handshakeEndpoint: 'https://agent.example.com/handshake',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 60,
+    });
+
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken(shortLived);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ManifestRejectedError);
+    const rejected = caught as ManifestRejectedError;
+    expect(rejected.cpCode).toBe('MANIFEST_INVALID');
+    expect(rejected.message).toBe(
+      'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
+    );
+    // The SDK's mechanism and ours must stay mutually unrecognizable.
+    expect(sdkVerifyCode(rejected)).toBeUndefined();
+  });
+
+  it('documents that the aid guard is unreachable via a real signed manifest', () => {
+    // The aid guard (`!aid.startsWith('aid:')`) runs AFTER verifyManifestJson
+    // has accepted the envelope, and the signature covers the aid — so
+    // rewriting the aid to a non-AID makes the SDK reject it first, and
+    // AitpAgent only ever mints `aid:`-prefixed AIDs. The guard is therefore
+    // defense-in-depth against an SDK that one day accepts a manifest this
+    // service cannot use, not a path a caller can drive today.
+    //
+    // Consequences, recorded so neither is mistaken for an oversight: the aid
+    // guard's own behavior is pinned in enrollment-guards.test.ts, which stubs
+    // SDK verification to a no-op precisely because that is the only way to
+    // reach it; and if the assertion below ever fails, the guard is checking
+    // for a prefix the SDK no longer issues, which is a louder problem than
+    // the guard itself.
+    const agent = AitpAgent.generate();
+    const envelope = JSON.parse(
+      agent.buildManifest({
+        displayName: 'aid-guard-agent',
+        handshakeEndpoint: 'https://agent.example.com/handshake',
+        offeredCaps: ['demo.echo'],
+        ttlSecs: 3600,
+      }),
+    ) as { manifest: { aid: string } };
+    expect(envelope.manifest.aid.startsWith('aid:')).toBe(true);
+
+    // And confirm the SDK, not our guard, is what rejects a tampered aid.
+    const tampered = JSON.stringify({
+      ...envelope,
+      manifest: { ...envelope.manifest, aid: 'did:pubkey:z:not-an-aid' },
+    });
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken(tampered);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).not.toBeInstanceOf(ManifestRejectedError);
+    expect(typeof sdkVerifyCode(caught)).toBe('string');
+  });
+
   it('refuses to construct with a sub-32-char secret', () => {
     expect(() => new EnrollmentService('too-short')).toThrow(/at least 32/);
+  });
+
+  it('refuses to construct with no secret at all', () => {
+    // The other half of the pair the route's 503 guard depends on. Both throws
+    // are plain Errors with no cpCode and no .code — which is exactly why the
+    // route cannot be allowed to classify them as a bad manifest, and why it
+    // hoists this construction out of the verification try/catch.
+    expect(() => new EnrollmentService('')).toThrow(/ENROLLMENT_SECRET is required/);
+    const err = (() => {
+      try {
+        new EnrollmentService('');
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).not.toBeInstanceOf(ManifestRejectedError);
+    expect(sdkVerifyCode(err)).toBeUndefined();
   });
 });

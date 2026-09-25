@@ -22,10 +22,7 @@
  *     carries a value from *this repo's* SCREAMING_SNAKE taxonomy. It
  *     deliberately does NOT define a `code` property — colliding with the
  *     SDK's would let our own errors satisfy the guard that watches the
- *     SDK's contract. Note that `enrollment.ts` does not throw it yet: it
- *     still throws plain `Error`s, and switches over once the route is ready
- *     to discriminate on the class. Until then `ManifestRejectedError` is
- *     defined and tested but unused in production.
+ *     SDK's contract.
  *
  * `sdkVerifyCode` is defensive rather than trusting because its return
  * value is destined for a public, unauthenticated response body, and it

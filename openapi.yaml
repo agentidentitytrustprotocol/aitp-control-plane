@@ -460,6 +460,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RateLimitError" }
+        "503":
+          description: >-
+            `code` is `SERVER_MISCONFIGURED`. The server cannot issue
+            enrollment tokens at all — `ENROLLMENT_SECRET` is unset or too
+            short. This is an operator fault, not a problem with the submitted
+            manifest, and the body carries no configuration detail. Unlike a
+            `400`, it is safe to retry once the deployment is fixed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/agents:
     get:

@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
+import { ManifestRejectedError } from './verify-error';
 
 // Same 5-min guard as src/app/api/registry/agents/route.ts so callers
 // don't enroll a manifest that the immediately-following register call
@@ -59,14 +60,24 @@ export class EnrollmentService {
     };
     const manifest = envelope.manifest;
     const aid = manifest.aid;
+    // These two rejections are OURS, not the SDK's — the SDK has already
+    // accepted the manifest by this point. They throw ManifestRejectedError
+    // so the route can tell "the caller's manifest is bad" from "this service
+    // is broken" positively, rather than inferring it from the absence of a
+    // `.code` (which is equally true of a genuine internal error). Messages
+    // and response codes are unchanged; this is classification only.
     if (typeof aid !== 'string' || !aid.startsWith('aid:')) {
-      throw new Error('manifest.aid missing or not an AID string');
+      throw new ManifestRejectedError(
+        'manifest.aid missing or not an AID string',
+        'MANIFEST_INVALID',
+      );
     }
     if (typeof manifest.expires_at === 'number') {
       const expiresMs = manifest.expires_at * 1000;
       if (expiresMs < Date.now() + REGISTRATION_EXPIRY_GUARD_MS) {
-        throw new Error(
+        throw new ManifestRejectedError(
           'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
+          'MANIFEST_INVALID',
         );
       }
     }
