@@ -1,5 +1,6 @@
 import { AitpAgent } from 'aitp';
 import { EnrollmentService } from './enrollment';
+import { sdkVerifyCode } from './verify-error';
 
 describe('EnrollmentService', () => {
   const secret = 'unit-test-secret-key-padded-to-pass-min-length-check';
@@ -42,6 +43,44 @@ describe('EnrollmentService', () => {
     expect(threw).toBe(true);
 
     expect(() => service.verifyAndIssueToken('not json at all')).toThrow();
+  });
+
+  it('exposes the real SDK failure code through sdkVerifyCode', () => {
+    // The one assertion in the suite that would catch the SDK moving its
+    // `.code` property: everything downstream of sdkVerifyCode is mocked,
+    // so without this a rename would silently degrade the public
+    // `verifyCode` field to "absent" in production rather than fail here.
+    // Asserts the *shape* (a non-empty string), never today's value — see
+    // the forward-compat note above.
+    let threw = false;
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken('{"manifest":{"bogus":true}}');
+    } catch (err) {
+      threw = true;
+      caught = err;
+    }
+    expect(threw).toBe(true);
+    // Deliberately asserts ONLY the code, never the error's type. Two
+    // reasons, the second measured rather than assumed:
+    //
+    //  1. Only `.code` is the contract. A future SDK that threw a plain
+    //     object carrying `.code` would keep production working, so pinning
+    //     the type here would manufacture a failure out of a non-breakage.
+    //
+    //  2. `expect(caught).toBeInstanceOf(Error)` FAILS in this suite — with
+    //     the baffling "Expected constructor: Error / Received constructor:
+    //     Error". That is a *Jest* artifact, not an SDK one:
+    //     `jest-environment-node` runs the test file in a vm context with
+    //     its own `Error` global, so the cross-realm `instanceof` is false.
+    //     Measured under plain `node` (no Jest), the SDK's error IS a real
+    //     native Error — `instanceof Error`, `isNativeError` and
+    //     `Object.getPrototypeOf(e) === Error.prototype` are all true. So
+    //     `route.ts`'s `err instanceof Error ? err.message : String(err)`
+    //     is correct in production and must not be "fixed".
+    const code = sdkVerifyCode(caught);
+    expect(typeof code).toBe('string');
+    expect(code).not.toBe('');
   });
 
   it('rejects a token signed with a different secret', () => {
