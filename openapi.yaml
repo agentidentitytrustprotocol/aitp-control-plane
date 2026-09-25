@@ -122,6 +122,15 @@ components:
                 as human-facing detail only.
 
 
+                Because of that, a `code` of `MANIFEST_EXPIRED` may arrive
+                either with `verifyCode: expired` (the manifest was already past
+                `expires_at`, so the SDK rejected it) or with no `verifyCode` at
+                all (it was still valid but expires inside the 5-minute
+                registration window, so this service rejected it). Both mean
+                "re-issue with a longer TTL", which is why they share one `code`;
+                `verifyCode` is what distinguishes them if you need to.
+
+
                 Values known at the time of writing, from the `aitp` SDK's
                 `verifyManifestJson` docstring: `signature_invalid`,
                 `pop_failed`, `aid_mismatch`, `expired`, `version_unknown`,
@@ -448,10 +457,14 @@ paths:
               schema: { $ref: "#/components/schemas/EnrollResponse" }
         "400":
           description: >-
-            Manifest missing, malformed, or failed verification. `code` is
-            `MANIFEST_INVALID`, or `BODY_INVALID` when the body is not JSON.
-            `verifyCode` is present when the `aitp` SDK was the thing that
-            rejected the manifest — branch on it, not on `error`.
+            Manifest missing, malformed, expired, or failed verification.
+            `code` is one of `MANIFEST_INVALID`, `MANIFEST_EXPIRED` (the
+            manifest is already past `expires_at`, or expires inside the
+            5-minute registration window — the same code
+            `POST /api/registry/agents` returns for that identical condition),
+            or `BODY_INVALID` when the body is not JSON. `verifyCode` is
+            present when the `aitp` SDK was the thing that rejected the
+            manifest — branch on it, not on `error`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ManifestVerificationError" }
@@ -523,7 +536,13 @@ paths:
       responses:
         "201":
           description: Registered
-        "400": { description: Bad manifest }
+        "400":
+          description: >-
+            Bad manifest. `code` is `MANIFEST_EXPIRED` when the manifest expires
+            inside the 5-minute registration window — the same code
+            `POST /api/registry/enroll` returns for that identical condition, so
+            a client may handle it once for both routes — or `BODY_INVALID` for a
+            malformed body.
         "401": { description: Bad token }
         "429": { description: Rate limited }
 

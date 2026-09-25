@@ -120,23 +120,22 @@ describe('EnrollmentService', () => {
     }
   });
 
-  it('rejects a manifest whose TTL falls inside the 5-minute registration guard', () => {
-    const agent = AitpAgent.generate();
-    const shortLived = agent.buildManifest({
-      displayName: 'short-ttl-agent',
-      handshakeEndpoint: 'https://agent.example.com/handshake',
-      offeredCaps: ['demo.echo'],
-      ttlSecs: 60, // expires before the 5-minute guard window
-    });
-    expect(() => service.verifyAndIssueToken(shortLived)).toThrow(/longer TTL/);
-  });
-
-  it('throws ManifestRejectedError, not a bare Error, for its own rejections', () => {
-    // Phase 4 is classification-only: the messages and the response codes are
-    // unchanged, so both are asserted here to prove nothing else moved. What
-    // changes is that these rejections are now positively identifiable as
-    // "the caller's fault" rather than inferred from the absence of a .code —
-    // which is equally true of a genuine internal error.
+  it('rejects a manifest inside the 5-minute guard as a coded ManifestRejectedError', () => {
+    // This replaces a `toThrow(/longer TTL/)` substring match on the message —
+    // the very practice this change exists to remove. Even this repo resorted
+    // to it while the rejection had no machine-readable code of its own; now it
+    // has one, so the test branches on the code instead.
+    //
+    // The rejection is positively identifiable as "the caller's fault" rather
+    // than inferred from the absence of a `.code`, which is equally true of a
+    // genuine internal error.
+    //
+    // The MESSAGE is still pinned byte-for-byte, and that is deliberate rather
+    // than left over: the expiry guard's code moved MANIFEST_INVALID ->
+    // MANIFEST_EXPIRED (matching the sibling register route, which has always
+    // returned MANIFEST_EXPIRED for this identical condition), and pinning the
+    // message is what proves the prose did NOT move with it — so status-only
+    // and message-matching clients are unaffected by that narrowing.
     const agent = AitpAgent.generate();
     const shortLived = agent.buildManifest({
       displayName: 'short-ttl-agent',
@@ -153,7 +152,7 @@ describe('EnrollmentService', () => {
     }
     expect(caught).toBeInstanceOf(ManifestRejectedError);
     const rejected = caught as ManifestRejectedError;
-    expect(rejected.cpCode).toBe('MANIFEST_INVALID');
+    expect(rejected.cpCode).toBe('MANIFEST_EXPIRED');
     expect(rejected.message).toBe(
       'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
     );

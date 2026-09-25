@@ -110,11 +110,13 @@ Body is a **ManifestEnvelope** — the agent's own signed manifest:
 }
 ```
 
-The CP verifies the manifest signature against the AID's key and returns a single-use enrollment token. Errors: `400 MANIFEST_INVALID` (missing/unverifiable manifest), `400 BODY_INVALID` (not JSON), `503 SERVER_MISCONFIGURED` (the server has no usable `ENROLLMENT_SECRET` and cannot issue tokens to anyone).
+The CP verifies the manifest signature against the AID's key and returns a single-use enrollment token. Errors: `400 MANIFEST_INVALID` (missing/unverifiable manifest), `400 MANIFEST_EXPIRED` (the manifest is already past `expires_at`, or expires inside the 5-minute registration window), `400 BODY_INVALID` (not JSON), `503 SERVER_MISCONFIGURED` (the server has no usable `ENROLLMENT_SECRET` and cannot issue tokens to anyone).
+
+`MANIFEST_EXPIRED` is the **same code `POST /api/registry/agents` returns** for that identical condition, so a client can handle it once for both routes. Both mean "re-issue with a longer TTL". Until now enroll folded it into `MANIFEST_INVALID` and only register named it, which made the same rejection machine-detectable on one route and prose-only on the other. The message is unchanged, so status-only and message-matching clients are unaffected; only a client matching `code === "MANIFEST_INVALID"` exactly for an expiring manifest needs to add the new value.
 
 The `4xx`/`5xx` split is meaningful here: a `400` means *your* manifest is the problem and retrying it unchanged will not help, while a `503` means the **server** is broken and the same request is worth retrying once the deployment is fixed. The `503` body deliberately carries no configuration detail.
 
-A `400 MANIFEST_INVALID` may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable reason for rejecting the manifest:
+A `400` from this route may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable reason for rejecting the manifest:
 
 ```json
 { "error": "signature verification failed", "code": "MANIFEST_INVALID", "verifyCode": "signature_invalid" }
@@ -123,6 +125,8 @@ A `400 MANIFEST_INVALID` may also carry **`verifyCode`**, the `aitp` SDK's own m
 Branch on `verifyCode`, never on `error` — the code is the contract, the message wording is not, and the SDK may reword it in any release. This is the same rule [the revocation-list section](#revocation) states for `verifyRevocationList`'s `.code`, applied here to the surface where the CP is the *producer* rather than the consumer. (The two code sets are not the same contract: that one belongs to a different SDK function, `verifyRevocationList`. Several spellings overlap — `signature_invalid`, `version_unknown`, `expired`, `malformed` appear in both — so do not reuse one set's handling for the other.)
 
 `verifyCode` is present **if and only if** the SDK was what rejected the manifest. It is absent whenever one of the CP's own guards rejected it instead — a `manifest.aid` that is missing or does not start with `aid:`, or an `expires_at` inside the 5-minute registration window (both of which run *after* the SDK has already accepted the manifest), as well as the pre-validation failures that never reach the SDK at all. Absence is therefore information, not a gap.
+
+That is why a `400 MANIFEST_EXPIRED` arrives in two shapes: with `"verifyCode": "expired"` when the manifest was already past `expires_at` (the SDK rejects that itself, before the CP's guard is reached), and with no `verifyCode` when the manifest is still valid but expires inside the registration window (the SDK accepts it; the CP does not). One `code` because the fix is the same either way; `verifyCode` if you need to tell them apart.
 
 The values as of `aitp` `0.12.0` are `signature_invalid`, `pop_failed`, `aid_mismatch`, `expired`, `version_unknown`, `identity_hint_malformed`, `incompatible_identity_type`, and `malformed` — see the SDK's `verifyManifestJson` docstring for the authoritative list. **Do not treat that list as closed.** The vocabulary belongs to the SDK rather than to this service and has already grown once (five values to these eight); a future SDK minor may add more, and this service passes an unrecognized value through verbatim rather than flattening it. Treat anything you do not recognize as a generic "manifest verification failed".
 
@@ -145,7 +149,7 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 }
 ```
 
-- `expires_at` is **Unix seconds**. It must be ≥ 5 minutes in the future or you get `400 MANIFEST_EXPIRED`.
+- `expires_at` is **Unix seconds**. It must be ≥ 5 minutes in the future or you get `400 MANIFEST_EXPIRED` — the same code and the same message [`/enroll`](#post-apiregistryenroll) returns for this condition, because enroll applies the same 5-minute guard first specifically to save you the round trip. You can still reach this check, though, so handle it: the two guards each read their own clock, so a manifest sitting near the 5-minute boundary can pass enroll and fail here seconds later, and the two implementations disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
 - **Namespace** is taken from the `X-Aitp-Namespace` header (wins) or `manifest.extensions.namespace`, defaulting to `default`.
 - The token is consumed atomically; a second presentation returns `401 TOKEN_REPLAYED`. An invalid/expired token or AID mismatch returns `401 TOKEN_INVALID`.
 - A missing `manifest.aid`, or a non-string `manifest.extensions.namespace`, returns `400 BODY_INVALID`.

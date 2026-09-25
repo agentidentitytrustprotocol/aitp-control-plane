@@ -13,7 +13,12 @@
  *       `verifyCode` (our own 5-minute registration guard rejected it).
  *       Together these prove the biconditional the error body promises —
  *       `verifyCode` present ⇔ the aitp SDK was the thing that rejected
- *       the manifest.
+ *       the manifest. Both carry `code: MANIFEST_EXPIRED`, which only a real
+ *       SDK can demonstrate: the two paths are distinguished by which
+ *       component rejects first, not by anything a mock can stand in for.
+ *   3b. Cross-route: enroll and register return the SAME `code` for the same
+ *       60-second manifest. That agreement is the invariant the shared guard's
+ *       comment claims and nothing asserted until now.
  *   4. POST /api/registry/agents for each → registry rows
  *   5. GET /api/registry/agents?capability=demo.echo → both visible
  *   6. POST /api/events with a synthetic handshake.complete event
@@ -177,10 +182,17 @@ describe('integration: enroll → register → discover → event → revoke flo
       code: string;
       verifyCode?: string;
     };
-    expect(body.code).toBe('MANIFEST_INVALID');
+    expect(body.code).toBe('MANIFEST_EXPIRED');
     // Asserts the TYPE, not the literal 'expired'. The SDK owns this
     // vocabulary and has already grown it 5 -> 8 codes; pinning today's
     // value would manufacture a failure out of a future reclassification.
+    //
+    // Note what that forward-compat stance costs here, recorded so it is not
+    // mistaken for an oversight: `code: MANIFEST_EXPIRED` above depends on the
+    // SDK still spelling this `expired`. If the SDK renamed it, this test would
+    // still pass on the `verifyCode` assertions but the `code` assertion would
+    // fail — which is the right failure, and the reason the `code` half is
+    // pinned exactly while the `verifyCode` half is not.
     expect(typeof body.verifyCode).toBe('string');
     expect(body.verifyCode).not.toBe('');
     // Deliberately NOT asserted: body.error's wording. Two reasons — the SDK
@@ -216,12 +228,81 @@ describe('integration: enroll → register → discover → event → revoke flo
     );
     expect(res.status).toBe(400);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.code).toBe('MANIFEST_INVALID');
+    expect(body.code).toBe('MANIFEST_EXPIRED');
     expect('verifyCode' in body).toBe(false);
     // The prose IS ours on this path (enrollment.ts, not the SDK), so it is
     // safe to pin — and pinning it proves the SDK really did accept the
     // manifest and our guard really is what rejected it.
     expect(body.error).toContain('longer TTL');
+  });
+
+  it('agrees with the register route on the code for the same 60s manifest', async () => {
+    // The invariant enrollment.ts:6-8's comment claims ("same 5-min guard as
+    // agents/route.ts ... single source of truth here") and which nothing
+    // asserted until now. The two routes applied the same condition with the
+    // same byte-identical message under two DIFFERENT codes, so the same
+    // rejection was machine-detectable on register and prose-only on enroll.
+    //
+    // Driven end to end rather than by comparing constants: the codes are
+    // emitted from two different files by two different mechanisms
+    // (`ManifestRejectedError.cpCode` here, an inline literal there), so only
+    // reading them off two real responses proves they agree.
+    const shortLived = AitpAgent.generate();
+    const longManifest = shortLived.buildManifest({
+      displayName: 'e2e-cross-route',
+      handshakeEndpoint: 'http://e2e-cross.local/aitp',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 3600, // long enough to earn a token
+    });
+    const shortManifest = shortLived.buildManifest({
+      displayName: 'e2e-cross-route',
+      handshakeEndpoint: 'http://e2e-cross.local/aitp',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 60, // same aid, TTL inside the guard
+    });
+
+    // Enroll side: rejected outright.
+    const enrollRes = await enrollPost(
+      mkReq('http://localhost/api/registry/enroll', {
+        method: 'POST',
+        body: shortManifest,
+      }),
+    );
+    expect(enrollRes.status).toBe(400);
+    const enrollBody = (await enrollRes.json()) as { code: string; error: string };
+
+    // Register side: needs a valid token, which only the long manifest can
+    // earn — the same agent, so the token's `sub` still matches the short
+    // manifest's aid. That is what lets the register-time guard be reached at
+    // all, and it is exactly the round-trip the enroll-time guard exists to
+    // save a caller from.
+    const tokenRes = await enrollPost(
+      mkReq('http://localhost/api/registry/enroll', {
+        method: 'POST',
+        body: longManifest,
+      }),
+    );
+    expect(tokenRes.status).toBe(200);
+    const { token } = (await tokenRes.json()) as { token: string };
+
+    const registerRes = await registerPost(
+      mkReq('http://localhost/api/registry/agents', {
+        method: 'POST',
+        body: shortManifest,
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(registerRes.status).toBe(400);
+    const registerBody = (await registerRes.json()) as {
+      code: string;
+      error: string;
+    };
+
+    expect(enrollBody.code).toBe(registerBody.code);
+    expect(enrollBody.code).toBe('MANIFEST_EXPIRED');
+    // The messages were already byte-identical; asserting it keeps the pair
+    // honest if either side is reworded without the other.
+    expect(enrollBody.error).toBe(registerBody.error);
   });
 
   it('registers both agents with their tokens', async () => {

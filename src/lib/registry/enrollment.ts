@@ -64,8 +64,12 @@ export class EnrollmentService {
     // accepted the manifest by this point. They throw ManifestRejectedError
     // so the route can tell "the caller's manifest is bad" from "this service
     // is broken" positively, rather than inferring it from the absence of a
-    // `.code` (which is equally true of a genuine internal error). Messages
-    // and response codes are unchanged; this is classification only.
+    // `.code` (which is equally true of a genuine internal error). `cpCode`
+    // becomes the response `code`, but only after the route checks it against
+    // its own allowlist — so a typo here does not ship an undocumented code, it
+    // silently downgrades this rejection to MANIFEST_INVALID. That is the safe
+    // failure, and it is also a silent one, which is why both values are pinned
+    // byte-for-byte by tests rather than left to the allowlist to catch.
     if (typeof aid !== 'string' || !aid.startsWith('aid:')) {
       throw new ManifestRejectedError(
         'manifest.aid missing or not an AID string',
@@ -75,9 +79,18 @@ export class EnrollmentService {
     if (typeof manifest.expires_at === 'number') {
       const expiresMs = manifest.expires_at * 1000;
       if (expiresMs < Date.now() + REGISTRATION_EXPIRY_GUARD_MS) {
+        // MANIFEST_EXPIRED, not MANIFEST_INVALID: the sibling route
+        // (`src/app/api/registry/agents/route.ts`) has always returned
+        // MANIFEST_EXPIRED for this identical condition with this
+        // byte-identical message. Two routes, one condition, one message and
+        // two different codes made the same rejection machine-detectable on
+        // register and prose-only on enroll — which is the whole defect #69
+        // describes, one field over. The message is deliberately unchanged, so
+        // status-only and substring-matching clients are unaffected; only an
+        // exact `code === 'MANIFEST_INVALID'` match on this one condition is.
         throw new ManifestRejectedError(
           'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
-          'MANIFEST_INVALID',
+          'MANIFEST_EXPIRED',
         );
       }
     }

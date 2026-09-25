@@ -11,10 +11,18 @@
 //     mapping everything to 400:
 //       - ManifestRejectedError (we rejected it) -> 400 with its cpCode,
 //         never a verifyCode
-//       - an error carrying a usable SDK code    -> 400 MANIFEST_INVALID
-//         plus that verifyCode; the code is the contract, the wording is not
+//       - an error carrying a usable SDK code    -> 400 plus that verifyCode;
+//         the code is the contract, the wording is not
 //       - anything else                          -> RETHROWN, so the
 //         framework renders a 500 instead of blaming the caller
+//
+//   • which `code` each 400 carries, and the two OPPOSITE allowlist rules that
+//     decide it. `cpCode` is ours, so an unrecognized value falls back to
+//     MANIFEST_INVALID rather than being published. `verifyCode` is the SDK's,
+//     so an unrecognized value passes through verbatim. Exactly one SDK code is
+//     translated — `expired` -> MANIFEST_EXPIRED — so both expiry paths (the
+//     SDK's and our 5-minute guard's) report the one code the sibling register
+//     route has always used for this condition.
 //   • a server that cannot construct EnrollmentService at all (unset/short
 //     ENROLLMENT_SECRET) -> 503 SERVER_MISCONFIGURED, with no config detail
 //     in the body, and without ever calling the service
@@ -143,12 +151,13 @@ describe('POST /api/registry/enroll', () => {
     // This is the in-repo rejection path (the aid check and the 5-minute
     // expiry guard both throw ManifestRejectedError). Absence is the signal
     // that the SDK is not what rejected this manifest.
-    // Verbatim the message the 5-minute registration guard in enrollment.ts
-    // actually throws, so this test does not read as a paraphrase of a string
-    // it is not pinning. (The service is mocked here; the tests that genuinely
-    // pin both guards' messages are in enrollment-guards.test.ts.)
-    const guardMessage =
-      'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL';
+    //
+    // Uses the AID guard's message-and-code pair, verbatim, rather than a
+    // paraphrase or an invented combination: this is a pairing production
+    // actually emits. (The expiry guard's pair is MANIFEST_EXPIRED, exercised
+    // below.) The service is mocked here; the tests that genuinely pin both
+    // guards' messages against the real code are in enrollment-guards.test.ts.
+    const guardMessage = 'manifest.aid missing or not an AID string';
     verifyAndIssueTokenMock.mockImplementation(() => {
       throw new ManifestRejectedError(guardMessage, 'MANIFEST_INVALID');
     });
@@ -163,12 +172,11 @@ describe('POST /api/registry/enroll', () => {
   });
 
   it('forwards whatever cpCode the rejection carries into the response `code`', async () => {
-    // Pins the PLUMBING, not today's value. Every ManifestRejectedError in
-    // production currently carries MANIFEST_INVALID, so the test above cannot
-    // tell `code: err.cpCode` from a hardcoded `code: 'MANIFEST_INVALID'` —
-    // verified: hardcoding it passes the whole suite. This test is what makes
-    // the forwarding observable, and it is the mechanism a later phase relies
-    // on to give the expiry guard its own code without touching the route.
+    // Pins the PLUMBING, not a hardcoded constant: verified by mutation that
+    // hardcoding `code: 'MANIFEST_INVALID'` in the route passes every other
+    // test in this file. This is the mechanism the expiry guard's own code
+    // rides on — `enrollment.ts` throws MANIFEST_EXPIRED and the route needs no
+    // knowledge of that condition.
     verifyAndIssueTokenMock.mockImplementation(() => {
       throw new ManifestRejectedError('expiring too soon', 'MANIFEST_EXPIRED');
     });
@@ -181,6 +189,68 @@ describe('POST /api/registry/enroll', () => {
     });
     expect('verifyCode' in body).toBe(false);
   });
+
+  it('refuses to publish an unrecognized cpCode, falling back to MANIFEST_INVALID', async () => {
+    // `cpCode` is OURS, so a value outside the allowlist is a bug in this repo
+    // — not news from a dependency — and echoing it would publish a code no
+    // client can look up and that `docs/api.md` does not document. Nothing
+    // machine-readable would catch it either: `openapi.yaml` enumerates no
+    // `code` value at all, so the allowlist is the only check there is.
+    //
+    // Note the deliberate asymmetry with `verifyCode` two tests down, which
+    // passes an unknown value straight through: whoever owns the vocabulary
+    // decides whether unknown values pass through.
+    verifyAndIssueTokenMock.mockImplementation(() => {
+      throw new ManifestRejectedError('m', 'NOT_A_REAL_CODE');
+    });
+    const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: 'm', code: 'MANIFEST_INVALID' });
+    // Nor may it reach the metric label or the log line under its own name.
+    expect(recordEnrollFailureMock).toHaveBeenCalledWith(undefined);
+    expect(warnMock).toHaveBeenCalledWith(
+      { code: 'MANIFEST_INVALID', verifyCode: undefined },
+      'enrollment verification failed',
+    );
+  });
+
+  it("maps the SDK's `expired` to MANIFEST_EXPIRED, keeping verifyCode", async () => {
+    // The second expiry path: a manifest already past `expires_at` never
+    // reaches our own guard, because verifyManifestJson rejects it first. Both
+    // paths must report one code — to a client both mean "re-issue with a
+    // longer TTL" — with `verifyCode` distinguishing which guard fired.
+    verifyAndIssueTokenMock.mockImplementation(() => {
+      throw Object.assign(new Error('manifest expired'), { code: 'expired' });
+    });
+    const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: 'manifest expired',
+      code: 'MANIFEST_EXPIRED',
+      verifyCode: 'expired',
+    });
+  });
+
+  it.each(['signature_invalid', 'pop_failed', 'malformed', 'not_a_real_sdk_code'])(
+    'leaves a non-expiry SDK code (%s) on MANIFEST_INVALID',
+    async (sdkCode) => {
+      // The negative half of the mapping above: exactly one SDK code is
+      // translated, and an unknown one is NOT — it still reaches the wire
+      // verbatim under MANIFEST_INVALID, because the SDK owns that vocabulary.
+      // Without this, widening the mapping to every SDK code would pass.
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('nope'), { code: sdkCode });
+      });
+      const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'nope',
+        code: 'MANIFEST_INVALID',
+        verifyCode: sdkCode,
+      });
+    },
+  );
 
   it('propagates an unclassifiable error instead of blaming the caller', async () => {
     // THE assertion that proves the misclassification is gone, and the one a
@@ -291,6 +361,24 @@ describe('POST /api/registry/enroll', () => {
       expect(warnMock).toHaveBeenCalledTimes(1);
       expect(warnMock).toHaveBeenCalledWith(
         { code: 'MANIFEST_INVALID', verifyCode: 'signature_invalid' },
+        'enrollment verification failed',
+      );
+    });
+
+    it('logs the RESOLVED code, not the raw SDK code, for an expiry', async () => {
+      // The log line and the metric must agree with the response body, or an
+      // operator charting MANIFEST_EXPIRED would not see the SDK half of the
+      // condition. The counter still gets the SDK code — that is its own
+      // vocabulary, and `expired` vs `none` is what distinguishes the two
+      // expiry paths on a dashboard.
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error('manifest expired'), { code: 'expired' });
+      });
+      await POST(badManifestReq());
+
+      expect(recordEnrollFailureMock).toHaveBeenCalledWith('expired');
+      expect(warnMock).toHaveBeenCalledWith(
+        { code: 'MANIFEST_EXPIRED', verifyCode: 'expired' },
         'enrollment verification failed',
       );
     });

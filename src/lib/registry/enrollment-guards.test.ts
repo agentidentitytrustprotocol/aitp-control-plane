@@ -3,9 +3,17 @@
 //   • `manifest.aid` missing, non-string, or not `aid:`-prefixed
 //   • `expires_at` inside the 5-minute registration guard
 //
-// Both must throw ManifestRejectedError with cpCode MANIFEST_INVALID and
-// their exact existing messages — the route turns cpCode straight into the
-// response `code`, so a typo here ships an undocumented code to clients.
+// Both must throw ManifestRejectedError with their exact existing messages and
+// their own cpCode — MANIFEST_INVALID for the aid guard, MANIFEST_EXPIRED for
+// the expiry guard (matching the sibling register route, which has always
+// returned MANIFEST_EXPIRED for that identical condition with that
+// byte-identical message). cpCode becomes the response `code`, but only after
+// the route checks it against its own allowlist — so a typo here does not ship
+// an undocumented code, it silently downgrades the rejection to
+// MANIFEST_INVALID. Silent is the reason these values are pinned here rather
+// than left to the allowlist. The two guards carrying DIFFERENT codes is also
+// what proves the narrowing moved one case and not both: swapping either value
+// fails here.
 //
 // WHY THIS FILE EXISTS SEPARATELY, AND WHY IT MOCKS THE SDK.
 // `verifyAndIssueToken` calls `verifyManifestJson` first, and the signature
@@ -111,19 +119,23 @@ describe('EnrollmentService guards (SDK verification stubbed to a no-op)', () =>
         ),
       );
       expect(err).toBeInstanceOf(ManifestRejectedError);
-      expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
+      expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_EXPIRED');
       expect((err as ManifestRejectedError).message).toBe(EXPIRY_MESSAGE);
       expect(sdkVerifyCode(err)).toBeUndefined();
     });
 
     it('rejects a manifest already past expires_at', () => {
+      // Reachable here only because verification is stubbed. Through the real
+      // SDK this input never gets this far: verifyManifestJson rejects an
+      // already-expired envelope itself, with `.code === 'expired'`, which the
+      // route maps to the same MANIFEST_EXPIRED. Both orderings, one code.
       const past = Math.floor(Date.now() / 1000) - 3600;
       const err = captureThrow(() =>
         service.verifyAndIssueToken(
           envelope({ aid: 'aid:pubkey:z:ok', expires_at: past }),
         ),
       );
-      expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
+      expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_EXPIRED');
     });
 
     it('rejects `expires_at: 0`, which is inside the window by any reading', () => {
@@ -137,6 +149,7 @@ describe('EnrollmentService guards (SDK verification stubbed to a no-op)', () =>
         ),
       );
       expect(err).toBeInstanceOf(ManifestRejectedError);
+      expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_EXPIRED');
     });
 
     it('accepts a manifest with no expires_at at all', () => {
@@ -156,10 +169,15 @@ describe('EnrollmentService guards (SDK verification stubbed to a no-op)', () =>
   });
 
   it('checks the aid before the expiry, so a doubly-bad manifest reports the aid', () => {
+    // Now also pins the CODE, because the two guards no longer share one: a
+    // manifest that fails both must report MANIFEST_INVALID, not
+    // MANIFEST_EXPIRED. Reordering the guards would change the published code
+    // and not just the prose, so precedence is worth pinning on both.
     const soon = Math.floor(Date.now() / 1000) + 60;
     const err = captureThrow(() =>
       service.verifyAndIssueToken(envelope({ aid: 'nope', expires_at: soon })),
     );
     expect((err as ManifestRejectedError).message).toBe(AID_MESSAGE);
+    expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
   });
 });
