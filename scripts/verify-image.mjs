@@ -787,9 +787,11 @@ function fail(msg) {
 /**
  * Sweep resources left by an EARLIER run.
  *
- * Only resources carrying this harness's label, and never this run's own — a
- * concurrent run must not have its containers pulled out from under it. Docker's
- * `--filter label=` has no negation, so the run id is excluded host-side.
+ * Only resources carrying this harness's label, and never THIS run's own —
+ * Docker's `--filter label=` has no negation, so the run id is excluded
+ * host-side. Note what that does NOT protect: every OTHER run's resources are
+ * removed, live or not. `--prune` is for orphans left by a crash; running it
+ * while another verify:image run is in flight will break that run.
  */
 async function prune() {
   let removed = 0;
@@ -954,6 +956,26 @@ async function main() {
             outside.map((l) => `  ${l.spec} -> ${l.realpath}`).join('\n'),
         );
       }
+      // ...and it must point at the RIGHT package. "Somewhere under
+      // /app/node_modules" is not enough: `aitp-<hash> -> node_modules/pg`
+      // satisfies every assertion above while handing the server the wrong
+      // module, and `aitp` is the one whose wrong answer ships a missing native
+      // binary.
+      const mispointed = sweep.leaves.filter(
+        (l) => l.realpath !== `${REAL_MODULES}/${stripHash(l.spec)}`,
+      );
+      if (mispointed.length) {
+        fail(
+          'traced specifiers whose symlink does not point at the package of the same ' +
+            'name:\n' +
+            mispointed
+              .map(
+                (l) =>
+                  `  ${l.spec} -> ${l.realpath} (expected ${REAL_MODULES}/${stripHash(l.spec)})`,
+              )
+              .join('\n'),
+        );
+      }
       return sweep.leaves.map((l) => `${l.spec} -> ${l.realpath}`).join('\n');
     },
   );
@@ -1064,6 +1086,26 @@ async function main() {
   await runCheck(6, 'the native-module inventory matches the committed baseline', async () => {
     requireProbe(native, 'native');
     if (native.error) fail(`inventorying ${APP_DIR} failed: ${native.error}`);
+    // Normalisation replaces the arch token, so two binaries for DIFFERENT arches
+    // collapse to one entry and the diff below would not notice. That is
+    // reachable: next.config.ts force-includes BOTH Linux globs, so an image that
+    // somehow shipped x64 *and* arm64 would look identical to a correct one.
+    // Catch the collapse itself rather than trusting it cannot happen.
+    const collapsed = new Map();
+    for (const raw of native.files ?? []) {
+      const key = normaliseNativePath(raw);
+      if (!collapsed.has(key)) collapsed.set(key, []);
+      collapsed.get(key).push(raw);
+    }
+    const multi = [...collapsed.entries()].filter(([, raws]) => raws.length > 1);
+    if (multi.length) {
+      fail(
+        'two or more distinct native binaries normalise to the same inventory entry, ' +
+          'so the baseline diff below cannot see the difference — most likely the image ' +
+          'ships more than one architecture:\n' +
+          multi.map(([k, raws]) => `  ${k}\n${raws.map((r) => `    <- ${r}`).join('\n')}`).join('\n'),
+      );
+    }
     const want = [...(baseline.nativeModules ?? [])].sort();
     const diffs = [];
     for (const p of new Set([...want, ...nativeModules])) {
