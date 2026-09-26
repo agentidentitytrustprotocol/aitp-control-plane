@@ -41,7 +41,14 @@ signing key, not a config toggle.
   `503 SERVER_MISCONFIGURED` (fail-safe). Empty in non-prod disables auth and
   logs a one-time warning.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
-  enrollment tokens. Required. Callers never see it.
+  enrollment tokens. Required, and **≥ 32 characters**. Callers never see it.
+  Unset or too short makes `POST /api/registry/enroll` return
+  `503 SERVER_MISCONFIGURED` for every request, **in every environment** — not
+  just production, and unlike `API_KEYS` this is not a fail-safe on gated routes
+  but the total unavailability of enrollment. It is not validated at startup
+  either (the service is constructed lazily on the first enrollment), and
+  `/api/readyz` does not check it, so a bad value deploys green and fails only
+  when an agent tries to enroll. Verify after any deploy that changes it.
 - **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
   to a single origin, e.g. `https://console.example.com`. Applied per-request at
   runtime by the proxy, so it can be changed via the deploy environment
@@ -237,15 +244,23 @@ is the only public, unauthenticated endpoint that runs cryptographic
 verification, and a spike is either a broken client fleet or someone probing.
 
 **Know what it does not count**, or you will read a flat line as "no problem":
-only failures that reached manifest verification are counted. A caller posting
-malformed JSON or a body with no `manifest` at all (`400 BODY_INVALID`,
-`400 MANIFEST_INVALID`) never reaches the SDK and is **not** counted, and neither
-is `503 SERVER_MISCONFIGURED` — a server with no usable `ENROLLMENT_SECRET`
-rejects every enrollment while this counter stays at zero. Both exclusions are
-deliberate (counting them would corrupt the code breakdown, which is the whole
-point of the metric), but they mean the two loudest fleet-wide breakages are
-invisible here. Watch `rate_limit_drops{bucket="enroll-ip"}` and the route's own
-log lines alongside it.
+only failures that reached manifest verification are counted. Three classes are
+excluded, all deliberately — counting them would corrupt the `code` breakdown,
+which is the whole point of the metric:
+
+- **Pre-validation** — malformed JSON, or a body with no `manifest` at all
+  (`400 BODY_INVALID`, `400 MANIFEST_INVALID`). Never reaches the SDK.
+- **`503 SERVER_MISCONFIGURED`** — a server with no usable `ENROLLMENT_SECRET`
+  rejects *every* enrollment while this counter stays flat at zero.
+- **The rethrow to `500`** — an unclassifiable internal fault.
+
+So the two loudest fleet-wide breakages are invisible in this metric, and — be
+blunt about it — **there is currently no other in-process signal for them
+either**: the route logs only classified verification failures, the proxy logs
+nothing, and `rate_limit_drops` moves only on a `429`. Until that is fixed
+(tracked as an open question on the #69 plan) the detection path for those cases
+is your ingress or load balancer: alert on the enroll route's `5xx` rate and on a
+sustained `400` rate, not on this counter.
 
 Its `code` label is a bounded set of **ten** values — the eight codes the `aitp`
 SDK documents for manifest verification, plus:

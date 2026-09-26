@@ -104,7 +104,7 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | ------------------ | ------------------- | ------------------------------------------------------------------ |
 | `DATABASE_URL`     | yes                 | Postgres connection string (from the Railway Postgres plugin).     |
 | `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. |
-| `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens.                     |
+| `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. Unset/short ⇒ `/api/registry/enroll` 503s on every request, in every environment. Not validated at boot and not covered by `/api/readyz`, so a bad value deploys green — smoke-test an enrollment. |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
 | `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
 | `CP_BASE_URL`      | recommended         | Public base URL; used in the manifest's handshake endpoint.        |

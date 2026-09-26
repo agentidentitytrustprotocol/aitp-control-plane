@@ -63,7 +63,7 @@ rate-limit, retention, and telemetry subsystems behave.
 | `DATABASE_URL` | yes | `postgres://postgres:postgres@localhost:5432/aitp_control_plane` | Postgres connection string |
 | `DB_POOL_MAX` | no | `20` | Connection pool size |
 | `API_KEYS` | **prod** | empty | Comma-separated allowlist. Empty in prod returns 503 on gated routes (fail-safe). Empty in dev disables auth. |
-| `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret for minting/verifying one-time enrollment tokens (callers never present it) |
+| `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret (**≥ 32 chars**) for minting/verifying one-time enrollment tokens (callers never present it). Unset or too short ⇒ `POST /api/registry/enroll` returns 503 for every request, in **every** environment; not checked at startup or by `/api/readyz`. |
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Defaults to `http://localhost:3000` if unset (including in prod) — set it to the UI plane origin. |
 | `REVOCATION_LIST_TTL_SECS` | no | `3600` | TTL on the signed revocation snapshot |
 | `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |

@@ -24,11 +24,12 @@ spec rather than restate it.
   `code` is the stable signal; `error` is human-facing prose and may be reworded
   at any time. A few endpoints add one **machine-readable detail field**
   alongside these two rather than nesting: `bucket` on a `429` (which limiter
-  tripped) and `verifyCode` on `POST /api/registry/enroll` (which manifest check
-  failed). Such a field is always optional and additive — absent means "not
+  tripped), `verifyCode` on `POST /api/registry/enroll` (which manifest check
+  failed), and `eventType` on `POST /api/events`' `413` (which event was too
+  big). Such a field is always optional and additive — absent means "not
   applicable here", never "unknown".
 
-  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `409` (conflict), `413` (payload too large), `429` (rate limited), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
+  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`. A `500` is the one status that does **not** carry the error shape above — its body is whatever the framework renders.
 
 ## Authentication
 

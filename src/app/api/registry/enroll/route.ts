@@ -62,9 +62,10 @@ const SDK_EXPIRED_CODE = 'expired';
  * line, by code.
  *
  * Deliberately logs NOTHING about the manifest — not the body, not the AID.
- * The body is unauthenticated attacker-controlled input up to the size limit,
- * and logging it at warn level on a public endpoint is a log-volume
- * amplification vector. The code plus the request id is enough to chart and
+ * The body is unauthenticated attacker-controlled input and this route applies
+ * NO size limit to it (`req.text()` below is unbounded; `readBodyTextWithLimit`
+ * is used only by events/route.ts), so logging it at warn level on a public
+ * endpoint is an unbounded log-volume amplification vector. The code plus the request id is enough to chart and
  * alert on, and the request id is bound explicitly here: nothing else in this
  * service puts one on a log line, so without this the line could not be
  * correlated to a request at all.
@@ -157,11 +158,20 @@ export async function POST(req: NextRequest) {
     const result = service.verifyAndIssueToken(body);
     return Response.json(result, { status: 200 });
   } catch (err) {
-    // The repo's established idiom, which this route was the only one to omit:
-    // discriminate the known error types, map each, and RETHROW the rest.
-    // Without the rethrow every internal failure is laundered into a 400 that
-    // blames the caller. See events/route.ts, webhooks/route.ts and
-    // events/history/route.ts, which all do this.
+    // The repo's established idiom for a LIB-THROWN, route-mapped error, which
+    // this route was the only one of that set to omit: discriminate the known
+    // error types, map each, and RETHROW the rest. Without the rethrow every
+    // internal failure is laundered into a 400 that blames the caller. See
+    // events/route.ts (BodyTooLargeError), webhooks/route.ts
+    // (UnsafeWebhookUrlError) and events/history/route.ts (InvalidFilterError),
+    // which all do this.
+    //
+    // "Of that set" is the scoping that matters: other routes in this service
+    // still have undiscriminated catch-alls — agents/route.ts maps any throw to
+    // 401 TOKEN_INVALID with err.message in the body, and
+    // revocation/entries/route.ts maps any throw to 500 INSERT_FAILED with the
+    // raw database message. Both are known and tracked separately; neither is a
+    // precedent this block follows.
     if (err instanceof ManifestRejectedError) {
       // We rejected it, deliberately, and it is the caller's fault. No
       // verifyCode: the SDK is not what rejected this. The cpCode is
