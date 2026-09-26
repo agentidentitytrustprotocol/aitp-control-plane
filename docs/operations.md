@@ -94,6 +94,91 @@ node scripts/verify-request-gate.mjs --build --update-baseline
 
 CI runs this on every push; a non-zero exit fails the build.
 
+### Verifying the shipped image
+
+`verify:gate` above boots the server with `next start`. The Docker image does
+not: it ships Next's **standalone** output (`NEXT_OUTPUT=standalone` in the
+`Dockerfile`, then `node server.js`), and `next start` is incompatible with that
+output — the reason the standalone opt-in is env-gated at all, recorded in
+`next.config.ts`. So gate attachment was proven in a configuration the image
+never runs, and in the artifact that actually deploys nothing tested it.
+
+This section covers the **static** half: assertions against the built artifact
+that need no server and no database. Booting the image and asserting gate
+attachment, the signing path and the CORS build-freeze over HTTP is the other
+half of the same effort and is documented here as it lands.
+
+```sh
+npm run verify:image                        # host platform
+npm run verify:image -- --platform linux/amd64
+```
+
+It builds the image for one platform, then asserts against the built artifact:
+
+- **The NAPI binary loads** — `typeof require('aitp').AitpAgent === 'function'`
+  inside the image, i.e. under the image's arch and libc, not the build host's.
+- **The OpenTelemetry SDK was traced in** — `@opentelemetry/sdk-node` resolves.
+- **Every traced external resolves.** `.next/node_modules` holds one hashed
+  entry per traced external (`aitp-<16 hex>`, and the compiled server chunks ask
+  for exactly that hashed specifier). Each must be a **symlink** whose realpath
+  is under `/app/node_modules` and which resolves from the server chunks. A
+  hashed *copy* instead of a symlink would lose the sibling native binary
+  (vercel/next.js#88844); a dangling link or a missing external fails loudly.
+  Names are compared with the hash stripped, so a Next upgrade that changes the
+  hash scheme does not produce a false red.
+- **The native-module inventory** — every `.node` under `/app`, diffed against
+  `scripts/image-artifact-baseline.json`, plus the assertion that the `aitp`
+  binary carries the `linux-<arch>-gnu` token the requested platform asked for.
+  That last one catches an amd64 image shipping an arm64 binary, or none.
+
+Two properties make it worth more than a smoke test:
+
+- **The expectation is a committed baseline**
+  (`scripts/image-artifact-baseline.json`), not a value re-derived from
+  `next.config.ts`. Without it these probes catch only a *crash*; with it they
+  also catch **drift** — a new traced external appearing, `sharp`'s binary
+  vanishing, or a package quietly dropping out of the traced set. Drift is the
+  failure mode that ships quietly.
+- **The baseline is normalised, so one file serves both arches**: the arch token
+  becomes `<ARCH>` and a trailing `-<semver>` before `.node` is dropped (which
+  absorbs a `sharp` bump). A genuinely new or missing binary still fails, and
+  should — that is a review point, not noise.
+
+Note what the baseline is **not**: it tracks the set Next actually **traces**,
+which is not `serverExternalPackages`. `pg` and `pino` are traced without being
+listed there, and `@grpc/grpc-js` is listed without ever being traced — so
+removing `@grpc/grpc-js` from that list would not move this baseline at all.
+
+After reviewing a legitimate change, regenerate:
+
+```sh
+node scripts/verify-image.mjs --update-baseline
+```
+
+Other flags: `--no-build` reuses an existing local tag (and fails fast if its
+architecture does not match `--platform`), `--tag` names the image, `--keep`
+skips teardown and prints the cleanup commands, and `--prune` sweeps resources
+left behind by an earlier crashed run. `--platform` takes **one** platform per
+invocation — `docker buildx build --load` cannot load a multi-platform manifest.
+
+Two things to know about what it leaves behind:
+
+- **Containers and networks are always torn down** — on success, on failure, and
+  on Ctrl-C (`SIGINT`/`SIGTERM` are handled explicitly, unlike in the sibling
+  harness). The **image** is deliberately kept, under a deterministic tag, so a
+  failure can be re-probed with `--no-build`; remove it with `docker image rm`.
+  `--prune` does not touch images.
+- **`--prune` removes resources from every other run of this harness**, not just
+  dead ones — it is for orphans left by a crash, so do not run it while another
+  `verify:image` run is in flight. And because the default tag is not
+  run-unique, pass `--tag` if you run two platforms concurrently.
+
+The two harnesses are deliberately **not** merged: `verify:gate` owns the
+`next start` path, a real developer workflow, and owns its own build;
+`verify:image` owns the standalone artifact and does *not* own the build
+environment — the `Dockerfile` does. Two harnesses, two configurations, one
+shared discipline. Duplicated assertions rot at different rates.
+
 ## Rate limiting
 
 In-memory, per-process token buckets on every `/api/*` route except the probes

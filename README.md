@@ -177,7 +177,9 @@ npm run test:conformance  # protocol-conformance subset of the integration suite
 Unit tests (`*.test.ts`) are colocated with the code and mock the database;
 integration tests (`*.integration.test.ts`) run against a real Postgres and
 exercise routes/services end-to-end. CI runs both plus a production
-`next build`, a dependency audit, and a Docker image build check on PRs.
+`next build`, a dependency audit, a Docker image build check on PRs, and
+`npm run verify:image` — which builds the standalone image and asserts the
+native NAPI and traced-external paths really resolve inside it.
 
 Bring up the test database:
 

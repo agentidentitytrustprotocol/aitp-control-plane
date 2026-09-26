@@ -1,0 +1,18 @@
+{
+  "_comment": "Normalised inventory of the shipped standalone image, derived from a BUILT IMAGE (never from next.config.ts). `tracedExternals` is the set of .next/node_modules leaves with the 16-hex Turbopack suffix stripped — it is NOT serverExternalPackages: pg and pino are traced without being listed, and @grpc/grpc-js is listed without ever being traced. `nativeModules` is every .node under /app with the arch token replaced by <ARCH> and a trailing -<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. Review every line by hand: a new entry means a new external or a new native binary shipped, and a missing entry means one stopped shipping.",
+  "_regenerate": "node scripts/verify-image.mjs --update-baseline",
+  "tracedExternals": [
+    "@opentelemetry/auto-instrumentations-node",
+    "@opentelemetry/exporter-trace-otlp-http",
+    "@opentelemetry/resources",
+    "@opentelemetry/sdk-node",
+    "@opentelemetry/semantic-conventions",
+    "aitp",
+    "pg",
+    "pino"
+  ],
+  "nativeModules": [
+    "node_modules/@agentidentitytrustprotocol/aitp-linux-<ARCH>-gnu/aitp.linux-<ARCH>-gnu.node",
+    "node_modules/@img/sharp-linux-<ARCH>/lib/sharp-linux-<ARCH>.node"
+  ]
+}
