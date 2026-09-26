@@ -155,6 +155,18 @@ After reviewing a legitimate change, regenerate:
 node scripts/verify-image.mjs --update-baseline
 ```
 
+Regeneration is deliberately hard to do by accident, because a baseline written
+from a broken image is worse than no baseline — every later run would compare
+the defect against itself and report green. Two guards:
+
+- It **refuses outright** if any structural check (1–4) failed, so a dangling
+  symlink or a wrong-architecture binary can never be recorded as normal.
+- It prints the **diff against the existing baseline** and refuses if any entry
+  would *disappear*. Additions are the benign direction and are written; a
+  removal means something that used to ship no longer does, which is the exact
+  regression the baseline exists to catch. If the removal really is intended,
+  re-run with `--allow-removals`.
+
 Other flags: `--no-build` reuses an existing local tag (and fails fast if its
 architecture does not match `--platform`), `--tag` names the image, `--keep`
 skips teardown and prints the cleanup commands, and `--prune` sweeps resources

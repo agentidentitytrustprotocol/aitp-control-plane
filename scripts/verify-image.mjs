@@ -170,6 +170,7 @@ function parseArgs(argv) {
     keep: false,
     prune: false,
     updateBaseline: false,
+    allowRemovals: false,
     help: false,
   };
   /** A value-taking flag must actually be followed by a value, not by nothing
@@ -204,6 +205,9 @@ function parseArgs(argv) {
       case '--update-baseline':
         opts.updateBaseline = true;
         break;
+      case '--allow-removals':
+        opts.allowRemovals = true;
+        break;
       case '--help':
       case '-h':
         opts.help = true;
@@ -211,6 +215,11 @@ function parseArgs(argv) {
       default:
         throw new Error(`unknown argument: ${a} (try --help)`);
     }
+  }
+  // Reject rather than ignore: a typo'd `--allow-removals` on a verification run
+  // would otherwise look like it had done something.
+  if (opts.allowRemovals && !opts.updateBaseline) {
+    throw new Error('--allow-removals only means anything together with --update-baseline');
   }
   return opts;
 }
@@ -238,7 +247,12 @@ shipped standalone Docker image.
   --no-build             reuse an existing local tag instead of building
   --keep                 skip teardown and print the cleanup commands
   --prune                remove resources left by an earlier crashed run, then exit
-  --update-baseline      rewrite scripts/image-artifact-baseline.json from the image
+  --update-baseline      rewrite scripts/image-artifact-baseline.json from the image.
+                         Prints the diff against the existing baseline first, and
+                         refuses if any entry would DISAPPEAR (see --allow-removals).
+  --allow-removals       with --update-baseline: consent to recording a baseline
+                         from which entries have vanished. Needed only for an
+                         intentional removal — otherwise it blesses a regression.
   --help                 this text
 `;
 
@@ -306,7 +320,11 @@ function docker(args, { timeoutMs = DEFAULT_DOCKER_MS, allowFail = false, input 
       child.stdout?.destroy();
       child.stderr?.destroy();
       if (timedOut) {
-        reject(new Error(`\`docker ${args.join(' ')}\` timed out after ${timeoutMs}ms`));
+        // summariseArgs, not args.join: a probe timeout would otherwise echo the
+        // whole embedded probe script into the failure text — the same unreadable
+        // output the non-zero-exit path below was already fixed to avoid. Probe
+        // timeouts are realistic under QEMU emulation in CI, so this path is hot.
+        reject(new Error(`\`docker ${summariseArgs(args)}\` timed out after ${timeoutMs}ms`));
         return;
       }
       if (code !== 0 && !allowFail) {
@@ -516,7 +534,7 @@ function armWatchdog(ms) {
   watchdog = setTimeout(() => {
     const human = ms < 60_000 ? `${ms}ms` : `${(ms / 60_000).toFixed(1)} minutes`;
     console.error(
-      `\nharness watchdog: exceeded ${human} after the build. Failing rather than ` +
+      `\nharness watchdog: exceeded ${human} of post-build work. Failing rather than ` +
         'hanging the job.',
     );
     cleanupSync();
@@ -615,8 +633,44 @@ const m = require('aitp');
 process.stdout.write(JSON.stringify({ aitpAgent: typeof m.AitpAgent }));
 `;
 
+/**
+ * Prove the OpenTelemetry tree was TRACED, not merely installed.
+ *
+ * A bare `require.resolve('@opentelemetry/sdk-node')` — which is what this probe
+ * used to be — runs from the image's WORKDIR `/app` and therefore resolves
+ * through `/app/node_modules`. That answers "is the package installed and
+ * loadable", which is a different and much weaker question: an image with
+ * `.next/node_modules/@opentelemetry` deleted outright still passed. Verified,
+ * not theorised — five of the eight traced externals can vanish while the check
+ * that names them stays green.
+ *
+ * So look where tracing actually puts things: the `@opentelemetry` scope
+ * directory under `.next/node_modules`, and `sdk-node` resolved THROUGH that
+ * traced path rather than through the flat install.
+ */
 const PROBE_OTEL = `
-process.stdout.write(JSON.stringify({ resolved: require.resolve('@opentelemetry/sdk-node') }));
+const fs = require('fs');
+const SCOPE = ${JSON.stringify(`${TRACED_DIR}/@opentelemetry`)};
+// The entries INSIDE the scope directory carry the 16-hex Turbopack suffix too
+// (e.g. sdk-node-2cf9b989c3033bc0), so look the package up by its stripped name.
+// Hardcoding a hash here would break on the next dependency bump.
+function strip(n) { return n.replace(/-[0-9a-f]{16}$/, ''); }
+let scopeEntries = null, scopeError = null;
+try { scopeEntries = fs.readdirSync(SCOPE).sort(); }
+catch (e) { scopeError = e.message; }
+const entry = (scopeEntries || []).filter(function (n) { return strip(n) === 'sdk-node'; })[0] || null;
+let tracedRealpath = null, tracedResolved = null, tracedError = null;
+if (entry) {
+  try { tracedRealpath = fs.realpathSync(SCOPE + '/' + entry); }
+  catch (e) { tracedError = 'realpath: ' + e.message; }
+  try { tracedResolved = require.resolve(SCOPE + '/' + entry); }
+  catch (e) { tracedError = (tracedError ? tracedError + '; ' : '') + 'require.resolve: ' + e.message; }
+}
+process.stdout.write(JSON.stringify({
+  scopeEntries: scopeEntries, scopeError: scopeError, entry: entry,
+  stripped: (scopeEntries || []).map(strip).sort(),
+  tracedRealpath: tracedRealpath, tracedResolved: tracedResolved, tracedError: tracedError,
+}));
 `;
 
 /**
@@ -700,8 +754,36 @@ async function probe(tag, platform, label, script) {
     // own stderr, not abort the run with an unattributable `docker run ... exited 1`.
     // Aborting also skipped the structural-check gate that makes `--update-baseline`
     // refuse a broken image, so the refusal was never reached.
-    return { __error: err.message };
+    // Wrapped in a Proxy so that FORGETTING `requireProbe` is loud rather than
+    // silent. Without it, a new check reading `napi.aitpAgent` off a failed probe
+    // gets `undefined` and reports a confident, wrong diagnosis ("expected
+    // function, got undefined") instead of the container's real error. Every
+    // property but `__error` throws.
+    return failedProbe(label, err.message);
   }
+}
+
+/**
+ * A failed probe's result: carries `__error`, throws on everything else.
+ *
+ * `then` must stay readable and undefined — `await`ing this object would
+ * otherwise throw inside the microtask queue rather than at the access site.
+ */
+function failedProbe(label, message) {
+  return new Proxy(
+    { __error: message },
+    {
+      get(target, prop) {
+        if (prop === '__error' || prop === 'then' || typeof prop === 'symbol') {
+          return target[prop];
+        }
+        throw new Error(
+          `probe \`${label}\` failed and its result was read (.${String(prop)}) without ` +
+            `going through requireProbe(). The underlying failure was:\n${message}`,
+        );
+      },
+    },
+  );
 }
 
 /** Fail the current check with the probe's recorded error, if it had one. */
@@ -890,8 +972,18 @@ async function main() {
   const sweep = await probe(opts.tag, platform, 'sweep', PROBE_SWEEP);
   const native = await probe(opts.tag, platform, 'native', PROBE_NATIVE);
 
-  const tracedExternals = [...new Set((sweep.leaves ?? []).map((l) => stripHash(l.spec)))].sort();
-  const nativeModules = [...new Set((native.files ?? []).map(normaliseNativePath))].sort();
+  // These two run BEFORE any check, so they must tolerate a failed probe without
+  // throwing — the whole point of the named-check machinery is that a probe
+  // failure becomes checks 3/5/6 reporting it, not an abort that also skips the
+  // --update-baseline gate. A failed probe is a Proxy that throws on any access
+  // but `__error`, so ask that first rather than relying on `?? []`.
+  const probeList = (result, prop) => (result?.__error ? [] : (result[prop] ?? []));
+  const tracedExternals = [
+    ...new Set(probeList(sweep, 'leaves').map((l) => stripHash(l.spec))),
+  ].sort();
+  const nativeModules = [
+    ...new Set(probeList(native, 'files').map(normaliseNativePath)),
+  ].sort();
 
   // ── structural checks ────────────────────────────────────────────────────
   //
@@ -914,13 +1006,42 @@ async function main() {
 
   await runCheck(2, 'the OpenTelemetry SDK was traced into the image', async () => {
     requireProbe(otel, 'otel');
-    if (!otel.resolved) fail('require.resolve("@opentelemetry/sdk-node") did not resolve');
-    return `@opentelemetry/sdk-node -> ${otel.resolved}`;
+    if (otel.scopeError) {
+      fail(
+        `${TRACED_DIR}/@opentelemetry is not readable: ${otel.scopeError}\n` +
+          'The OpenTelemetry tree was not traced into the standalone output. Note that ' +
+          '`require("@opentelemetry/sdk-node")` may still succeed from /app/node_modules ' +
+          '— being INSTALLED is not being TRACED, and only the traced copy is what the ' +
+          'server chunks load.',
+      );
+    }
+    if (!otel.entry) {
+      fail(
+        `${TRACED_DIR}/@opentelemetry exists but holds no sdk-node entry. Present ` +
+          `(hashes stripped): ${JSON.stringify(otel.stripped)}`,
+      );
+    }
+    if (otel.tracedError) {
+      fail(
+        `${TRACED_DIR}/@opentelemetry/${otel.entry} does not resolve: ${otel.tracedError}\n` +
+          'The traced entry is present but broken — a dangling symlink, or a hashed COPY ' +
+          'that lost its dependencies.',
+      );
+    }
+    return (
+      `${otel.stripped.length} traced @opentelemetry entries ` +
+      `(${otel.stripped.join(', ')}); ${otel.entry} -> ${otel.tracedRealpath}`
+    );
   });
 
   await runCheck(
     3,
-    'every traced external is a symlink into /app/node_modules and resolves',
+    // "present": this check ranges over the leaves that ARE there and says
+    // nothing about ones that should be — an image missing an entire traced
+    // scope satisfies it vacuously. Completeness is check 5's job, against the
+    // baseline. The title says so rather than implying a guarantee it does not
+    // give.
+    'every traced external present is a symlink into /app/node_modules and resolves',
     async () => {
       requireProbe(sweep, 'sweep');
       if (!sweep.exists) fail(`${TRACED_DIR} does not exist in the image`);
@@ -1022,6 +1143,66 @@ async function main() {
           'baseline taken FROM a broken image and report green. Fix the image first.',
       );
     }
+    // The structural gate above is necessary but NOT sufficient, and the hole is
+    // demonstrable: an image with the whole `.next/node_modules/@opentelemetry`
+    // scope deleted passes checks 1-4 (check 2 used to be vacuous; check 3 only
+    // ranges over leaves that are present), so `--update-baseline` would quietly
+    // record a SHRUNKEN traced set and bless the regression. Checks 5-6 cannot be
+    // part of the gate — a legitimate set change is exactly when you regenerate,
+    // and gating on them would make the flag unusable for its actual purpose.
+    //
+    // So the gate on REMOVALS is explicit consent instead. Additions are printed
+    // and allowed: a new external appearing is the benign direction. Entries
+    // DISAPPEARING is the direction that turns a regression into a new normal.
+    const prev = existsSync(BASELINE_PATH)
+      ? (() => {
+          try {
+            return JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+
+    if (prev) {
+      const diff = (before, after) => ({
+        added: after.filter((x) => !before.includes(x)),
+        removed: before.filter((x) => !after.includes(x)),
+      });
+      const t = diff(prev.tracedExternals ?? [], tracedExternals);
+      const n = diff(prev.nativeModules ?? [], nativeModules);
+      const show = (title, d) => {
+        if (!d.added.length && !d.removed.length) {
+          console.log(`  ${title}: unchanged`);
+          return;
+        }
+        console.log(`  ${title}:`);
+        for (const s of d.removed) console.log(`    - ${s}`);
+        for (const s of d.added) console.log(`    + ${s}`);
+      };
+      console.log('\nbaseline diff (existing -> this image):');
+      show('tracedExternals', t);
+      show('nativeModules', n);
+
+      const removed = [
+        ...t.removed.map((s) => `tracedExternals: ${s}`),
+        ...n.removed.map((s) => `nativeModules: ${s}`),
+      ];
+      if (removed.length && !opts.allowRemovals) {
+        fail(
+          `refusing to write a baseline: ${removed.length} entr${removed.length === 1 ? 'y' : 'ies'} ` +
+            'would be REMOVED:\n' +
+            removed.map((s) => `  - ${s}`).join('\n') +
+            '\n\nSomething that used to ship no longer does. That is the shape of the ' +
+            'regression this baseline exists to catch, and recording it would make the ' +
+            'regression the new normal — silently, because every later run would then ' +
+            'agree with the shrunken set. The structural checks above cannot see this: ' +
+            'an image missing an entire traced scope still passes them.\n' +
+            'If the removal is intended, re-run with --allow-removals.',
+        );
+      }
+    }
+
     const baseline = {
       _comment:
         'Normalised inventory of the shipped standalone image, derived from a BUILT ' +
