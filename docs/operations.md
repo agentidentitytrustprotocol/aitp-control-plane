@@ -141,6 +141,29 @@ or are trivially bypassed. Match them to your actual edge.
 If you front the CP with a fan-out proxy that opens its own upstream pool, raise
 `MAX_SSE_CONNECTIONS` accordingly.
 
+### Is the stream healthy? (three metrics, no log access needed)
+
+`/api/metrics` is public and rate-limit exempt, so these answer the question
+from anywhere — which is the point: they exist because a dead stream endpoint
+was once undiagnosable from outside the process for days.
+
+| Series (`aitp_control_plane_`…) | Read it as |
+|---|---|
+| `sse_streams_open` | Streams alive on this replica right now. Flat at `0` while the console claims to be connected means the handler is not being reached — look at the gate, the proxy, or the URL, not at the route. |
+| `sse_streams_opened_total` | Connect *rate*, by differencing. Climbing fast with `sse_streams_open` flat is a reconnect loop: streams are being accepted and dying immediately. Suspect an idle timeout or a function duration cap at the edge rather than the route. |
+| `sse_streams_rejected_total` | Connections refused by the cap. Any movement means `MAX_SSE_CONNECTIONS` is too low for the current client population, or streams are leaking rather than closing. |
+
+Both counters are cumulative and per-process, so they reset on restart and on a
+redeploy — normal for a Prometheus counter, and a reset is itself the signal that
+the replica restarted.
+
+For per-stream detail, the route logs exactly two lines per connection —
+`sse stream opened` (with the active filters and the resulting open count) and
+`sse stream closed` (with `durationMs` and a `reason` of `cancel`, `abort` or
+`enqueue-failed`) — plus one `sse stream rejected` warning per capacity refusal.
+Nothing is logged per heartbeat, so the volume is bounded by connect rate, which
+the rate limiter already caps.
+
 ## Webhook delivery
 
 Each delivery retries up to `WEBHOOK_RETRY_ATTEMPTS` (default 3) with
@@ -200,14 +223,18 @@ in this table, and conflating them will give you wrong numbers:
 
 - **Process-local** — `rate_limit_drops`, `admin_audit_insert_failures`,
   `event_backlog_dropped`, `enroll_verification_failures`,
+  `sse_streams_open`, `sse_streams_opened_total`, `sse_streams_rejected_total`,
   `webhook_circuit_breaker_open`. Held in memory and **per replica**, so
   aggregating across instances is the scraper's job, and all of them **reset on
-  restart**. For the four counters that is harmless (a Prometheus counter reset is
-  something the scraper handles). For `webhook_circuit_breaker_open` — a gauge
-  over an in-memory `Map` — it is a trap: after a rolling restart every breaker
-  reads `closed`, which looks identical to "the fleet recovered" and is not.
-  Confirm a breaker recovery against delivery success, not against this gauge
-  going quiet.
+  restart**. For the counters in that list that is harmless (a Prometheus counter
+  reset is something the scraper handles). For the two **gauges** —
+  `webhook_circuit_breaker_open` over an in-memory `Map`, and `sse_streams_open`
+  over a per-process count — it is a trap, because a restart makes both read like
+  good news: every breaker reads `closed`, which is indistinguishable from "the
+  fleet recovered", and every stream count reads `0`, which is
+  indistinguishable from "no clients are connected". Confirm a breaker recovery
+  against delivery success, and read `sse_streams_open` next to
+  `sse_streams_opened_total` rather than alone.
 - **Database-derived** — `agents_active`, `agents_expired`, `sessions_total`,
   `webhook_deliveries`, `audit_events`. These are `COUNT(*)`/`GROUP BY` queries
   against shared state, so they are *already* cluster-wide and survive restarts.
@@ -232,6 +259,9 @@ in this table, and conflating them will give you wrong numbers:
 | `admin_audit_insert_failures` | counter | — | Admin-audit writes that failed (silent-degradation surface) |
 | `event_backlog_dropped` | counter | — | Audit events evicted from the in-memory SSE backlog |
 | `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
+| `sse_streams_open` | gauge | — | `/api/events/stream` connections open right now on this replica |
+| `sse_streams_opened_total` | counter | — | Stream connections accepted since process start |
+| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` |
 
 The DB-derived series (`agents_*`, `sessions_total`, `webhook_deliveries`,
 `audit_events`) are **absent** from a scrape taken while the database is

@@ -11,6 +11,7 @@ import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
 import { getEnrollFailureTotals } from '@/lib/registry/enroll-metrics';
 import { eventBus } from '@/lib/audit/stream';
+import { getSseMetrics } from '@/lib/audit/sse-metrics';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -146,6 +147,37 @@ export async function GET() {
   lines.push('# TYPE aitp_control_plane_event_backlog_dropped counter');
   lines.push(
     `aitp_control_plane_event_backlog_dropped ${eventBus.getDroppedCount()}`,
+  );
+
+  // SSE stream lifecycle. These exist because issue #89 — the stream endpoint
+  // never flushing its response headers — was undiagnosable from outside the
+  // process: nothing published whether the handler was even being reached.
+  // This endpoint is public and rate-limit exempt, so these three answer that
+  // from anywhere. Note they are emitted OUTSIDE the DB try/catch above, which
+  // is load-bearing: the stream route has no database coupling at all, and an
+  // SSE incident can easily coincide with (or be misread as) a DB outage that
+  // already has /api/health returning 503.
+  const sse = getSseMetrics();
+  lines.push(
+    '# HELP aitp_control_plane_sse_streams_open /api/events/stream connections open right now on this replica',
+  );
+  lines.push('# TYPE aitp_control_plane_sse_streams_open gauge');
+  lines.push(`aitp_control_plane_sse_streams_open ${sse.open}`);
+
+  lines.push(
+    '# HELP aitp_control_plane_sse_streams_opened_total /api/events/stream connections accepted since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_sse_streams_opened_total counter');
+  lines.push(
+    `aitp_control_plane_sse_streams_opened_total ${sse.openedTotal}`,
+  );
+
+  lines.push(
+    '# HELP aitp_control_plane_sse_streams_rejected_total /api/events/stream connections refused by MAX_SSE_CONNECTIONS since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_sse_streams_rejected_total counter');
+  lines.push(
+    `aitp_control_plane_sse_streams_rejected_total ${sse.rejectedTotal}`,
   );
 
   return new Response(lines.join('\n') + '\n', {

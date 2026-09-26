@@ -64,6 +64,29 @@ jest.mock('@/lib/audit/stream', () => ({
 const configMock = { maxSseConnections: 500 };
 jest.mock('@/lib/config', () => ({ config: configMock }));
 
+// The logger is a real pino instance that is silent under NODE_ENV=test, so a
+// spy is the only way to count lifecycle lines. childLogger() is what the route
+// calls, so binding the fake there covers the requestId child too.
+const logInfo = jest.fn();
+const logWarn = jest.fn();
+// When true, EVERY logging call throws — exercises the route's safely() guard.
+let logShouldThrow = false;
+jest.mock('@/lib/logger', () => ({
+  childLogger: (bindings: Record<string, unknown>) => {
+    childBindings.push(bindings);
+    if (logShouldThrow) throw new Error('pino transport exploded');
+    return { info: logInfo, warn: logWarn };
+  },
+}));
+let childBindings: Array<Record<string, unknown>> = [];
+
+// sse-metrics is NOT mocked: it is pure in-memory arithmetic over globalThis
+// slots, and the point of these tests is that the route drives it correctly.
+import {
+  getSseMetrics,
+  resetSseMetrics,
+} from '@/lib/audit/sse-metrics';
+
 import { GET } from './route';
 import { NextRequest } from 'next/server';
 
@@ -128,7 +151,11 @@ beforeEach(() => {
   subscribeMock.mockClear();
   getBacklogMock.mockClear();
   configMock.maxSseConnections = 500;
-  globalThis.__sseOpenCount = 0;
+  resetSseMetrics();
+  logInfo.mockClear();
+  logWarn.mockClear();
+  logShouldThrow = false;
+  childBindings = [];
 });
 
 describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
@@ -377,6 +404,271 @@ describe('GET /api/events/stream — live delivery after replay', () => {
     const frames = await readFrames(res, 2);
     expect(frames[0]).toBe(PRELUDE);
     expect(frames[1]).toContain('"id":"live-1"');
+  });
+});
+
+describe('GET /api/events/stream — metrics and lifecycle logging', () => {
+  it('increments opened_total on accept and leaves rejected_total alone', async () => {
+    const res = GET(makeReq());
+    expect(getSseMetrics()).toEqual({
+      open: 1,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+    await res.body!.cancel();
+    // open falls back to 0; opened_total is cumulative and must NOT.
+    expect(getSseMetrics()).toEqual({
+      open: 0,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+  });
+
+  it('increments rejected_total on the capacity 503 and does not count it as an open', () => {
+    configMock.maxSseConnections = 1;
+    globalThis.__sseOpenCount = 1;
+    const res = GET(makeReq());
+    expect(res.status).toBe(503);
+    expect(getSseMetrics()).toEqual({
+      open: 1,
+      openedTotal: 0,
+      rejectedTotal: 1,
+    });
+  });
+
+  it('logs exactly two lines for one open/close, the close one carrying a duration and a reason', async () => {
+    const res = GET(makeReq('?type=x&run_id=r1'));
+    expect(logInfo).toHaveBeenCalledTimes(1);
+    expect(logInfo.mock.calls[0][1]).toBe('sse stream opened');
+    expect(logInfo.mock.calls[0][0]).toMatchObject({
+      open: 1,
+      cap: 500,
+      filters: { type: 'x', runId: 'r1' },
+    });
+
+    await res.body!.cancel();
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    expect(logInfo.mock.calls[1][1]).toBe('sse stream closed');
+    const closeFields = logInfo.mock.calls[1][0] as Record<string, unknown>;
+    expect(closeFields.reason).toBe('cancel');
+    expect(typeof closeFields.durationMs).toBe('number');
+    expect(closeFields.durationMs as number).toBeGreaterThanOrEqual(0);
+    expect(closeFields.open).toBe(0);
+
+    // No third line: heartbeats must never log, or 500 streams flood the log.
+    expect(logWarn).not.toHaveBeenCalled();
+  });
+
+  it('logs the capacity rejection once, as a warning, with reason=capacity', () => {
+    configMock.maxSseConnections = 1;
+    globalThis.__sseOpenCount = 1;
+    GET(makeReq());
+    expect(logWarn).toHaveBeenCalledTimes(1);
+    expect(logWarn.mock.calls[0][1]).toBe('sse stream rejected');
+    expect(logWarn.mock.calls[0][0]).toMatchObject({
+      reason: 'capacity',
+      open: 1,
+      cap: 1,
+    });
+    // A refused connection is not an opened stream.
+    expect(logInfo).not.toHaveBeenCalled();
+  });
+
+  it('binds a truncated x-request-id onto the log child, and omits it when absent', () => {
+    const long = 'r'.repeat(500);
+    const req = new NextRequest(
+      new Request('http://localhost:4000/api/events/stream', {
+        headers: { 'x-request-id': long },
+      }),
+    );
+    GET(req);
+    // 200 chars, not 500: x-request-id is caller-settable on a route the
+    // console hits on every reconnect, so an unbounded value is a log-volume
+    // amplification vector.
+    expect(childBindings[0]).toEqual({ requestId: 'r'.repeat(200) });
+
+    childBindings = [];
+    GET(makeReq());
+    expect(childBindings[0]).toEqual({});
+  });
+
+  it('reports the reason as abort when the request is aborted, not cancel', async () => {
+    const controller = new AbortController();
+    GET(makeReq('', controller.signal));
+    controller.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    expect(logInfo.mock.calls[1][0]).toMatchObject({ reason: 'abort' });
+  });
+
+  it('emits exactly one close line however many termination signals arrive, and never double-decrements', async () => {
+    // abort AND cancel both reach cleanup(); the `closed` guard must collapse
+    // them, or the gauge drifts below the true value and the cap over-admits.
+    const controller = new AbortController();
+    const res = GET(makeReq('', controller.signal));
+    controller.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    await res.body!.cancel();
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    expect(getSseMetrics()).toEqual({
+      open: 0,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+  });
+
+  it('cleans up from the HEARTBEAT TICK when the request was already aborted at connect', () => {
+    // The only way the heartbeat's abort branch is actually reachable, and the
+    // reason it exists: if the signal is already aborted when GET() runs,
+    // addEventListener('abort') never fires (the event is in the past), so the
+    // tick is the sole remaining cleanup path. A client that hangs up between
+    // the request gate and the handler produces exactly this.
+    //
+    // Asserting it via a controller aborted AFTER connect does NOT work —
+    // onAbort runs first and clears the interval, so the tick never happens and
+    // the test passes no matter what the tick body does.
+    jest.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      const res = GET(makeReq('', controller.signal));
+      expect(getSseMetrics()).toMatchObject({ open: 1, openedTotal: 1 });
+      // Still open, because nothing has run cleanup yet.
+      expect(listeners).toHaveLength(1);
+      expect(logInfo).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(15_000);
+
+      expect(listeners).toHaveLength(0);
+      expect(logInfo).toHaveBeenCalledTimes(2);
+      expect(logInfo.mock.calls[1][0]).toMatchObject({ reason: 'abort' });
+      expect(getSseMetrics()).toEqual({
+        open: 0,
+        openedTotal: 1,
+        rejectedTotal: 0,
+      });
+
+      // Further ticks are a no-op: the interval is cleared, and even if it were
+      // not, the `closed` guard prevents a second decrement below 0.
+      jest.advanceTimersByTime(60_000);
+      expect(getSseMetrics().open).toBe(0);
+      expect(logInfo).toHaveBeenCalledTimes(2);
+      void res;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('emits a heartbeat frame on a live stream and logs nothing for it', async () => {
+    // Covers the tick's normal path. Also pins that heartbeats are silent in
+    // the log: one line per tick across 500 open streams would be a flood.
+    jest.useFakeTimers();
+    let frame: string;
+    try {
+      const res = GET(makeReq());
+      const reader = res.body!.getReader();
+      // Drain the prelude first, synchronously available from the queue.
+      await reader.read();
+      expect(logInfo).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(15_000);
+      frame = new TextDecoder().decode((await reader.read()).value);
+      expect(logInfo).toHaveBeenCalledTimes(1);
+      await reader.cancel();
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(frame).toBe(': heartbeat\n\n');
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    expect(logInfo.mock.calls[1][0]).toMatchObject({ reason: 'cancel' });
+  });
+
+  it('closes with reason=enqueue-failed when an event cannot be serialised', async () => {
+    // A SYNTHESISED trigger, stated plainly: no current publish path can put a
+    // cyclic payload on the bus. Every eventBus.publish() call site builds
+    // `payload` from an object literal or from a JSON.parse'd body (which
+    // cannot be cyclic), and the ingest route JSON.stringify's the payload
+    // itself before publishing, so it would 500 first.
+    //
+    // The branch is still worth pinning, and a circular payload is the one
+    // input that reaches it through the real code rather than by stubbing the
+    // controller: `JSON.stringify(evt)` sits inside the route's try, so this
+    // exercises the genuine catch → cleanup path. What Phase 2 adds here is the
+    // `reason` label and the close log — the slot release and unsubscribe were
+    // already there. What is asserted is that the label is right and that a
+    // serialisation fault still ends the stream cleanly rather than silently.
+    const res = GET(makeReq());
+    const reader = res.body!.getReader();
+    await reader.read(); // prelude
+    expect(getSseMetrics().open).toBe(1);
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    publish(ev({ id: 'bad', type: 'x', payload: circular }));
+
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    expect(logInfo.mock.calls[1][0]).toMatchObject({
+      reason: 'enqueue-failed',
+    });
+    expect(getSseMetrics()).toEqual({
+      open: 0,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+    expect(listeners).toHaveLength(0);
+    await reader.cancel();
+    // cleanup() is idempotent — the cancel must not log a second close line.
+    expect(logInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('truncates caller-supplied query filters before logging them', async () => {
+    // The filters are raw query values on a route the console hits on every
+    // reconnect, so they are a log-volume amplification vector exactly like
+    // x-request-id. Without this, the cap in the route can be deleted silently.
+    const long = 'f'.repeat(500);
+    const res = GET(
+      makeReq(`?type=${long}&run_id=${long}&aid=${long}`),
+    );
+    const fields = logInfo.mock.calls[0][0] as {
+      filters: { type: string; runId: string; aid: string };
+    };
+    expect(fields.filters.type).toBe('f'.repeat(200));
+    expect(fields.filters.runId).toBe('f'.repeat(200));
+    expect(fields.filters.aid).toBe('f'.repeat(200));
+    await res.body!.cancel();
+  });
+
+  it('keeps serving the stream when the logger throws on every call', async () => {
+    // safely() is load-bearing, not decorative: the open log runs AFTER
+    // acquireSseSlot(), so an unguarded throw there would 500 the request and
+    // leak a capacity slot for the life of the process. Deleting the try/catch
+    // must fail here.
+    logShouldThrow = true;
+    const res = GET(makeReq());
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    try {
+      expect(await readNext(reader)).toBe(PRELUDE);
+    } finally {
+      await reader.cancel();
+    }
+    // Metrics do not depend on logging working — that is the whole point of
+    // having both signals.
+    expect(getSseMetrics()).toEqual({
+      open: 0,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+    expect(listeners).toHaveLength(0);
+  });
+
+  it('still answers the capacity 503 when the logger throws', () => {
+    logShouldThrow = true;
+    configMock.maxSseConnections = 1;
+    globalThis.__sseOpenCount = 1;
+    const res = GET(makeReq());
+    expect(res.status).toBe(503);
+    expect(getSseMetrics().rejectedTotal).toBe(1);
   });
 });
 

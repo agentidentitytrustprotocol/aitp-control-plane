@@ -1,30 +1,93 @@
 import { NextRequest } from 'next/server';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
+import {
+  acquireSseSlot,
+  getSseOpenCount,
+  recordSseRejected,
+  releaseSseSlot,
+} from '@/lib/audit/sse-metrics';
 import { config } from '@/lib/config';
+import { childLogger } from '@/lib/logger';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Per-process count of open SSE streams. Survives hot-reload via a
-// global slot so the count doesn't reset to zero on a dev rebuild and
-// leak the previous generation's still-open connections out of the cap.
-declare global {
-  // eslint-disable-next-line no-var
-  var __sseOpenCount: number | undefined;
-}
-function incrementSseCount(): number {
-  globalThis.__sseOpenCount = (globalThis.__sseOpenCount ?? 0) + 1;
-  return globalThis.__sseOpenCount;
-}
-function decrementSseCount(): void {
-  globalThis.__sseOpenCount = Math.max(
-    0,
-    (globalThis.__sseOpenCount ?? 0) - 1,
-  );
+// The per-process open-stream count, the two lifecycle counters and their
+// `globalThis` slots all live in @/lib/audit/sse-metrics, so that
+// /api/metrics can read them without importing another route module and so
+// there is exactly one place that mutates them. See that file for why the
+// state is global rather than module-scoped.
+
+/**
+ * Upper bound on values we are willing to copy from the request into a log
+ * line. `x-request-id` is caller-settable and the query filters are entirely
+ * caller-supplied, so an unbounded value is a log-volume amplification vector
+ * on its own. Mirrors MAX_LOGGED_REQUEST_ID in the enroll route.
+ */
+const MAX_LOGGED_VALUE = 200;
+
+function cap(value: string | null): string | undefined {
+  return value ? value.slice(0, MAX_LOGGED_VALUE) : undefined;
 }
 
+/**
+ * Logging must never be able to take the stream down with it. Observability is
+ * strictly less important than the thing it observes, and the failure modes are
+ * concrete: a `childLogger()` or pino transport fault thrown from the open path
+ * would propagate out of `GET()` as a 500 **after** `acquireSseSlot()` has
+ * already run, leaking a capacity slot for the life of the process; thrown from
+ * `cleanup()` it would reject the consumer's `cancel()` promise or throw inside
+ * an `abort` event listener.
+ *
+ * (It would not skip the unsubscribe: the close log is deliberately the LAST
+ * statement of `cleanup()`, after the release, the unsubscribe and the
+ * `clearInterval`. The ordering is the primary defence; this wrapper is the
+ * backstop.)
+ *
+ * The cost of the swallow is that a permanently broken logger is silent — no
+ * counter, no fallback. Accepted: the alternative is a broken logger taking out
+ * the endpoint, and the three metrics in `@/lib/audit/sse-metrics` are the
+ * signal that does not depend on logging working.
+ */
+function safely(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Intentionally ignored — see above.
+  }
+}
+
+/** Minimal shape this route needs from the logger. */
+type LifecycleLogger = {
+  info: (fields: Record<string, unknown>, msg: string) => void;
+  warn: (fields: Record<string, unknown>, msg: string) => void;
+};
+/** Used when building the real logger throws — see `safely`. */
+const NOOP_LOGGER: LifecycleLogger = { info: () => {}, warn: () => {} };
+
 export function GET(req: NextRequest) {
-  if ((globalThis.__sseOpenCount ?? 0) >= config.maxSseConnections) {
+  const requestId = cap(req.headers.get('x-request-id'));
+  // Building the child logger is itself a call that can throw, and it happens
+  // on the request path, so it gets the same treatment as the log calls.
+  let log: LifecycleLogger = NOOP_LOGGER;
+  safely(() => {
+    log = childLogger(requestId ? { requestId } : {});
+  });
+
+  if (getSseOpenCount() >= config.maxSseConnections) {
+    recordSseRejected();
+    // warn, not info: at the cap the console is being actively refused, which
+    // is the one SSE lifecycle event an operator should be paged-adjacent to.
+    safely(() =>
+      log.warn(
+        {
+          reason: 'capacity',
+          open: getSseOpenCount(),
+          cap: config.maxSseConnections,
+        },
+        'sse stream rejected',
+      ),
+    );
     return new Response(
       JSON.stringify({
         error: 'too many open SSE connections; retry after current streams drain',
@@ -63,12 +126,35 @@ export function GET(req: NextRequest) {
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
   // Reserve a slot for this connection; release it in cleanup so the
-  // count tracks live streams 1:1.
-  incrementSseCount();
-  const cleanup = () => {
+  // count tracks live streams 1:1. Also counts the open.
+  const openCount = acquireSseSlot();
+  const openedAt = Date.now();
+  safely(() =>
+    log.info(
+      {
+        open: openCount,
+        cap: config.maxSseConnections,
+        // Which filters the client asked for. Truncated, because these are
+        // raw query values. Omitted entirely when unset, so a plain connect
+        // does not carry three `null`s.
+        filters: {
+          type: cap(filterType),
+          runId: cap(filterRunId),
+          aid: cap(filterAid),
+        },
+      },
+      'sse stream opened',
+    ),
+  );
+  /**
+   * `reason` is why the stream ended, and it is the field worth having: the
+   * question after #89 is not "did a stream close" but "did it close because
+   * the client went away, or because something upstream cut it".
+   */
+  const cleanup = (reason: 'cancel' | 'abort' | 'enqueue-failed') => {
     if (closed) return;
     closed = true;
-    decrementSseCount();
+    releaseSseSlot();
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
@@ -77,6 +163,15 @@ export function GET(req: NextRequest) {
       clearInterval(heartbeat);
       heartbeat = null;
     }
+    // Inside the `closed` guard, so exactly one close line is emitted per
+    // stream however many termination signals arrive. One line per lifecycle
+    // event and none per heartbeat, so 500 open streams do not flood the log.
+    safely(() =>
+      log.info(
+        { reason, durationMs: Date.now() - openedAt, open: getSseOpenCount() },
+        'sse stream closed',
+      ),
+    );
   };
 
   const stream = new ReadableStream<Uint8Array>({
@@ -105,7 +200,7 @@ export function GET(req: NextRequest) {
         try {
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
         } catch {
-          cleanup();
+          cleanup('enqueue-failed');
         }
       };
 
@@ -141,7 +236,7 @@ export function GET(req: NextRequest) {
       // controller for up to 15s.
       heartbeat = setInterval(() => {
         if (req.signal.aborted) {
-          cleanup();
+          cleanup('abort');
           try {
             ctrl.close();
           } catch {
@@ -152,13 +247,26 @@ export function GET(req: NextRequest) {
         try {
           ctrl.enqueue(enc.encode(`: heartbeat\n\n`));
         } catch {
-          cleanup();
+          // Defensive, and unreachable through the public surface today: every
+          // path that closes the controller runs cleanup() first, which clears
+          // this interval, so a tick cannot find a closed controller. Verified
+          // by attempting it — a throwing sink, tee()-and-cancel, an
+          // already-aborted signal and a re-locked reader all terminate via
+          // cancel()/abort instead. Kept because without it a future change that
+          // closes the stream some other way would turn a throw here into an
+          // unhandled timer exception, which in Node ends the process.
+          //
+          // The sibling catch in sendEvent() is reachable in a test, because
+          // JSON.stringify(evt) is inside its try — though no current publish
+          // path can produce a payload that fails to serialise, so that is a
+          // synthesised trigger for a real branch, not a live failure mode.
+          cleanup('enqueue-failed');
         }
       }, 15_000);
       heartbeat.unref?.();
 
       const onAbort = () => {
-        cleanup();
+        cleanup('abort');
         try {
           ctrl.close();
         } catch {
@@ -168,7 +276,7 @@ export function GET(req: NextRequest) {
       req.signal.addEventListener('abort', onAbort, { once: true });
     },
     cancel() {
-      cleanup();
+      cleanup('cancel');
     },
   });
 
