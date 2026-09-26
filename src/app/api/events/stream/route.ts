@@ -121,7 +121,9 @@ export function GET(req: NextRequest) {
   // signal (consumer cancel, request abort, heartbeat-after-abort).
   // Previously the heartbeat could keep firing for up to one tick
   // window after the connection died because nothing proactively
-  // checked req.signal.aborted.
+  // checked req.signal.aborted. Note that window is now operator-sized: it is
+  // one config.sseHeartbeatMs, not a fixed 15s. It only matters for a signal
+  // already aborted before GET() — every other path runs cleanup() at once.
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
@@ -250,8 +252,10 @@ export function GET(req: NextRequest) {
       for (const evt of subscriptionBuffer) sendEvent(evt);
       subscriptionBuffer.length = 0;
 
-      // Heartbeat, at config.sseHeartbeatMs (default 15s, floored at 1s —
-      // see readHeartbeatMs in @/lib/config for why the floor is mandatory).
+      // Heartbeat, at config.sseHeartbeatMs (default 15s, clamped to
+      // [1s, 2^31-1ms] — see readHeartbeatMs in @/lib/config for why BOTH
+      // bounds are mandatory: past 2^31-1 Node resets the delay to 1ms, so the
+      // top end fails the same way as 0).
       // Proactively cleans up if the request was aborted since the last tick,
       // so we don't keep ticking against a dead controller for a whole interval.
       heartbeat = setInterval(() => {

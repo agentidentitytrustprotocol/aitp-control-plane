@@ -12,11 +12,21 @@
 //   • an event that is both in the backlog snapshot AND delivered live
 //     during the replay window is only sent once (the seenIds dedup)
 //   • live events published after replay are delivered
-//   • aborting the request is noticed by the heartbeat, which unsubscribes
-//     from the event bus and releases the connection-count slot
+//   • every termination path — consumer cancel, request abort, a signal already
+//     aborted before GET(), an enqueue failure — unsubscribes from the event
+//     bus, releases the connection-count slot exactly once, and logs exactly one
+//     close line carrying the reason
+//   • the three SSE metrics move as streams open, close and get refused, and the
+//     open/close/reject log lines carry the fields docs/operations.md documents
+//     (including truncation of caller-supplied values) and never take the stream
+//     down when the logger itself throws
+//   • the heartbeat runs at config.sseHeartbeatMs rather than a hardcoded 15s,
+//     and the interval is unref'd
 //
-// @/lib/audit/stream's eventBus and @/lib/config are both mocked with
-// small controllable fakes. No database, no real event bus singleton.
+// @/lib/audit/stream's eventBus, @/lib/config and @/lib/logger are mocked with
+// small controllable fakes; @/lib/audit/sse-metrics is deliberately REAL, so the
+// counters are exercised rather than asserted against a stub. No database, no
+// real event bus singleton.
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -573,7 +583,9 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     try {
       const controller = new AbortController();
       controller.abort();
-      const res = GET(makeReq('', controller.signal));
+      // No binding: the response body is never read here, and the stream is torn
+      // down by the tick rather than by a cancel().
+      GET(makeReq('', controller.signal));
       expect(getSseMetrics()).toMatchObject({ open: 1, openedTotal: 1 });
       // Still open, because nothing has run cleanup yet.
       expect(listeners).toHaveLength(1);
@@ -595,7 +607,6 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       jest.advanceTimersByTime(60_000);
       expect(getSseMetrics().open).toBe(0);
       expect(logInfo).toHaveBeenCalledTimes(2);
-      void res;
     } finally {
       jest.useRealTimers();
     }
@@ -734,8 +745,12 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     // controller: `JSON.stringify(evt)` sits inside the route's try, so this
     // exercises the genuine catch → cleanup path. What Phase 2 adds here is the
     // `reason` label and the close log — the slot release and unsubscribe were
-    // already there. What is asserted is that the label is right and that a
-    // serialisation fault still ends the stream cleanly rather than silently.
+    // already there. What is asserted is that the label is right and that the
+    // release/unsubscribe happen. Note what does NOT happen: the route does not
+    // call ctrl.close() on this path, so the HTTP body stays open (silent and
+    // heartbeat-less) while the gauge has already stopped counting it. That is
+    // pre-existing behaviour, left alone deliberately here, and it is why this
+    // says "logged" rather than "closed cleanly".
     const res = GET(makeReq());
     const reader = res.body!.getReader();
     await reader.read(); // prelude
@@ -848,7 +863,14 @@ describe('GET /api/events/stream — cleanup', () => {
     expect(globalThis.__sseOpenCount).toBe(0);
   });
 
-  it('unsubscribes and releases the count slot once the heartbeat notices an aborted request', () => {
+  // NOTE on the name: this shape does NOT reach the heartbeat's aborted-request
+  // branch. `controller.abort()` on a signal the route is already listening to
+  // fires `onAbort` synchronously, so cleanup has run before the timer is
+  // advanced — the tick then finds `closed === true` and does nothing. What the
+  // test really pins is that an abort unsubscribes and releases the slot, and
+  // that a later tick cannot double-release. The tick's own branch needs a signal
+  // aborted BEFORE GET(); that case is covered in the lifecycle block above.
+  it('unsubscribes and releases the count slot when the request is aborted, and a later tick is a no-op', () => {
     jest.useFakeTimers();
     try {
       const controller = new AbortController();

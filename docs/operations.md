@@ -183,11 +183,15 @@ Five behaviours worth knowing before you change it:
   restarts (on Railway, an env change triggers one).
 - **It also sets the clients' reconnect delay, so lowering it is not free.** The
   prelude advertises `retry: <this value>`, and a browser `EventSource` waits
-  that long before reconnecting. Browsers default to roughly 3 s, so any value
-  *below* ~3000 ms makes disconnected clients come back **faster** than they
-  otherwise would — into `MAX_SSE_CONNECTIONS` and the rate limiter. If you need
-  a sub-3 s heartbeat to survive an aggressive edge, expect the reconnect rate to
-  rise with it and check `sse_streams_rejected_total`.
+  that long before reconnecting. It cuts both ways. Browsers default to roughly
+  3 s, so any value *below* ~3000 ms makes disconnected clients come back
+  **faster** than they otherwise would — into `MAX_SSE_CONNECTIONS` and the rate
+  limiter; if you need a sub-3 s heartbeat to survive an aggressive edge, expect
+  the reconnect rate to rise with it and watch `sse_streams_rejected_total`. And a
+  large value slows reconnects by the same amount: `SSE_HEARTBEAT_MS=300000` tells
+  every console to wait five minutes after a dropped stream before trying again,
+  which looks exactly like the stream being broken. That is a second reason the
+  >60 s boot warning is worth heeding, beyond idle timeouts.
 - **It is no longer load-bearing for connect.** The stream writes its prelude
   immediately on connect, so response headers reach the client in milliseconds
   regardless of this setting. It used to be the *only* thing that ever wrote a

@@ -28,24 +28,15 @@
  * second one — that is what keeps the gauge consistent with the connection cap,
  * which reads the same number.
  *
- * WHY A SHARED MODULE AND NOT A BARE `globalThis` READ FROM `metrics/route.ts`.
- * The plan for this work proposed the latter, and it would in fact compile — a
- * `declare global` in any file under `src/` is in scope for the whole `tsc`
- * program, and `ts-jest` in this repo type-checks nothing at all, so neither
- * gate would object. The reasons are design reasons, not compiler reasons:
- *   - `acquireSseSlot()` bumps the gauge and `streams_opened_total` in ONE
- *     function. Two call sites in the route could drift apart behind a future
- *     early return, and then the two series would disagree with no way to tell
- *     which is right.
- *   - `/api/metrics` would otherwise depend on a `declare global` declared
- *     inside an unrelated route module it does not import — real coupling
- *     between two route handlers, invisible to every import graph, and it
- *     breaks the moment someone deletes the stream route's `declare` block.
- *   - Typed accessors beat raw `globalThis.__x ?? 0` reads at each use site:
- *     the `?? 0` fallback is stated once, here, next to the comment explaining
- *     why a zero must be emitted rather than a missing series.
- * This mirrors `src/lib/registry/enroll-metrics.ts`, which the repo added for
- * the same job two commits earlier.
+ * WHY A SHARED MODULE AND NOT A BARE `globalThis` READ FROM `metrics/route.ts`
+ * (which would compile fine — a `declare global` anywhere under `src/` is in
+ * scope for the whole program). Three design reasons: `acquireSseSlot()` bumps
+ * the gauge and `streams_opened_total` in ONE function, so they cannot drift
+ * apart behind a future early return; `/api/metrics` does not end up depending
+ * on a `declare global` inside an unrelated route module it never imports, a
+ * coupling no import graph would show; and the `?? 0` fallback is stated once,
+ * here, beside the reason a zero must be emitted rather than a missing series.
+ * Mirrors `src/lib/registry/enroll-metrics.ts`, added for the same job.
  *
  * Per-process and reset-on-restart, like every other in-memory metric here.
  * That is correct for a Prometheus `counter` (the scraper handles resets) and

@@ -346,4 +346,4 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 
 ## Lifecycle
 
-- `GET /api/readyz` returns `503` with `{ "ready": false, "reason": "shutting_down" }` once the process has received SIGTERM, so a load balancer can drain the pod before it exits. `GET /api/health` continues to return `200` during the drain window. See [`operations.md`](operations.md#graceful-shutdown).
+- `GET /api/readyz` returns `503` with `{ "ready": false, "reason": "shutting_down" }` once the process has received SIGTERM, so a load balancer can drain the pod before it exits. `GET /api/health` continues to return `200` during the drain window. See [`operations.md`](operations.md#health-readiness--graceful-shutdown).
