@@ -1,5 +1,39 @@
 import { AitpAgent } from 'aitp';
-import { EnrollmentService } from './enrollment';
+import { EnrollmentService, getEnrollmentService } from './enrollment';
+import { ManifestRejectedError, sdkVerifyCode } from './verify-error';
+
+const USABLE_SECRET = 'config-boundary-secret-padded-past-the-32-char-minimum';
+
+/** Re-import `enrollment.ts` — and with it `config.ts` — with
+ *  `ENROLLMENT_SECRET` set to `secret` (`undefined` = unset), and the
+ *  module-level service cache cleared.
+ *
+ *  The env var MUST be set before the `require`, not inside the callback:
+ *  `config` is a `const` evaluated at import, so it snapshots `process.env`
+ *  once and a later assignment is invisible to it. That is the whole reason a
+ *  fresh module registry is needed here rather than a simple env poke, and
+ *  getting the order wrong silently tests the ambient environment instead —
+ *  which is how the first draft of these tests passed one assertion it had no
+ *  business passing. */
+function withEnrollmentSecret(
+  secret: string | undefined,
+  fn: (mod: typeof import('./enrollment')) => void,
+): void {
+  const saved = process.env.ENROLLMENT_SECRET;
+  globalThis.__enrollment = undefined;
+  if (secret === undefined) delete process.env.ENROLLMENT_SECRET;
+  else process.env.ENROLLMENT_SECRET = secret;
+  try {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      fn(require('./enrollment') as typeof import('./enrollment'));
+    });
+  } finally {
+    if (saved === undefined) delete process.env.ENROLLMENT_SECRET;
+    else process.env.ENROLLMENT_SECRET = saved;
+    globalThis.__enrollment = undefined;
+  }
+}
 
 describe('EnrollmentService', () => {
   const secret = 'unit-test-secret-key-padded-to-pass-min-length-check';
@@ -26,7 +60,7 @@ describe('EnrollmentService', () => {
   it('rejects an invalid manifest envelope', () => {
     // Asserts .code is a string — the contract package.json's "//aitp"
     // block (0.7.0 entry) documents for exactly this path, where
-    // enrollment.ts:55 calls verifyManifestJson on externally-supplied
+    // enrollment.ts calls verifyManifestJson on externally-supplied
     // input — without pinning its current value ("malformed"). A future
     // release may reclassify an unknown top-level field like `bogus` from
     // `malformed` to `unknown_field` (see the UNKNOWN_FIELD batch tracked in
@@ -42,6 +76,44 @@ describe('EnrollmentService', () => {
     expect(threw).toBe(true);
 
     expect(() => service.verifyAndIssueToken('not json at all')).toThrow();
+  });
+
+  it('exposes the real SDK failure code through sdkVerifyCode', () => {
+    // The one assertion in the suite that would catch the SDK moving its
+    // `.code` property: everything downstream of sdkVerifyCode is mocked,
+    // so without this a rename would silently degrade the public
+    // `verifyCode` field to "absent" in production rather than fail here.
+    // Asserts the *shape* (a non-empty string), never today's value — see
+    // the forward-compat note above.
+    let threw = false;
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken('{"manifest":{"bogus":true}}');
+    } catch (err) {
+      threw = true;
+      caught = err;
+    }
+    expect(threw).toBe(true);
+    // Deliberately asserts ONLY the code, never the error's type. Two
+    // reasons, the second measured rather than assumed:
+    //
+    //  1. Only `.code` is the contract. A future SDK that threw a plain
+    //     object carrying `.code` would keep production working, so pinning
+    //     the type here would manufacture a failure out of a non-breakage.
+    //
+    //  2. `expect(caught).toBeInstanceOf(Error)` FAILS in this suite — with
+    //     the baffling "Expected constructor: Error / Received constructor:
+    //     Error". That is a *Jest* artifact, not an SDK one:
+    //     `jest-environment-node` runs the test file in a vm context with
+    //     its own `Error` global, so the cross-realm `instanceof` is false.
+    //     Measured under plain `node` (no Jest), the SDK's error IS a real
+    //     native Error — `instanceof Error`, `isNativeError` and
+    //     `Object.getPrototypeOf(e) === Error.prototype` are all true. So
+    //     `route.ts`'s `err instanceof Error ? err.message : String(err)`
+    //     is correct in production and must not be "fixed".
+    const code = sdkVerifyCode(caught);
+    expect(typeof code).toBe('string');
+    expect(code).not.toBe('');
   });
 
   it('rejects a token signed with a different secret', () => {
@@ -81,18 +153,174 @@ describe('EnrollmentService', () => {
     }
   });
 
-  it('rejects a manifest whose TTL falls inside the 5-minute registration guard', () => {
+  it('rejects a manifest inside the 5-minute guard as a coded ManifestRejectedError', () => {
+    // This replaces a `toThrow(/longer TTL/)` substring match on the message —
+    // the very practice this change exists to remove. Even this repo resorted
+    // to it while the rejection had no machine-readable code of its own; now it
+    // has one, so the test branches on the code instead.
+    //
+    // The rejection is positively identifiable as "the caller's fault" rather
+    // than inferred from the absence of a `.code`, which is equally true of a
+    // genuine internal error.
+    //
+    // The MESSAGE is still pinned byte-for-byte, and that is deliberate rather
+    // than left over: the expiry guard's code moved MANIFEST_INVALID ->
+    // MANIFEST_EXPIRED (matching the sibling register route, which has always
+    // returned MANIFEST_EXPIRED for this identical condition), and pinning the
+    // message is what proves the prose did NOT move with it — so status-only
+    // and message-matching clients are unaffected by that narrowing.
     const agent = AitpAgent.generate();
     const shortLived = agent.buildManifest({
       displayName: 'short-ttl-agent',
       handshakeEndpoint: 'https://agent.example.com/handshake',
       offeredCaps: ['demo.echo'],
-      ttlSecs: 60, // expires before the 5-minute guard window
+      ttlSecs: 60,
     });
-    expect(() => service.verifyAndIssueToken(shortLived)).toThrow(/longer TTL/);
+
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken(shortLived);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ManifestRejectedError);
+    const rejected = caught as ManifestRejectedError;
+    expect(rejected.cpCode).toBe('MANIFEST_EXPIRED');
+    expect(rejected.message).toBe(
+      'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL',
+    );
+    // The SDK's mechanism and ours must stay mutually unrecognizable.
+    expect(sdkVerifyCode(rejected)).toBeUndefined();
+  });
+
+  it('documents that the aid guard is unreachable via a real signed manifest', () => {
+    // The aid guard (`!aid.startsWith('aid:')`) runs AFTER verifyManifestJson
+    // has accepted the envelope, and the signature covers the aid — so
+    // rewriting the aid to a non-AID makes the SDK reject it first, and
+    // AitpAgent only ever mints `aid:`-prefixed AIDs. The guard is therefore
+    // defense-in-depth against an SDK that one day accepts a manifest this
+    // service cannot use, not a path a caller can drive today.
+    //
+    // Consequences, recorded so neither is mistaken for an oversight: the aid
+    // guard's own behavior is pinned in enrollment-guards.test.ts, which stubs
+    // SDK verification to a no-op precisely because that is the only way to
+    // reach it; and if the assertion below ever fails, the guard is checking
+    // for a prefix the SDK no longer issues, which is a louder problem than
+    // the guard itself.
+    const agent = AitpAgent.generate();
+    const envelope = JSON.parse(
+      agent.buildManifest({
+        displayName: 'aid-guard-agent',
+        handshakeEndpoint: 'https://agent.example.com/handshake',
+        offeredCaps: ['demo.echo'],
+        ttlSecs: 3600,
+      }),
+    ) as { manifest: { aid: string } };
+    expect(envelope.manifest.aid.startsWith('aid:')).toBe(true);
+
+    // And confirm the SDK, not our guard, is what rejects a tampered aid.
+    const tampered = JSON.stringify({
+      ...envelope,
+      manifest: { ...envelope.manifest, aid: 'did:pubkey:z:not-an-aid' },
+    });
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken(tampered);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).not.toBeInstanceOf(ManifestRejectedError);
+    expect(typeof sdkVerifyCode(caught)).toBe('string');
   });
 
   it('refuses to construct with a sub-32-char secret', () => {
     expect(() => new EnrollmentService('too-short')).toThrow(/at least 32/);
+  });
+
+  it('refuses to construct with no secret at all', () => {
+    // The other half of the pair the route's 503 guard depends on. Both throws
+    // are plain Errors with no cpCode and no .code — which is exactly why the
+    // route cannot be allowed to classify them as a bad manifest, and why it
+    // hoists this construction out of the verification try/catch.
+    expect(() => new EnrollmentService('')).toThrow(/ENROLLMENT_SECRET is required/);
+    const err = (() => {
+      try {
+        new EnrollmentService('');
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).not.toBeInstanceOf(ManifestRejectedError);
+    expect(sdkVerifyCode(err)).toBeUndefined();
+  });
+});
+
+describe('getEnrollmentService — the config boundary', () => {
+  // The link the route's 503 rests on, and which nothing else in the suite
+  // crosses: `config.ts` defaults `enrollmentSecret` to `''` when the env var
+  // is absent, `getEnrollmentService()` constructs `EnrollmentService` with NO
+  // argument, and the constructor throws. Every other test either passes a
+  // secret explicitly (bypassing `config`) or mocks `getEnrollmentService`
+  // (bypassing both), so without these the two halves were each tested and
+  // their join was not. It matters because nothing validates this secret at
+  // startup — `config.ts` warns only about `API_KEYS`, and only in dev — so
+  // this throw is the entire protection against a silently broken deploy.
+
+  it('throws when ENROLLMENT_SECRET is unset, which is what the route turns into a 503', () => {
+    withEnrollmentSecret(undefined, (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow(
+        /ENROLLMENT_SECRET is required/,
+      );
+    });
+  });
+
+  it('throws when ENROLLMENT_SECRET is present but too short', () => {
+    // A *different* message from the unset case, asserted as such: this is the
+    // pair the route's single 503 covers, and both must reach it. The response
+    // body carries neither message.
+    withEnrollmentSecret('too-short', (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow(/at least 32/);
+    });
+  });
+
+  it('keeps throwing on every call, because it caches only on success', () => {
+    // Why a misconfigured server answers EVERY enrollment 503 rather than one:
+    // the cache is assigned after the constructor returns, so a throw is never
+    // memoised. If that were reversed, the first request would 503 and the rest
+    // would fail some other way, which is a far harder outage to read.
+    withEnrollmentSecret(undefined, (mod) => {
+      expect(() => mod.getEnrollmentService()).toThrow();
+      expect(() => mod.getEnrollmentService()).toThrow();
+      expect(globalThis.__enrollment).toBeUndefined();
+    });
+  });
+
+  it('returns one cached instance once the secret is usable', () => {
+    // The positive control. Without it the four negatives above would also pass
+    // against a `getEnrollmentService` that threw unconditionally.
+    withEnrollmentSecret(USABLE_SECRET, (mod) => {
+      const first = mod.getEnrollmentService();
+      // `mod.EnrollmentService`, not the top-level import: `jest.isolateModules`
+      // gives this require its own module registry, so the two are distinct
+      // class objects and a cross-registry `instanceof` is false. Same family of
+      // Jest artifact as the cross-realm `instanceof Error` documented in the
+      // SDK-code test above — and the same lesson: assert against the thing you
+      // actually loaded.
+      expect(first).toBeInstanceOf(mod.EnrollmentService);
+      expect(mod.getEnrollmentService()).toBe(first);
+    });
+  });
+
+  it('reads the secret from config, not from the ambient environment', () => {
+    // Non-vacuity for the helper itself. If the env var were being set too late
+    // to reach `config` — the exact mistake the helper's docblock describes —
+    // this would throw instead, and the negatives above would be passing for
+    // the wrong reason.
+    withEnrollmentSecret(USABLE_SECRET, (mod) => {
+      expect(() => mod.getEnrollmentService()).not.toThrow();
+    });
+    // And the module-under-test is genuinely importable the ordinary way, so
+    // the isolated requires above are not standing in for a broken import.
+    expect(typeof getEnrollmentService).toBe('function');
   });
 });

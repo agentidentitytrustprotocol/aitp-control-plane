@@ -380,6 +380,30 @@ async function probe(base, route) {
  * SERVER_MISCONFIGURED would mark two genuinely public routes as protected and
  * bake that lie into the baseline. A handler-level 5xx means the request
  * REACHED the handler, which is the definition of public here.
+ *
+ * CAVEAT, and the reason this docstring no longer claims the `code` is unique
+ * to the gate: `src/app/api/registry/enroll/route.ts` also answers
+ * `503 SERVER_MISCONFIGURED` — from its own handler — when `ENROLLMENT_SECRET`
+ * is unset or too short. So that status/code pair is no longer proof the
+ * request was stopped by the proxy.
+ *
+ * This harness stays correct for THREE independent reasons, each on its own
+ * sufficient — so check 10 misreports only if all three break together:
+ *   1. `probe()` sends GET and enroll is POST-only, so the framework answers
+ *      405 before any handler code runs.
+ *   2. `probe()` sends no body, so even a POST stops at the route's own
+ *      `400 BODY_INVALID` pre-validation — which runs BEFORE
+ *      `getEnrollmentService()`, and therefore before the 503 can fire.
+ *   3. `boot()` always supplies a valid 43-char ENROLLMENT_SECRET, so the 503
+ *      has no reason to fire at all.
+ * (Reaching the 503 would additionally need a body parsing to
+ * `{manifest: <object>}`, which `probe()` cannot send.)
+ *
+ * If all of that ever stops holding, check 10 fails as
+ * `/api/registry/enroll: public -> gate-misconfigured`, sending a reader to
+ * `proxy.ts` to debug a fault that is actually in the route's own config. The
+ * durable fix then is to scope this classification by route, or to give the gate
+ * a `code` no handler shares.
  */
 function classify(r) {
   if (r.status === 401 && r.body?.code === 'INVALID_API_KEY') return 'gated';

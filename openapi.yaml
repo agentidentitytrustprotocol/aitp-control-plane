@@ -93,6 +93,79 @@ components:
         code:
           type: string
 
+    ManifestVerificationError:
+      description: >-
+        The `400` body of `POST /api/registry/enroll`. Composed from `Error` so
+        the two cannot drift, plus an optional `verifyCode` carrying the `aitp`
+        SDK's own machine-readable reason.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            verifyCode:
+              type: string
+              example: signature_invalid
+              description: >-
+                Why manifest verification failed, as classified by the `aitp`
+                SDK. Present if and only if the SDK rejected the manifest. It is
+                absent whenever one of the control plane's own guards rejected it
+                instead — a `manifest.aid` that is missing or does not start with
+                `aid:`, or an `expires_at` inside the 5-minute registration
+                window, both of which run *after* the SDK has already accepted
+                the manifest — and absent on the pre-validation failures that
+                never reach the SDK at all.
+
+
+                **Branch on this field, not on `error`.** The SDK states that
+                the code is the contract and the message wording is not, so
+                `error` may be reworded in any SDK release and must be treated
+                as human-facing detail only.
+
+
+                Because of that, a `code` of `MANIFEST_EXPIRED` may arrive
+                either with `verifyCode: expired` (the manifest was already past
+                `expires_at`, so the SDK rejected it) or with no `verifyCode` at
+                all (it was still valid but expires inside the 5-minute
+                registration window, so this service rejected it). Both mean
+                "re-issue with a longer TTL", which is why they share one `code`;
+                `verifyCode` is what distinguishes them if you need to.
+
+
+                Values known at the time of writing, from the `aitp` SDK's
+                `verifyManifestJson` docstring: `signature_invalid`,
+                `pop_failed`, `aid_mismatch`, `expired`, `version_unknown`,
+                `identity_hint_malformed`, `incompatible_identity_type`,
+                `malformed`.
+
+
+                **This list is deliberately not an `enum`, and clients must not
+                treat it as exhaustive.** The vocabulary is owned by the `aitp`
+                SDK, not by this service, and it has already grown once (from
+                five values to these eight). A new SDK minor may add more
+                without a change to this service, and such a value will be
+                passed through verbatim. Treat any unrecognized value as a
+                generic "manifest verification failed".
+
+    RateLimitError:
+      description: >-
+        The `429` body from the request gate. `bucket` names which limiter
+        tripped, so a client can tell a per-IP limit from a per-key one and back
+        off against the right dimension. See the `Retry-After`,
+        `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`
+        response headers for when to retry.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            bucket:
+              type: string
+              example: enroll-ip
+              description: >-
+                The rate-limit bucket that rejected the request. Currently
+                `enroll-ip` (strict, per-IP), `public-ip` (per-IP) or `api-key`
+                (per-key); like `verifyCode`, not an `enum` — buckets are an
+                internal partitioning this service may re-cut.
+
     Agent:
       type: object
       required: [aid, displayName, handshakeEndpoint, offeredCaps, status]
@@ -374,6 +447,11 @@ paths:
           application/json:
             schema:
               type: object
+              # `required` matches POST /api/registry/agents. Without it a
+              # spec-valid `{}` is a guaranteed 400 MANIFEST_INVALID, which the
+              # 400 below documents — so the schema would describe a request the
+              # route always rejects as acceptable.
+              required: [manifest]
               properties:
                 manifest: { type: object }
       responses:
@@ -382,8 +460,43 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EnrollResponse" }
-        "400": { description: Invalid manifest, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-        "429": { description: Rate limited }
+        "400":
+          description: >-
+            Manifest missing, malformed, expired, or failed verification.
+            `code` is one of `MANIFEST_INVALID`, `MANIFEST_EXPIRED` (the
+            manifest is already past `expires_at`, or expires inside the
+            5-minute registration window — the same code
+            `POST /api/registry/agents` returns for that identical condition),
+            or `BODY_INVALID` when the body is not JSON. `verifyCode` is
+            present when the `aitp` SDK was the thing that rejected the
+            manifest — branch on it, not on `error`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManifestVerificationError" }
+        "429":
+          description: Rate limited — the strict per-IP `enroll-ip` bucket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RateLimitError" }
+        "500":
+          description: >-
+            An internal fault. Documented because it is reachable **by design**
+            rather than only by accident: this route rethrows anything it cannot
+            classify as the caller's bad manifest or a known server
+            misconfiguration, so an unexpected failure surfaces as a `500`
+            instead of a `400` that blames a manifest which was fine. The body
+            is whatever the framework renders and is **not** the shared `Error`
+            shape, which is why no schema is declared here.
+        "503":
+          description: >-
+            `code` is `SERVER_MISCONFIGURED`. The server cannot issue
+            enrollment tokens at all — `ENROLLMENT_SECRET` is unset or too
+            short. This is an operator fault, not a problem with the submitted
+            manifest, and the body carries no configuration detail. Unlike a
+            `400`, it is safe to retry once the deployment is fixed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/agents:
     get:
@@ -437,7 +550,13 @@ paths:
       responses:
         "201":
           description: Registered
-        "400": { description: Bad manifest }
+        "400":
+          description: >-
+            Bad manifest. `code` is `MANIFEST_EXPIRED` when the manifest expires
+            inside the 5-minute registration window — the same code
+            `POST /api/registry/enroll` returns for that identical condition, so
+            a client may handle it once for both routes — or `BODY_INVALID` for a
+            malformed body.
         "401": { description: Bad token }
         "429": { description: Rate limited }
 

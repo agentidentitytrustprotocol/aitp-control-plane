@@ -19,8 +19,18 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # Opt the build into Next.js standalone output. Gated by env so local
 # `next start` workflows aren't affected (see next.config.ts).
 ENV NEXT_OUTPUT=standalone
-# Throwaway placeholders so `next build` (which evaluates route modules
-# under NODE_ENV=production) passes its boot-time config validation.
+# Throwaway placeholders giving `next build` (which evaluates route modules
+# under NODE_ENV=production) concrete values for anything read at module scope.
+#
+# They are NOT satisfying a boot-time config validation, as this comment used to
+# claim — there isn't one: src/lib/config.ts only `console.warn`s, and
+# EnrollmentService is constructed lazily on first use. Measured: `next build`
+# with NEXT_OUTPUT=standalone, NODE_ENV=production and ALL of these unset exits 0
+# and builds every route, so none of them is load-bearing for the build.
+# (CP_AID_SEED_HEX's production throw lives inside initCpIdentity(), reached from
+# a handler, not at module scope.) They are kept as belt-and-braces so the build
+# never depends on that staying true.
+#
 # These are NOT real secrets and are overridden by the runtime
 # environment — never baked into the final runner image.
 ENV NODE_ENV=production \
