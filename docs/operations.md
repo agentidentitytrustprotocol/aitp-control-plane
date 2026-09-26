@@ -141,6 +141,93 @@ or are trivially bypassed. Match them to your actual edge.
 If you front the CP with a fan-out proxy that opens its own upstream pool, raise
 `MAX_SSE_CONNECTIONS` accordingly.
 
+### Keepalive: `SSE_HEARTBEAT_MS`
+
+**`SSE_HEARTBEAT_MS`** (default `15000`) sets two things at once: the interval
+between `: heartbeat` comment frames on an open stream, and the `retry:`
+reconnect delay the stream advertises to `EventSource` clients in its connect
+prelude.
+
+**Tune it against your edge's idle timeout, which is the only thing it is for.**
+A proxy or load balancer that closes idle connections after N seconds will drop
+an SSE stream that has been quiet for N seconds, and the heartbeat exists purely
+to stop that from happening. So the interval must sit **below** the timeout:
+
+- Common edge idle timeouts are 30-60 s, which is why the default is 15 s.
+- If streams are dying on a fixed cadence shorter than 15 s, set this below that
+  cadence. `sse_streams_opened_total` climbing while `sse_streams_open` stays
+  flat is the signature (see "Is the stream healthy?" immediately below).
+- Above 60 s the CP logs a warning at boot, but does not override you — a
+  deployment behind an edge with a long or absent idle timeout may legitimately
+  want a slow heartbeat.
+
+Six behaviours worth knowing before you change it:
+
+- **It is clamped to a 1000 ms floor.** `SSE_HEARTBEAT_MS=0` and negative values
+  are *accepted* by the env parser (`"0"` is a non-empty string, so it is not
+  treated as unset) and would make `setInterval` fire roughly every millisecond
+  on every open stream — a CPU spin and a bandwidth flood. Values below the floor
+  are raised to it rather than replaced by the default, so an explicit "as fast
+  as possible" still means "as fast as we allow". A **non-numeric** value is
+  different: there is no intent to preserve, so it falls back to `15000`.
+- **It is also clamped to a 2147483647 ms ceiling**, for the same reason as the
+  floor rather than as a policy about slow heartbeats. `setInterval` keeps its
+  delay in a signed 32-bit int, so a larger delay overflows and Node **resets it
+  to 1 ms** — an extra-zeros typo like `SSE_HEARTBEAT_MS=15000000000`, meaning
+  "basically never", would produce the exact millisecond flood the floor exists
+  to prevent. The ceiling is ~24.8 days, so it cannot override any interval a
+  real deployment would pick, and the boot log says explicitly when it has
+  clamped (naming both the value you set and the value in force).
+- **It is read once, at boot.** The config object is built at module load, so
+  changing the variable on a running instance has no effect until the process
+  restarts (on Railway, an env change triggers one).
+- **One edge case scales with it:** a request whose client had already
+  disconnected before the handler ran holds its capacity slot until the next
+  heartbeat tick notices, because there is no abort event left to fire. That is
+  one `SSE_HEARTBEAT_MS` — a second at the floor, five minutes at `300000`. Every
+  other disconnect releases the slot immediately.
+- **It also sets the clients' reconnect delay, so lowering it is not free.** The
+  prelude advertises `retry: <this value>`, and a browser `EventSource` waits
+  that long before reconnecting. It cuts both ways. Browsers default to roughly
+  3 s, so any value *below* ~3000 ms makes disconnected clients come back
+  **faster** than they otherwise would — into `MAX_SSE_CONNECTIONS` and the rate
+  limiter; if you need a sub-3 s heartbeat to survive an aggressive edge, expect
+  the reconnect rate to rise with it and watch `sse_streams_rejected_total`. And a
+  large value slows reconnects by the same amount: `SSE_HEARTBEAT_MS=300000` tells
+  every console to wait five minutes after a dropped stream before trying again,
+  which looks exactly like the stream being broken. That is a second reason the
+  >60 s boot warning is worth heeding, beyond idle timeouts.
+- **It is no longer load-bearing for connect.** The stream writes its prelude
+  immediately on connect, so response headers reach the client in milliseconds
+  regardless of this setting. It used to be the *only* thing that ever wrote a
+  byte on a quiet control plane, and because Next defers the response headers
+  until the first body chunk, that meant no client saw an HTTP status line for
+  15 seconds. Lowering this value is therefore no longer a fix for a stream that
+  seems not to respond at all.
+
+### Is the stream healthy? (three metrics, no log access needed)
+
+`/api/metrics` is public and rate-limit exempt, so these answer the question
+from anywhere — which is the point: they exist because a dead stream endpoint
+was once undiagnosable from outside the process for days.
+
+| Series (`aitp_control_plane_`…) | Read it as |
+|---|---|
+| `sse_streams_open` | Streams alive on this replica right now. Flat at `0` while the console claims to be connected means the handler is not being reached — look at the gate, the proxy, or the URL, not at the route. |
+| `sse_streams_opened_total` | Connect *rate*, by differencing. Climbing fast with `sse_streams_open` flat is a reconnect loop: streams are being accepted and dying immediately. Suspect an idle timeout or a function duration cap at the edge rather than the route. |
+| `sse_streams_rejected_total` | Connections refused by the cap. Any movement means `MAX_SSE_CONNECTIONS` is too low for the current client population, or streams are leaking rather than closing. |
+
+Both counters are cumulative and per-process, so they reset on restart and on a
+redeploy — normal for a Prometheus counter, and a reset is itself the signal that
+the replica restarted.
+
+For per-stream detail, the route logs exactly two lines per connection —
+`sse stream opened` (with the active filters and the resulting open count) and
+`sse stream closed` (with `durationMs` and a `reason` of `cancel`, `abort` or
+`enqueue-failed`) — plus one `sse stream rejected` warning per capacity refusal.
+Nothing is logged per heartbeat, so the volume is bounded by connect rate, which
+the rate limiter already caps.
+
 ## Webhook delivery
 
 Each delivery retries up to `WEBHOOK_RETRY_ATTEMPTS` (default 3) with
@@ -200,14 +287,18 @@ in this table, and conflating them will give you wrong numbers:
 
 - **Process-local** — `rate_limit_drops`, `admin_audit_insert_failures`,
   `event_backlog_dropped`, `enroll_verification_failures`,
+  `sse_streams_open`, `sse_streams_opened_total`, `sse_streams_rejected_total`,
   `webhook_circuit_breaker_open`. Held in memory and **per replica**, so
   aggregating across instances is the scraper's job, and all of them **reset on
-  restart**. For the four counters that is harmless (a Prometheus counter reset is
-  something the scraper handles). For `webhook_circuit_breaker_open` — a gauge
-  over an in-memory `Map` — it is a trap: after a rolling restart every breaker
-  reads `closed`, which looks identical to "the fleet recovered" and is not.
-  Confirm a breaker recovery against delivery success, not against this gauge
-  going quiet.
+  restart**. For the counters in that list that is harmless (a Prometheus counter
+  reset is something the scraper handles). For the two **gauges** —
+  `webhook_circuit_breaker_open` over an in-memory `Map`, and `sse_streams_open`
+  over a per-process count — it is a trap, because a restart makes both read like
+  good news: every breaker reads `closed`, which is indistinguishable from "the
+  fleet recovered", and every stream count reads `0`, which is
+  indistinguishable from "no clients are connected". Confirm a breaker recovery
+  against delivery success, and read `sse_streams_open` next to
+  `sse_streams_opened_total` rather than alone.
 - **Database-derived** — `agents_active`, `agents_expired`, `sessions_total`,
   `webhook_deliveries`, `audit_events`. These are `COUNT(*)`/`GROUP BY` queries
   against shared state, so they are *already* cluster-wide and survive restarts.
@@ -232,6 +323,9 @@ in this table, and conflating them will give you wrong numbers:
 | `admin_audit_insert_failures` | counter | — | Admin-audit writes that failed (silent-degradation surface) |
 | `event_backlog_dropped` | counter | — | Audit events evicted from the in-memory SSE backlog |
 | `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
+| `sse_streams_open` | gauge | — | `/api/events/stream` connections open right now on this replica |
+| `sse_streams_opened_total` | counter | — | Stream connections accepted since process start |
+| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` |
 
 The DB-derived series (`agents_*`, `sessions_total`, `webhook_deliveries`,
 `audit_events`) are **absent** from a scrape taken while the database is

@@ -78,6 +78,7 @@ rate-limit, retention, and telemetry subsystems behave.
 | `WEBHOOK_URL_ALLOWLIST` | no | empty | Comma-separated host allowlist for webhook targets. Empty = any public host (private/loopback/link-local ranges are always rejected as SSRF). Leading `.` matches subdomains. |
 | `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | In-memory SSE backlog replayed to each new subscriber |
 | `MAX_SSE_CONNECTIONS` | no | `500` | Concurrent `/api/events/stream` cap per process; over-limit returns `503 SSE_CAPACITY` |
+| `SSE_HEARTBEAT_MS` | no | `15000` | Interval between `: heartbeat` frames on an open stream, and the `retry:` reconnect hint sent in the connect prelude. Tune below your edge's idle timeout — see [operations.md](docs/operations.md#keepalive-sse_heartbeat_ms). Clamped to 1000-2147483647 ms; read at boot. |
 
 **Rate limiting** (in-memory, per-process — see [operations.md](docs/operations.md#rate-limiting))
 

@@ -5,8 +5,9 @@
 //   • aitp_control_plane_db_up 1/0 and the "# DB unavailable" comment on
 //     DB failure — the scrape still returns 200
 //   • process-local metrics (rate-limit drops, circuit-breaker states,
-//     admin-audit insert failures, SSE backlog drops, enrollment
-//     verification failures) are emitted even when the DB is down
+//     admin-audit insert failures, SSE backlog drops, SSE stream lifecycle,
+//     enrollment verification failures) are emitted even when the DB is down
+//   • every emitted sample line has a matching # HELP and # TYPE
 //   • Content-Type: text/plain; version=0.0.4.
 //
 // @/lib/db is mocked with thenable select-chains resolved in call order;
@@ -22,6 +23,7 @@ let breakerSnaps: Record<string, { state: string }> = {};
 let insertFailures = 0;
 let droppedCount = 0;
 let enrollFailures: Record<string, number> = {};
+let sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
 
 interface Thenable {
   from: () => Thenable;
@@ -66,6 +68,9 @@ jest.mock('@/lib/audit/stream', () => ({
 jest.mock('@/lib/registry/enroll-metrics', () => ({
   getEnrollFailureTotals: () => enrollFailures,
 }));
+jest.mock('@/lib/audit/sse-metrics', () => ({
+  getSseMetrics: () => sseMetrics,
+}));
 
 import { GET } from './route';
 
@@ -78,7 +83,19 @@ beforeEach(() => {
   insertFailures = 0;
   droppedCount = 0;
   enrollFailures = {};
+  sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
 });
+
+/**
+ * Every `name` / `name{labels}` sample line in a Prometheus text exposition,
+ * with its metric name. Comment lines are excluded.
+ */
+function sampleNames(text: string): string[] {
+  return text
+    .split('\n')
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) => l.split(/[{ ]/)[0]);
+}
 
 describe('GET /api/metrics — healthy DB', () => {
   it('emits all DB-derived gauges/counters plus process-local metrics', async () => {
@@ -213,11 +230,92 @@ describe('GET /api/metrics — enrollment failures with a fresh counter', () => 
   });
 });
 
+describe('GET /api/metrics — SSE stream lifecycle', () => {
+  it('emits all three series with their HELP/TYPE when nothing has ever connected', async () => {
+    // Zeros must be PRESENT, not omitted. A missing series reads as "no data"
+    // to an alert rule rather than "none yet" — which is precisely the blind
+    // spot that made issue #89 undiagnosable from outside the process.
+    const text = await (await GET()).text();
+    expect(text).toContain(
+      '# HELP aitp_control_plane_sse_streams_open /api/events/stream connections open right now on this replica',
+    );
+    expect(text).toContain('# TYPE aitp_control_plane_sse_streams_open gauge');
+    expect(text).toContain('aitp_control_plane_sse_streams_open 0');
+    expect(text).toContain(
+      '# TYPE aitp_control_plane_sse_streams_opened_total counter',
+    );
+    expect(text).toContain('aitp_control_plane_sse_streams_opened_total 0');
+    expect(text).toContain(
+      '# TYPE aitp_control_plane_sse_streams_rejected_total counter',
+    );
+    expect(text).toContain('aitp_control_plane_sse_streams_rejected_total 0');
+  });
+
+  it('tracks the values the SSE counters report', async () => {
+    sseMetrics = { open: 3, openedTotal: 11, rejectedTotal: 2 };
+    const text = await (await GET()).text();
+    expect(text).toContain('aitp_control_plane_sse_streams_open 3');
+    expect(text).toContain('aitp_control_plane_sse_streams_opened_total 11');
+    expect(text).toContain('aitp_control_plane_sse_streams_rejected_total 2');
+  });
+
+  it('takes the snapshot from the REAL module, so the wiring is not tested against a fabricated shape', async () => {
+    // The mock above is a hand-written object. If getSseMetrics() ever returned
+    // different field names, every assertion in this file would keep passing
+    // while the endpoint emitted `undefined`. Pin the contract to the module.
+    const actual = jest.requireActual<typeof import('@/lib/audit/sse-metrics')>(
+      '@/lib/audit/sse-metrics',
+    );
+    actual.resetSseMetrics();
+    actual.acquireSseSlot();
+    actual.acquireSseSlot();
+    actual.releaseSseSlot();
+    actual.recordSseRejected();
+    sseMetrics = actual.getSseMetrics();
+
+    const text = await (await GET()).text();
+    expect(text).toContain('aitp_control_plane_sse_streams_open 1');
+    expect(text).toContain('aitp_control_plane_sse_streams_opened_total 2');
+    expect(text).toContain('aitp_control_plane_sse_streams_rejected_total 1');
+    actual.resetSseMetrics();
+  });
+});
+
+describe('GET /api/metrics — exposition format', () => {
+  it('gives every emitted sample line a matching # HELP and # TYPE', async () => {
+    // A bare sample with no HELP/TYPE still scrapes, but loses its
+    // documentation and its declared type — and adding a series while
+    // forgetting one of the two comment lines is the easy mistake here, since
+    // they are three hand-written pushes per metric.
+    queuedResults = [
+      [{ c: 1 }],
+      [{ c: 1 }],
+      [{ c: 1 }],
+      [{ c: 1 }],
+      [{ c: 1 }],
+      [{ type: 'handshake.complete', c: 1 }],
+    ];
+    dropTotals = { events: 1 };
+    breakerSnaps = { wh1: { state: 'open' } };
+    enrollFailures = { signature_invalid: 1 };
+    sseMetrics = { open: 1, openedTotal: 1, rejectedTotal: 1 };
+
+    const text = await (await GET()).text();
+    const names = new Set(sampleNames(text));
+    expect(names.size).toBeGreaterThan(10);
+    for (const name of names) {
+      expect(text).toContain(`# HELP ${name} `);
+      expect(text).toContain(`# TYPE ${name} `);
+    }
+  });
+});
+
 describe('GET /api/metrics — DB unavailable', () => {
   it('still scrapes 200, flags db_up 0, and keeps process-local metrics', async () => {
     dbFail = true;
     dropTotals = { events: 1 };
     enrollFailures = { signature_invalid: 3, none: 0 };
+    sseMetrics = { open: 4, openedTotal: 9, rejectedTotal: 5 };
     const res = await GET();
     expect(res.status).toBe(200);
     const text = await res.text();
@@ -236,6 +334,13 @@ describe('GET /api/metrics — DB unavailable', () => {
     );
     expect(text).toContain('aitp_control_plane_admin_audit_insert_failures 0');
     expect(text).toContain('aitp_control_plane_event_backlog_dropped 0');
+    // SSE health is entirely independent of the database, and an SSE incident
+    // can coincide with a DB outage — so the stream series must survive one.
+    // Pins the "emit outside the try" requirement.
+    expect(text).toContain('aitp_control_plane_sse_streams_open 4');
+    expect(text).toContain('aitp_control_plane_sse_streams_opened_total 9');
+    expect(text).toContain('aitp_control_plane_sse_streams_rejected_total 5');
+    expect(text).toContain('# TYPE aitp_control_plane_sse_streams_open gauge');
     // Enrollment failures are in-process, so a dead DB must not hide them —
     // an enrollment incident and a DB outage can easily coincide.
     expect(text).toContain(

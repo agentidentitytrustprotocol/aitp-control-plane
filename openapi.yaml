@@ -693,7 +693,16 @@ paths:
       summary: Server-Sent Events live stream (with backlog replay)
       responses:
         "200":
-          description: text/event-stream
+          description: >-
+            text/event-stream. The first chunk is a prelude, not an event: a
+            `retry:` reconnect hint (tracking SSE_HEARTBEAT_MS, default 15000)
+            followed by a `: connected` comment frame. It is sent immediately on
+            connect, before the backlog replay, and is what flushes the response
+            headers. Periodic `: heartbeat` comment frames follow at the same
+            interval. Clients must tolerate comment frames (lines beginning ":")
+            and must not assume the first frame carries data; EventSource and
+            every conformant SSE parser already discard them. Events themselves
+            arrive as `data: <json>` frames.
           content:
             text/event-stream: { schema: { type: string } }
         "503": { description: SSE_CAPACITY — MAX_SSE_CONNECTIONS streams already open; back off and retry }

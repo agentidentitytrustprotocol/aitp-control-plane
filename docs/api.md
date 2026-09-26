@@ -239,6 +239,16 @@ Limits: a single batch must be ≤ 256 KiB on the wire, contain ≤ 500 events, 
 
 `text/event-stream`; each event is delivered as a `data: <json>\n\n` frame, replaying up to the last **100** backlog events then streaming live. (`MAX_AUDIT_EVENTS_MEMORY`, default 500, sizes the bus's total in-memory retention — not the per-subscriber replay.) Returns `503 SSE_CAPACITY` once `MAX_SSE_CONNECTIONS` (default 500) streams are already open — back off and retry.
 
+**The first bytes are a prelude, not an event.** Every accepted connection begins with a single chunk containing a `retry:` reconnect hint and a `: connected` comment frame:
+
+```
+retry: 15000
+: connected
+
+```
+
+**Clients must tolerate comment frames** (any line beginning `:`) and must not assume the first frame carries data — `EventSource` and every conformant SSE parser already discard comments, so no client change is needed. The prelude is sent before the backlog replay, and it is what puts the HTTP status line and response headers on the wire: without it a quiet control plane sends no headers at all until the first heartbeat, which any client with a shorter first-byte timeout sees as a hang. The `retry:` value is the server's advertised reconnect delay and tracks `SSE_HEARTBEAT_MS` (default 15000); the same interval also governs the periodic `: heartbeat` keepalive frames.
+
 ### Audit
 
 | Method | Path | Auth | Purpose |
@@ -336,4 +346,4 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 
 ## Lifecycle
 
-- `GET /api/readyz` returns `503` with `{ "ready": false, "reason": "shutting_down" }` once the process has received SIGTERM, so a load balancer can drain the pod before it exits. `GET /api/health` continues to return `200` during the drain window. See [`operations.md`](operations.md#graceful-shutdown).
+- `GET /api/readyz` returns `503` with `{ "ready": false, "reason": "shutting_down" }` once the process has received SIGTERM, so a load balancer can drain the pod before it exits. `GET /api/health` continues to return `200` during the drain window. See [`operations.md`](operations.md#health-readiness--graceful-shutdown).
