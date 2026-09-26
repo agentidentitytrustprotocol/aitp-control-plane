@@ -106,8 +106,17 @@ never runs, and in the artifact that actually deploys nothing tested it.
 It has two halves. The **static** half asserts against the built artifact and
 needs no server and no database. The **live** half stands up a real deployment —
 its own private network, its own Postgres, the repo's own migrations — and runs
-the image against it. Gate attachment, the signing path and the CORS
-build-freeze build on that live substrate and are documented here as they land.
+the image against it, which is where **gate attachment is proven in the artifact
+that actually deploys**. The signing path and the CORS build-freeze build on that
+same substrate and are documented here as they land.
+
+The two harnesses are **deliberately not merged**. `verify:gate` owns the
+`next start` path — a real developer workflow — and owns its own build, because it
+must bake a `CORS_ORIGIN` that differs from the runtime one. This one owns the
+standalone Docker artifact and does not own the build; the `Dockerfile` does. It
+also does not re-prove the gate's *logic*: the rate-limit bucket assertions need
+isolated per-IP buckets and are already covered against a running server by the
+sibling. Duplicated assertions rot at different rates.
 
 ```sh
 npm run verify:image                        # host platform
@@ -172,6 +181,62 @@ publishes an **empty but validly signed** list. A signature check would then pas
 against an image whose database access is completely broken, and `/api/audit` with
 a valid key would answer 500, leaving no way to tell an attached gate from one
 that rejects everything. An unmigrated harness is a harness that lies.
+
+Then **gate attachment**, which is the gap the whole effort is named for. Auth,
+rate limiting and CORS live in `src/proxy.ts`; a gate file in a location Next does
+not recognise builds green, emits no warning, and leaves every `/api/*` route
+unauthenticated. `verify:gate` cannot see that in the standalone output, because
+`next start` cannot run it. So against the running image:
+
+- Unauthenticated `GET /api/audit` → **401** *and* `code: INVALID_API_KEY`.
+  `/api/audit` is genuinely gated — absent from `PUBLIC_PATHS`, matching no public
+  GET pattern — and is a different handler from the one the sibling probes, so a
+  shared-fixture mistake cannot make both harnesses agree wrongly.
+- The same request **with** a valid key reaches the handler. Without this half, a
+  gate that rejected everything unconditionally would satisfy the check above.
+- **`x-request-id` on both.** The gate injects it, so its presence is evidence the
+  gate *ran*, not merely that something answered 401.
+- `OPTIONS` → **204** with an empty body, answered by the gate without ever
+  reaching a handler.
+
+- **The gate's matcher set is exactly the pinned one.** This is what keeps the four
+  above from being vacuous, and it is an *equality against a committed value*
+  (`middlewareMatchers` in `scripts/image-artifact-baseline.json`) rather than a test
+  of what the matcher satisfies. Any matcher key beyond `regexp`/`originalSource`
+  fails closed, and the built-route count is pinned as well.
+
+  That shape was arrived at the hard way. Three earlier versions tested
+  *satisfaction* and each fell to a one-line edit of `src/proxy.ts`:
+
+  | matcher | what it defeated | what leaked |
+  |---|---|---|
+  | `['/api/audit']` | a one-path HTTP probe | the whole admin surface |
+  | `['/api/audit','/api/webhooks','/api/health']` | a three-path probe | 5 routes, incl. the sibling harness's own |
+  | `['/api/:path([^0-9]+)']` | testing the built route list | all 10 dynamic routes — the check substitutes a literal `a` per `[param]`, and `a` has no digit, so every route "matched" while every real id did not |
+  | `{source:'/api/:path*', missing:[{type:'header',key:'cookie'}]}` | all of the above, *source unchanged* | everything, to any request with a cookie |
+
+  The last is the instructive one: Next enforces `has`/`missing` at **runtime**, so
+  the matcher looked correct in every check while `GET /api/audit` with a cookie —
+  i.e. any browser request — returned the admin audit log. A sampled predicate can
+  always be satisfied by something narrower than it appears to be, which is why the
+  matcher itself is pinned and unknown conditions are rejected rather than ignored.
+
+  (Read from `functions-config-manifest.json`, not `middleware-manifest.json` — the
+  latter is `{"middleware":{},"sortedMiddleware":[]}` in this image *and* in one whose
+  gate is correctly attached, so a check against it would be green forever. The
+  former is load-bearing at runtime: delete it and the server refuses to boot.)
+
+- **The gate actually runs**, on a second gated route under a different top-level
+  segment and on a public route that must still carry the injected `x-request-id`.
+  This is the behavioural complement: a manifest can show the matcher covers a route
+  but not that the gate does anything when it runs.
+
+It asserts the **wire contract, not the status code**: a 401 without
+`code: INVALID_API_KEY` is a different failure wearing the right status. And empty
+`API_KEYS` under `NODE_ENV=production` makes the gate answer `503
+SERVER_MISCONFIGURED` instead, which is reported as its own distinct failure —
+otherwise it would read as "wrong status" and send you looking at the gate when the
+problem is the environment.
 
 The health assertion checks `db` **before** the HTTP status, deliberately.
 `/api/health` answers 503 whenever the DB ping fails, so a status-first assertion

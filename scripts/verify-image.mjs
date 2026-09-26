@@ -22,9 +22,26 @@
  * run against them — with `/api/health` asserted to report `db: "ok"` and an AID
  * equal to one derived independently from `CP_AID_SEED_HEX` on the host.
  *
- * What is NOT here yet: gate attachment, the revocation signing path and the CORS
- * build-freeze, which land in later commits of this series. The substrate they
- * need now exists; nothing below should be read as already asserting them.
+ * On that substrate, GATE ATTACHMENT — the gap #68 is named for: an unauthenticated
+ * /api/audit is rejected 401 with `code: INVALID_API_KEY`, a valid key reaches the
+ * handler, `x-request-id` is injected on both, and OPTIONS is answered 204 by the
+ * gate without reaching a handler.
+ *
+ * Plus the check that stops all of those being vacuous, which is a PINNED EQUALITY
+ * rather than a test of what the matcher satisfies. The gate's matcher set is read
+ * out of the image's own .next/server/functions-config-manifest.json and compared to
+ * `middlewareMatchers` in the committed baseline, and any matcher key beyond
+ * regexp/originalSource fails closed. Three earlier versions of this check tested
+ * satisfaction — over HTTP at one path, then at three, then against the whole built
+ * route list — and each was defeated by a ONE-LINE matcher edit, because a sampled
+ * predicate can always be satisfied by something narrower than it looks. The route
+ * count is pinned too, so a manifest that under-reports cannot make the coverage
+ * cross-check vacuous. A behavioural probe of a second gated route and a public route
+ * sits alongside it, catching a matcher that is correct but whose gate is inert.
+ *
+ * What is NOT here yet: the revocation signing path and the CORS build-freeze,
+ * which land in later commits of this series. Nothing below should be read as
+ * already asserting those two.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -36,16 +53,16 @@
  *     environment — the Dockerfile does.
  * Duplicated assertions rot at different rates.
  *
- * SCOPE LINE, for when the HTTP checks do land. This harness proves ATTACHMENT
- * AND LOADING IN THE STANDALONE ARTIFACT. It must never re-prove the gate's
+ * SCOPE LINE. This harness proves ATTACHMENT AND LOADING IN THE STANDALONE
+ * ARTIFACT. It must never re-prove the gate's
  * logic: the rate-limit bucket checks need isolated per-IP buckets via
  * CLIENT_IP_HEADER and are already covered against a running server by the
  * sibling harness.
  *
  * ── THE CONTRACT THIS FILE IS HELD TO ─────────────────────────────────────
- * Rules 1 and 3 bind the HTTP checks that are still to come; they are written
- * here, ahead of the code, because they are the reason those checks will be
- * worth having. Rule 2 is in force now.
+ * Rule 1 binds the CORS check that is still to come; it is written here, ahead of
+ * the code, because it is the reason that check will be worth having. Rules 2 and 3
+ * are in force now.
  *   1. THE RUNTIME ENVIRONMENT DIFFERS FROM THE BUILD ENVIRONMENT. When the CORS
  *      check lands it must assert the served header equals the RUNTIME value AND
  *      differs from the value baked into the Dockerfile — parsed out of the
@@ -57,6 +74,7 @@
  *      `scripts/image-artifact-baseline.json`. IN FORCE NOW.
  *   3. ASSERT THE WIRE CONTRACT, NOT THE STATUS CODE. A 401 without
  *      `code: INVALID_API_KEY` is a different failure wearing the right status.
+ *      IN FORCE NOW, in checks 8-10.
  *
  * RESOURCE LIFECYCLE — the part a past incident dictates.
  * `verify-request-gate.mjs` records a CI job that passed every check and then
@@ -850,6 +868,64 @@ process.stdout.write(JSON.stringify({ error: error, files: files }));
 `;
 
 /**
+ * Read the middleware matchers and the full built-route list out of the image.
+ *
+ * WHY STATIC RATHER THAN MORE HTTP PROBES. Any FINITE set of probed paths can be
+ * satisfied by a matcher that enumerates exactly those paths. Measured, twice: a
+ * matcher of `['/api/audit']` defeats a one-path probe set, and
+ * `['/api/audit', '/api/webhooks', '/api/health']` defeats the three-path set that
+ * replaced it — 11/11 green while /api/sessions, /api/tcts, /api/delegations,
+ * /api/trust-anchors and /api/pinned-keys all answered anonymously, and an
+ * anonymous POST reached a handler's body validation. Adding a fourth probe just
+ * moves the goalposts one token. The artifact RECORDS the matcher, so the whole
+ * tree can be checked instead of sampled.
+ *
+ * The regexps are evaluated INSIDE the container by the same Node that serves the
+ * app, so this borrows Next's own compiled semantics rather than reimplementing
+ * path-to-regexp on the host and hoping the two agree.
+ *
+ * NOT `middleware-manifest.json`: it is `{"middleware":{},"sortedMiddleware":[]}`
+ * in this image — and, verified, also in an image whose gate IS attached — so a
+ * check written against it would be vacuously green forever.
+ */
+const PROBE_MIDDLEWARE = `
+const P = '/app/.next/server/functions-config-manifest.json';
+let error = null, routes = [], matchers = [], uncovered = [];
+try {
+  const f = require(P).functions || {};
+  const mw = f['/_middleware'];
+  // Carry the matcher objects WHOLE. Keeping only regexp/originalSource dropped
+  // \`has\`/\`missing\` conditions, which Next enforces at runtime — so a matcher of
+  // { source: '/api/:path*', missing: [{type:'header',key:'cookie'}] } looked
+  // IDENTICAL to the correct one while any request carrying a cookie (i.e. every
+  // browser request) bypassed the gate entirely. Measured: GET /api/audit with a
+  // cookie returned the admin audit log. Unknown keys are the danger, so report
+  // them all and let the host decide.
+  matchers = ((mw && mw.matchers) || []).map(function (m) {
+    const out = {};
+    Object.keys(m).sort().forEach(function (k) { out[k] = m[k]; });
+    return out;
+  });
+  const res = matchers.map(function (m) { return new RegExp(m.regexp); });
+  routes = Object.keys(f)
+    .filter(function (k) { return k === '/api' || k.indexOf('/api/') === 0; })
+    .sort();
+  // Dynamic segments must become something concrete before they can be tested.
+  // Catch-alls first, so [...slug] is not eaten by the single-segment pattern.
+  uncovered = routes.filter(function (r) {
+    const c = r
+      .replace(/\\[\\[\\.\\.\\.[^\\]]+\\]\\]/g, 'a/b')
+      .replace(/\\[\\.\\.\\.[^\\]]+\\]/g, 'a/b')
+      .replace(/\\[[^\\]]+\\]/g, 'a');
+    return !res.some(function (re) { return re.test(c); });
+  });
+} catch (e) { error = String((e && e.message) || e); }
+process.stdout.write(JSON.stringify({
+  error: error, routes: routes, matchers: matchers, uncovered: uncovered,
+}));
+`;
+
+/**
  * Run one probe script inside the image and parse its single JSON line.
  *
  * The container is named and registered for teardown BEFORE it is started, so a
@@ -1544,6 +1620,7 @@ async function main() {
   const otel = await probe(opts.tag, platform, 'otel', PROBE_OTEL);
   const sweep = await probe(opts.tag, platform, 'sweep', PROBE_SWEEP);
   const native = await probe(opts.tag, platform, 'native', PROBE_NATIVE);
+  const middleware = await probe(opts.tag, platform, 'middleware', PROBE_MIDDLEWARE);
 
   // These two run BEFORE any check, so they must tolerate a failed probe without
   // throwing — the whole point of the named-check machinery is that a probe
@@ -1557,6 +1634,13 @@ async function main() {
   const nativeModules = [
     ...new Set(probeList(native, 'files').map(normaliseNativePath)),
   ].sort();
+  // The gate's matcher set and the built-route count are pinned rather than
+  // recomputed, because every satisfaction-test of the matcher has been defeated by
+  // a one-line edit. See check 11.
+  const middlewareMatchers = probeList(middleware, 'matchers')
+    .map((m) => m.originalSource ?? '(no originalSource)')
+    .sort();
+  const apiRouteCount = probeList(middleware, 'routes').length;
 
   // ── structural checks ────────────────────────────────────────────────────
   //
@@ -1744,6 +1828,7 @@ async function main() {
       });
       const t = diff(prev.tracedExternals ?? [], tracedExternals);
       const n = diff(prev.nativeModules ?? [], nativeModules);
+      const mw = diff(prev.middlewareMatchers ?? [], middlewareMatchers);
       const show = (title, d) => {
         if (!d.added.length && !d.removed.length) {
           console.log(`  ${title}: unchanged`);
@@ -1756,10 +1841,20 @@ async function main() {
       console.log('\nbaseline diff (existing -> this image):');
       show('tracedExternals', t);
       show('nativeModules', n);
+      show('middlewareMatchers', mw);
+      if (prev.apiRouteCount !== apiRouteCount) {
+        console.log(`  apiRouteCount: ${prev.apiRouteCount} -> ${apiRouteCount}`);
+      } else {
+        console.log('  apiRouteCount: unchanged');
+      }
 
       const removed = [
         ...t.removed.map((s) => `tracedExternals: ${s}`),
         ...n.removed.map((s) => `nativeModules: ${s}`),
+        // A matcher disappearing means the gate stopped covering routes. That is the
+        // most consequential removal this baseline can record, so it needs the same
+        // explicit consent as the others.
+        ...mw.removed.map((s) => `middlewareMatchers: ${s}`),
       ];
       if (removed.length && !opts.allowRemovals) {
         fail(
@@ -1785,11 +1880,19 @@ async function main() {
         '@grpc/grpc-js is listed without ever being traced. `nativeModules` is every ' +
         '.node under /app with the arch token replaced by <ARCH> and a trailing ' +
         '-<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. ' +
+        '`middlewareMatchers` is the request gate\'s matcher set and `apiRouteCount` the ' +
+        'number of built /api/* routes; both are PINNED rather than recomputed, because ' +
+        'every attempt to verify the matcher by testing what it satisfies was defeated ' +
+        'by a one-line edit (see check 11). ' +
         'Review every line by hand: a new entry means a new external or a new native ' +
-        'binary shipped, and a missing entry means one stopped shipping.',
+        'binary shipped, a missing entry means one stopped shipping, and any change to ' +
+        'middlewareMatchers or apiRouteCount is a security review — the first changes ' +
+        'what the gate covers, the second means a route appeared or vanished.',
       _regenerate: 'node scripts/verify-image.mjs --update-baseline',
       tracedExternals,
       nativeModules,
+      middlewareMatchers,
+      apiRouteCount,
     };
     writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + '\n');
     console.log(`\nbaseline written: ${BASELINE_PATH}`);
@@ -1951,6 +2054,243 @@ async function main() {
     // Print expectedAid, not r.body.aid: they are asserted equal just above, but the
     // label says "derived on the host", so the host's value is the honest one to show.
     return `db=ok  aid=${expectedAid}\n(derived independently on the host from CP_AID_SEED_HEX)`;
+  });
+
+  // ── gate attachment in the image (the gap #68 is named for) ──────────────
+  //
+  // ASSERT THE WIRE CONTRACT, NOT THE STATUS CODE. A 401 without
+  // `code: INVALID_API_KEY` is a different failure wearing the right status.
+  //
+  // `/api/audit` is the right probe: it is absent from PUBLIC_PATHS in src/proxy.ts
+  // and matches none of the public GET patterns, so it is genuinely gated. It also
+  // exercises a different handler from the one the sibling harness probes, so a
+  // shared-fixture mistake cannot make both harnesses agree wrongly.
+  //
+  // SCOPE LINE. This proves ATTACHMENT in the standalone artifact. It deliberately
+  // does NOT re-prove the gate's logic: the rate-limit bucket checks need isolated
+  // per-IP buckets via CLIENT_IP_HEADER and are already covered against a running
+  // server by scripts/verify-request-gate.mjs. Duplicated assertions rot at
+  // different rates. Do not "complete" this by copying that harness's 15 checks.
+  await runCheck(8, 'the gate rejects an unauthenticated /api/audit', async () => {
+    const r = await httpReq(app.base, '/api/audit');
+    // Distinguish this case explicitly: it means API_KEYS never reached the
+    // container, so the run was not exercising the auth path at all. Reported as
+    // "wrong status" it would send a reader looking at the gate instead of the env.
+    if (r.status === 503 && r.body?.code === 'SERVER_MISCONFIGURED') {
+      fail(
+        'got 503 SERVER_MISCONFIGURED rather than 401 — API_KEYS did not reach the ' +
+          'container, so this run never exercised the auth path. Empty API_KEYS under ' +
+          'NODE_ENV=production makes the gate fail closed with this code instead of ' +
+          'checking the key.',
+      );
+    }
+    if (r.status !== 401) {
+      fail(`status ${r.status}, expected 401 (body: ${JSON.stringify(r.body)})`);
+    }
+    if (r.body?.code !== 'INVALID_API_KEY') {
+      fail(
+        `body.code is ${JSON.stringify(r.body?.code)}, expected "INVALID_API_KEY". The ` +
+          'status alone is not the contract — a 401 from somewhere else wears it too.',
+      );
+    }
+    // The gate injects x-request-id, so its presence is evidence the gate RAN,
+    // rather than that some handler happened to answer 401.
+    if (!r.headers.get('x-request-id')) {
+      fail('no x-request-id on the response, so the gate did not run');
+    }
+    return `401 INVALID_API_KEY, x-request-id=${r.headers.get('x-request-id')}`;
+  });
+
+  await runCheck(9, 'a valid API key reaches the handler', async () => {
+    // The non-vacuity half. Without it, a gate that rejected EVERYTHING
+    // unconditionally — or an image serving a stub that always 401s — would satisfy
+    // check 8 completely.
+    const r = await httpReq(app.base, '/api/audit', { key: API_KEY });
+    if (r.status === 401 || r.status === 503) {
+      fail(
+        `status ${r.status} WITH a valid key — the handler was not reached, so check 8's ` +
+          'rejection proves nothing about the key actually being checked.',
+      );
+    }
+    if (r.status === 500) {
+      fail(
+        'status 500 with a valid key. The gate let the request through but the handler ' +
+          'failed — against this substrate that almost always means the migrations did ' +
+          'not apply, so admin_audit_log does not exist.',
+      );
+    }
+    if (r.status !== 200) fail(`status ${r.status} (body: ${JSON.stringify(r.body)})`);
+    if (!r.headers.get('x-request-id')) {
+      fail('no x-request-id on the authenticated response');
+    }
+    return `200 with a valid key, x-request-id present`;
+  });
+
+  await runCheck(10, 'the gate answers the CORS preflight itself', async () => {
+    // NOTE, and do not "simplify" this away: the 204 and the empty body are NOT
+    // attributable to the gate. Next answers OPTIONS 204/empty by itself — measured
+    // on a gate-less image, where this check failed ONLY on the missing header. The
+    // x-request-id assertion is the entire load-bearing part; the status and body
+    // assertions are there to catch a handler answering the preflight instead.
+    const r = await httpReq(app.base, '/api/audit', { method: 'OPTIONS' });
+    if (r.status !== 204) fail(`status ${r.status}, expected 204`);
+    if (r.text !== '') {
+      fail(`expected an empty body, got ${JSON.stringify(r.text.slice(0, 200))}`);
+    }
+    if (!r.headers.get('x-request-id')) fail('no x-request-id on the preflight response');
+    return '204, empty body, x-request-id present';
+  });
+
+  await runCheck(11, 'the middleware matcher set is exactly the pinned one', async () => {
+    // WHY THIS IS PINNED AND NOT COMPUTED.
+    //
+    // Two earlier versions of this check tested whether the matcher SATISFIED a set
+    // of paths — first by probing over HTTP, then by testing the built route list
+    // against the matcher regexp. Both were defeated by one-line matcher edits,
+    // because satisfaction-testing always samples:
+    //
+    //   ['/api/audit']                       defeated the 1-path HTTP probe
+    //   ['/api/audit','/api/webhooks','/api/health']  defeated the 3-path probe
+    //   ['/api/:path([^0-9]+)']              defeated route-list testing — the
+    //       probe substitutes a literal 'a' for each [param], and 'a' has no digit,
+    //       so all 30 routes "matched" while every real id (digits, uuids) did not.
+    //       Anonymous POST /api/webhooks/1/circuit-breaker/reset returned 200.
+    //   [{source:'/api/:path*', missing:[{type:'header',key:'cookie'}]}]
+    //       defeated it again with the source UNCHANGED: Next enforces `missing` at
+    //       runtime, so every request carrying a cookie skipped the gate, and
+    //       GET /api/audit with a cookie returned the admin audit log.
+    //
+    // A sampled predicate can always be satisfied by something narrower than it
+    // looks. So this asserts the matcher set ITSELF against a committed value —
+    // rule 2 of this file's contract — and rejects ANY key beyond the two we have
+    // reasoned about, because the second break above lived entirely in an extra
+    // key. That makes unknown future matcher options fail closed instead of
+    // silently widening what the gate lets past.
+    requireProbe(middleware, 'middleware');
+    if (middleware.error) {
+      fail(`could not read the middleware config out of the image: ${middleware.error}`);
+    }
+    const expected = baseline.middlewareMatchers;
+    if (!Array.isArray(expected) || !expected.length) {
+      fail(
+        'scripts/image-artifact-baseline.json has no `middlewareMatchers`. That is the ' +
+          'pinned expectation this check compares against; without it the check would be ' +
+          'vacuous. Regenerate the baseline.',
+      );
+    }
+    const got = middleware.matchers ?? [];
+    if (!got.length) {
+      fail(
+        'the image records NO middleware matchers, so the gate is attached to nothing ' +
+          'and every /api/* route is served with no auth, no rate limiting and no CORS.',
+      );
+    }
+    // Only these two keys have been reasoned about. `has`, `missing`, `locale`,
+    // `regexp`-adjacent additions and anything Next adds later all land here.
+    const ALLOWED = new Set(['regexp', 'originalSource']);
+    const offenders = got.flatMap((m) =>
+      Object.keys(m)
+        .filter((k) => !ALLOWED.has(k))
+        .map((k) => `  matcher ${JSON.stringify(m.originalSource ?? '?')} carries \`${k}\`: ${JSON.stringify(m[k])}`),
+    );
+    if (offenders.length) {
+      fail(
+        'a middleware matcher carries a condition this harness has not reasoned about:\n' +
+          offenders.join('\n') +
+          '\n\nNext enforces `has`/`missing` at RUNTIME while leaving the source unchanged, ' +
+          'so such a matcher looks correct in every other check while letting requests ' +
+          'past the gate. Measured: `missing: [{type:"header",key:"cookie"}]` lets any ' +
+          'request with a cookie — i.e. any browser request — read /api/audit ' +
+          'anonymously. If the condition is intended, reason about it here and add the ' +
+          'key to ALLOWED deliberately.',
+      );
+    }
+    const gotSources = got.map((m) => m.originalSource ?? '(no originalSource)').sort();
+    const wantSources = [...expected].sort();
+    if (JSON.stringify(gotSources) !== JSON.stringify(wantSources)) {
+      fail(
+        'the middleware matcher set does not match the pinned one:\n' +
+          `  pinned: ${JSON.stringify(wantSources)}\n` +
+          `  image:  ${JSON.stringify(gotSources)}\n\n` +
+          'Every route the matcher no longer covers is served with no auth, no rate ' +
+          'limiting and no CORS. If the change is intended, review it as a security ' +
+          'change and then regenerate with --update-baseline.',
+      );
+    }
+    // Defence in depth, and a useful diagnostic: the pinned source should also, in
+    // fact, cover every built route. This cannot be the primary assertion (see
+    // above) but a disagreement between the two means something unmodelled.
+    if (middleware.uncovered?.length) {
+      fail(
+        `the matcher set matches the pinned value, yet ${middleware.uncovered.length} of ` +
+          `${middleware.routes.length} built /api/* routes are not matched by its regexp:\n` +
+          middleware.uncovered.map((r) => `  ${r}`).join('\n') +
+          '\n\nThat disagreement should be impossible; treat it as the regexp semantics ' +
+          'having changed under us rather than as a routing problem.',
+      );
+    }
+    // A route list that under-reports would make the coverage half vacuous — a
+    // trimmed manifest passed with 3 routes. Pin the count too.
+    const wantCount = baseline.apiRouteCount;
+    if (!Number.isInteger(wantCount)) {
+      fail('scripts/image-artifact-baseline.json has no integer `apiRouteCount`');
+    }
+    if (middleware.routes.length !== wantCount) {
+      fail(
+        `the image reports ${middleware.routes.length} built /api/* routes, but the ` +
+          `baseline pins ${wantCount}. A NEW route is a review point — is it gated, or ` +
+          'does it belong in PUBLIC_PATHS? A MISSING one means a route stopped building, ' +
+          'or the manifest is under-reporting and the coverage check above went vacuous.',
+      );
+    }
+    return (
+      `matchers: ${gotSources.join(', ')} (pinned, no unexpected conditions); ` +
+      `${middleware.routes.length} built /api/* routes, all covered`
+    );
+  });
+
+  await runCheck(12, 'the gate really runs on a second gated route and a public one', async () => {
+    // The BEHAVIOURAL half, kept alongside check 11's structural one because they
+    // fail on different things. Check 11 proves the matcher covers the tree as
+    // BUILT; this proves the gate actually executes for more than the one path the
+    // earlier checks probe — catching a gate that is matched but inert, which no
+    // manifest can show.
+    //
+    // Two probes, because they fail on different halves of the problem:
+    //
+    // 1. A SECOND genuinely gated route, under a different top-level segment.
+    //    /api/webhooks is gated and is not probed by scripts/verify-request-gate.mjs
+    //    (which uses /api/sessions), so the two harnesses stay independent.
+    // 2. A PUBLIC route. The gate runs for every /api/* path, injecting
+    //    x-request-id even where it does not reject — so a matcher that no longer
+    //    covers a path loses the header there. This is the broad signal: it fails
+    //    for any narrowing that excludes /api/health, whatever the gated routes do.
+    //
+    // Still ATTACHMENT, not gate logic: no rate-limit buckets, no per-route policy.
+    const gated = await httpReq(app.base, '/api/webhooks');
+    if (gated.status !== 401 || gated.body?.code !== 'INVALID_API_KEY') {
+      fail(
+        `unauthenticated GET /api/webhooks answered ${gated.status} ` +
+          `${JSON.stringify(gated.body?.code)}, expected 401 INVALID_API_KEY. ` +
+          'If check 8 passed, the gate is attached to some paths and not this one — a ' +
+          'narrowed matcher in src/proxy.ts. If check 8 failed too, the gate is not ' +
+          'running at all. Either way every /api/* route it does not cover is served ' +
+          'with no auth, no rate limiting and no CORS.',
+      );
+    }
+    // Public and rate-limit exempt, so this asserts only that the gate ran.
+    const pub = await httpReq(app.base, '/api/health');
+    if (!pub.headers.get('x-request-id')) {
+      fail(
+        'GET /api/health carries no x-request-id. That header is injected by the gate ' +
+          'on its pass-through path, so its absence means the gate does not run for ' +
+          '/api/health at all — the matcher no longer covers the whole /api/* tree.',
+      );
+    }
+    return (
+      '/api/webhooks -> 401 INVALID_API_KEY (a second gated route); ' +
+      '/api/health carries x-request-id (the gate runs on public paths too)'
+    );
   });
 
   const failures = results.filter((r) => !r.ok).length;

@@ -200,16 +200,30 @@ jobs:
   # traced external present is a symlink that resolves, and that the `.node`
   # inventory matches scripts/image-artifact-baseline.json including the arch
   # token. It then RUNS the image against an ephemeral Postgres on a private
-  # network, applies the repo's own migrations, and asserts /api/health reports
-  # `db: "ok"` and the AID that CP_AID_SEED_HEX derives to.
+  # network, applies the repo's own migrations, asserts /api/health reports
+  # `db: "ok"` and the AID that CP_AID_SEED_HEX derives to, and asserts THE REQUEST
+  # GATE IS ATTACHED in the standalone artifact.
   #
-  # `verify:gate` in build-and-test covers the request gate, but only under
-  # `next start` — which next.config.ts records as incompatible with
-  # `output: 'standalone'`, so it proves the gate in a configuration the image
-  # never runs. Closing that half (gate attachment, the signing path and the CORS
-  # build-freeze, all against the live substrate this job now stands up) is the
-  # rest of #68 and arrives in later commits; this comment is updated when it
-  # does.
+  # That last part is why this job exists. `verify:gate` in build-and-test covers
+  # the gate, but only under `next start` — which next.config.ts records as
+  # incompatible with `output: 'standalone'`, so it proves the gate in a
+  # configuration the image never runs. Demonstrated, not assumed: an image built
+  # with src/proxy.ts renamed to a filename Next does not recognise passes every
+  # static check and the health check, then serves the admin audit log to an
+  # unauthenticated caller — `200 {"entries":[],"count":0}` where a 401 belongs.
+  # That image builds green and docker-build-check would ship it.
+  #
+  # The gate's matcher set is PINNED against the committed baseline rather than
+  # tested for what it satisfies, because three successive satisfaction-tests were
+  # each defeated by a one-line matcher edit: '/api/audit' alone; then the three
+  # paths the probes happened to hit; then '/api/:path([^0-9]+)', which matches
+  # every route name but no real id, ungating all ten dynamic routes. The last one
+  # left the source UNCHANGED — a `missing: [{type:"header",key:"cookie"}]`
+  # condition, which Next enforces at runtime, so any request with a cookie read
+  # /api/audit anonymously. Unknown matcher keys therefore fail closed.
+  #
+  # Still to come in this series: the revocation signing path and the CORS
+  # build-freeze. This comment is updated when they land.
   #
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
   # wrong architecture, or whose traced externals had stopped resolving, would
