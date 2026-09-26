@@ -141,6 +141,61 @@ or are trivially bypassed. Match them to your actual edge.
 If you front the CP with a fan-out proxy that opens its own upstream pool, raise
 `MAX_SSE_CONNECTIONS` accordingly.
 
+### Keepalive: `SSE_HEARTBEAT_MS`
+
+**`SSE_HEARTBEAT_MS`** (default `15000`) sets two things at once: the interval
+between `: heartbeat` comment frames on an open stream, and the `retry:`
+reconnect delay the stream advertises to `EventSource` clients in its connect
+prelude.
+
+**Tune it against your edge's idle timeout, which is the only thing it is for.**
+A proxy or load balancer that closes idle connections after N seconds will drop
+an SSE stream that has been quiet for N seconds, and the heartbeat exists purely
+to stop that from happening. So the interval must sit **below** the timeout:
+
+- Common edge idle timeouts are 30-60 s, which is why the default is 15 s.
+- If streams are dying on a fixed cadence shorter than 15 s, set this below that
+  cadence. `sse_streams_opened_total` climbing while `sse_streams_open` stays
+  flat is the signature (see "Is the stream healthy?" immediately below).
+- Above 60 s the CP logs a warning at boot, but does not override you — a
+  deployment behind an edge with a long or absent idle timeout may legitimately
+  want a slow heartbeat.
+
+Five behaviours worth knowing before you change it:
+
+- **It is clamped to a 1000 ms floor.** `SSE_HEARTBEAT_MS=0` and negative values
+  are *accepted* by the env parser (`"0"` is a non-empty string, so it is not
+  treated as unset) and would make `setInterval` fire roughly every millisecond
+  on every open stream — a CPU spin and a bandwidth flood. Values below the floor
+  are raised to it rather than replaced by the default, so an explicit "as fast
+  as possible" still means "as fast as we allow". A **non-numeric** value is
+  different: there is no intent to preserve, so it falls back to `15000`.
+- **It is also clamped to a 2147483647 ms ceiling**, for the same reason as the
+  floor rather than as a policy about slow heartbeats. `setInterval` keeps its
+  delay in a signed 32-bit int, so a larger delay overflows and Node **resets it
+  to 1 ms** — an extra-zeros typo like `SSE_HEARTBEAT_MS=15000000000`, meaning
+  "basically never", would produce the exact millisecond flood the floor exists
+  to prevent. The ceiling is ~24.8 days, so it cannot override any interval a
+  real deployment would pick, and the boot log says explicitly when it has
+  clamped (naming both the value you set and the value in force).
+- **It is read once, at boot.** The config object is built at module load, so
+  changing the variable on a running instance has no effect until the process
+  restarts (on Railway, an env change triggers one).
+- **It also sets the clients' reconnect delay, so lowering it is not free.** The
+  prelude advertises `retry: <this value>`, and a browser `EventSource` waits
+  that long before reconnecting. Browsers default to roughly 3 s, so any value
+  *below* ~3000 ms makes disconnected clients come back **faster** than they
+  otherwise would — into `MAX_SSE_CONNECTIONS` and the rate limiter. If you need
+  a sub-3 s heartbeat to survive an aggressive edge, expect the reconnect rate to
+  rise with it and check `sse_streams_rejected_total`.
+- **It is no longer load-bearing for connect.** The stream writes its prelude
+  immediately on connect, so response headers reach the client in milliseconds
+  regardless of this setting. It used to be the *only* thing that ever wrote a
+  byte on a quiet control plane, and because Next defers the response headers
+  until the first body chunk, that meant no client saw an HTTP status line for
+  15 seconds. Lowering this value is therefore no longer a fix for a stream that
+  seems not to respond at all.
+
 ### Is the stream healthy? (three metrics, no log access needed)
 
 `/api/metrics` is public and rate-limit exempt, so these answer the question

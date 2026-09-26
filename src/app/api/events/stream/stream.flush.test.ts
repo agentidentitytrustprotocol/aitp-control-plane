@@ -32,6 +32,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { pipeToNodeResponse } from 'next/dist/server/pipe-readable';
 import { NextRequest } from 'next/server';
+import { config } from '@/lib/config';
 import { GET } from './route';
 
 // Generous relative to the ~80ms measured against a real container, but far
@@ -169,8 +170,14 @@ describe('GET /api/events/stream through Next’s Node adapter', () => {
     expect(head).toContain('x-accel-buffering: no');
     expect(head).toContain('transfer-encoding: chunked');
 
-    // And the first body bytes are the prelude comment frame.
-    expect(text).toContain(': connected\n\n');
+    // And the first body bytes are the prelude: the reconnect hint followed by
+    // the comment frame, in one chunk. Expected value derived from the real
+    // config (not the mocked one the unit tests use), so this pins that the wire
+    // AGREES with config at the default. It does not pin that the value tracks
+    // SSE_HEARTBEAT_MS — with the variable unset both sides are 15000, and a
+    // route that hardcoded `retry: 15000` would still pass here (measured). The
+    // tracking is pinned in stream.test.ts, which varies the mocked config.
+    expect(text).toContain(`retry: ${config.sseHeartbeatMs}\n: connected\n\n`);
   });
 
   it('flushes just as fast on a second connection to the same process', async () => {
@@ -187,7 +194,12 @@ describe('GET /api/events/stream through Next’s Node adapter', () => {
     expect(first.text).toMatch(/^HTTP\/1\.1 200 OK\r\n/);
     expect(second.text).toMatch(/^HTTP\/1\.1 200 OK\r\n/);
     expect(second.firstByteMs).toBeLessThan(FLUSH_BUDGET_MS);
-    expect(second.text).toContain(': connected\n\n');
+    // The full prelude both times, not just the comment frame: a second
+    // connection must get the reconnect hint too, since it is the one most
+    // likely to BE a reconnect.
+    const wire = `retry: ${config.sseHeartbeatMs}\n: connected\n\n`;
+    expect(first.text).toContain(wire);
+    expect(second.text).toContain(wire);
   });
 
   // NOT asserted here, on purpose: the absence of `content-encoding` when the

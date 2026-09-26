@@ -1,10 +1,11 @@
 // Unit tests for GET /api/events/stream (SSE) — verifies:
-//   • the connect-time prelude: a `: connected` comment frame is the first
-//     chunk enqueued, even with an empty backlog and no publish. This is the
-//     #89 regression guard — without it Next never calls res.flushHeaders()
-//     and the client gets no status line until the 15s heartbeat. The
-//     companion stream.flush.test.ts proves the byte reaches a real socket;
-//     these tests pin the ordering and the wire text.
+//   • the connect-time prelude: one chunk carrying a `retry: <heartbeat>` line
+//     and a `: connected` comment frame is the first thing enqueued, even with
+//     an empty backlog and no publish. This is the #89 regression guard —
+//     without it Next never calls res.flushHeaders() and the client gets no
+//     status line until the first heartbeat. The companion stream.flush.test.ts
+//     proves the bytes reach a real socket; these tests pin the ordering, the
+//     wire text, and that the `retry:` value tracks config.sseHeartbeatMs.
 //   • the capacity gate: at/above config.maxSseConnections returns 503
 //     SSE_CAPACITY with Retry-After, without opening a stream
 //   • backlog replay is filtered by ?type / ?run_id / ?aid
@@ -61,7 +62,7 @@ jest.mock('@/lib/audit/stream', () => ({
   },
 }));
 
-const configMock = { maxSseConnections: 500 };
+const configMock = { maxSseConnections: 500, sseHeartbeatMs: 15_000 };
 jest.mock('@/lib/config', () => ({ config: configMock }));
 
 // The logger is a real pino instance that is silent under NODE_ENV=test, so a
@@ -90,10 +91,16 @@ import {
 import { GET } from './route';
 import { NextRequest } from 'next/server';
 
-// The exact bytes the route must put on the wire first. Spelled out rather
-// than imported so a change to the route's prelude has to be re-stated here
+// The exact bytes the route must put on the wire first. Spelled out rather than
+// imported so a change to the route's prelude has to be re-stated here
 // deliberately — it is a wire format, not an implementation detail.
-const PRELUDE = ': connected\n\n';
+//
+// Derived from the mocked heartbeat setting rather than hardcoded to 15000, so
+// the `retry:` hint is asserted to TRACK the config instead of merely matching
+// today's default. One chunk, so it is always frame 0.
+function prelude(): string {
+  return `retry: ${configMock.sseHeartbeatMs}\n: connected\n\n`;
+}
 
 function makeReq(qs = '', signal?: AbortSignal): NextRequest {
   return new NextRequest(
@@ -151,6 +158,7 @@ beforeEach(() => {
   subscribeMock.mockClear();
   getBacklogMock.mockClear();
   configMock.maxSseConnections = 500;
+  configMock.sseHeartbeatMs = 15_000;
   resetSseMetrics();
   logInfo.mockClear();
   logWarn.mockClear();
@@ -170,10 +178,11 @@ describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
 
     const reader = res.body!.getReader();
     try {
-      expect(await readNext(reader)).toBe(PRELUDE);
+      expect(await readNext(reader)).toBe(prelude());
     } finally {
       // Not optional: cancel() is the only route into the handler's cleanup()
-      // (route.ts cancel hook), which clears the 15s interval and unsubscribes.
+      // (route.ts cancel hook), which clears the heartbeat interval and
+      // unsubscribes.
       // readFrames() does this for the other tests; this one bypasses it.
       await reader.cancel();
     }
@@ -200,7 +209,7 @@ describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
     const res = GET(makeReq());
     expect(subscribeMock).toHaveBeenCalledTimes(1);
     const frames = await readFrames(res, 2);
-    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[0]).toBe(prelude());
     expect(frames[1]).toContain('"id":"late"');
   });
 
@@ -237,7 +246,10 @@ describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
     // "subscribe now comes before the prelude", not "Expected: > 4556".
     const marks: Array<[string, number]> = [
       ['start() opens', startMatch!.index],
-      ['prelude enqueue', at(/enqueue\([^\n]*': connected/, "the ': connected' prelude enqueue")],
+      // Matches the prelude by its wire text rather than by quote style, so
+      // Phase 3's switch from a plain string to a template literal carrying
+      // `retry:` does not need this pattern rewritten again.
+      ['prelude enqueue', at(/enqueue\(\s*\n?[^\n]*: connected/, "the ': connected' prelude enqueue")],
       ['eventBus.subscribe', at(/eventBus\.subscribe\(/, 'eventBus.subscribe(')],
       ['backlog replay', at(/eventBus\.getBacklog\(/, 'eventBus.getBacklog(')],
     ];
@@ -272,13 +284,32 @@ describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
     expect(ctrlName).toBeTruthy();
   });
 
+  it('advertises a retry: hint that tracks the configured heartbeat, in the SAME chunk', async () => {
+    configMock.sseHeartbeatMs = 4000;
+    const res = GET(makeReq());
+    const reader = res.body!.getReader();
+    try {
+      const first = await readNext(reader);
+      // One chunk, not two. A second enqueue would shift every frame index the
+      // replay/dedup tests depend on, and cost an extra socket write.
+      expect(first).toBe('retry: 4000\n: connected\n\n');
+      // Ordering inside the chunk: `retry:` before the comment, so a client
+      // learns its reconnect floor from the very first line it parses.
+      expect(first.indexOf('retry:')).toBeLessThan(first.indexOf(': connected'));
+      // And nothing else follows it on an empty backlog.
+      expect(await readNext(reader, 100)).toBe(TIMEOUT);
+    } finally {
+      await reader.cancel();
+    }
+  });
+
   it('sends the prelude and nothing else when the filters match no backlog event', async () => {
     backlog = [ev({ id: 'a', type: 'handshake.start' })];
     const res = GET(makeReq('?type=nonexistent'));
 
     const reader = res.body!.getReader();
     try {
-      expect(await readNext(reader)).toBe(PRELUDE);
+      expect(await readNext(reader)).toBe(prelude());
       // Nothing follows: a filtered-out backlog must not leak a data frame,
       // and the prelude must not be emitted twice.
       expect(await readNext(reader, 100)).toBe(TIMEOUT);
@@ -302,7 +333,7 @@ describe('GET /api/events/stream — capacity gate', () => {
     // The rejection returns before any stream is constructed, so the #89
     // prelude must not appear — a 503 whose body started with an SSE comment
     // would be unparseable JSON for the client.
-    expect(body).not.toContain(PRELUDE);
+    expect(body).not.toContain(prelude());
     expect(body.startsWith('{')).toBe(true);
     expect(JSON.parse(body)).toEqual({
       error: 'too many open SSE connections; retry after current streams drain',
@@ -312,13 +343,19 @@ describe('GET /api/events/stream — capacity gate', () => {
     expect(globalThis.__sseOpenCount).toBe(1);
   });
 
-  it('allows a connection under the cap and increments the open count', () => {
+  it('allows a connection under the cap and increments the open count', async () => {
     configMock.maxSseConnections = 2;
     globalThis.__sseOpenCount = 1;
     const res = GET(makeReq());
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('text/event-stream');
     expect(globalThis.__sseOpenCount).toBe(2);
+    // Cancel even though nothing is read: this test runs on real timers, so the
+    // stream it leaves behind owns a real heartbeat interval. Harmless while the
+    // route unrefs it — but if the unref regresses, an uncancelled stream here
+    // holds the event loop open and turns the failure of the unref guard below
+    // into a hung jest run instead of a reported test failure.
+    await res.body!.cancel();
   });
 });
 
@@ -335,7 +372,7 @@ describe('GET /api/events/stream — backlog replay + filters', () => {
     const res = GET(makeReq('?type=handshake.complete'));
     const frames = await readFrames(res, 2);
     expect(frames).toHaveLength(2);
-    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[0]).toBe(prelude());
     expect(frames[1]).toContain('"id":"b"');
   });
 
@@ -384,7 +421,7 @@ describe('GET /api/events/stream — dedup across backlog and live buffer', () =
     // 3, not 2: frame 0 is the #89 prelude, the two events follow.
     const frames = await readFrames(res, 3);
     expect(frames).toHaveLength(3);
-    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[0]).toBe(prelude());
     expect(frames[1]).toContain('"id":"early"');
     expect(frames[2]).toContain('"id":"late"');
 
@@ -402,7 +439,7 @@ describe('GET /api/events/stream — live delivery after replay', () => {
     expect(listeners).toHaveLength(1);
     publish(ev({ id: 'live-1', type: 'x' }));
     const frames = await readFrames(res, 2);
-    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[0]).toBe(prelude());
     expect(frames[1]).toContain('"id":"live-1"');
   });
 });
@@ -474,22 +511,27 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     expect(logInfo).not.toHaveBeenCalled();
   });
 
-  it('binds a truncated x-request-id onto the log child, and omits it when absent', () => {
+  it('binds a truncated x-request-id onto the log child, and omits it when absent', async () => {
     const long = 'r'.repeat(500);
     const req = new NextRequest(
       new Request('http://localhost:4000/api/events/stream', {
         headers: { 'x-request-id': long },
       }),
     );
-    GET(req);
+    const first = GET(req);
     // 200 chars, not 500: x-request-id is caller-settable on a route the
     // console hits on every reconnect, so an unbounded value is a log-volume
     // amplification vector.
     expect(childBindings[0]).toEqual({ requestId: 'r'.repeat(200) });
 
     childBindings = [];
-    GET(makeReq());
+    const second = GET(makeReq());
     expect(childBindings[0]).toEqual({});
+    // Both streams cancelled for the reason given in the capacity test above:
+    // real timers here, so an uncancelled stream leaves a live interval that is
+    // only harmless because the route unrefs it.
+    await first.body!.cancel();
+    await second.body!.cancel();
   });
 
   it('reports the reason as abort when the request is aborted, not cancel', async () => {
@@ -554,6 +596,103 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       expect(getSseMetrics().open).toBe(0);
       expect(logInfo).toHaveBeenCalledTimes(2);
       void res;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('schedules the heartbeat at the CONFIGURED interval, not a hardcoded 15s', async () => {
+    // The point of SSE_HEARTBEAT_MS, and this must fail if the route ever goes
+    // back to a literal 15_000. Asserted on the setInterval DELAY rather than by
+    // reading frames: a "nothing arrived yet" check needs a speculative
+    // reader.read() that, once abandoned, silently swallows the next chunk and
+    // hangs the test. The delay is the thing under test anyway.
+    jest.useFakeTimers();
+    const spy = jest.spyOn(globalThis, 'setInterval');
+    try {
+      configMock.sseHeartbeatMs = 2000;
+      const res = GET(makeReq());
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][1]).toBe(2000);
+
+      // And with the setting at its default it is 15s — so this test is about
+      // the value being read from config, not about 2000 specifically.
+      spy.mockClear();
+      configMock.sseHeartbeatMs = 15_000;
+      const res2 = GET(makeReq());
+      expect(spy.mock.calls[0][1]).toBe(15_000);
+
+      await res.body!.cancel();
+      await res2.body!.cancel();
+    } finally {
+      spy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('unrefs the heartbeat timer so a lingering interval cannot block shutdown', async () => {
+    // Real timers on purpose: the assertion is about the Node `Timeout` object
+    // `setInterval` hands back. This exists because the unref is called
+    // optionally (`heartbeat.unref?.()`), so dropping it changes no observable
+    // behaviour in any other test in this suite — it went missing once during
+    // development and the whole suite stayed green.
+    const realSetInterval = globalThis.setInterval;
+    const unrefed: unknown[] = [];
+    const spy = jest
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation((...args: Parameters<typeof setInterval>) => {
+        const timer = realSetInterval(...args);
+        const original = timer.unref.bind(timer);
+        timer.unref = () => {
+          unrefed.push(timer);
+          return original();
+        };
+        return timer;
+      });
+    // `res` is declared out here, and cancelled in the `finally`, because this
+    // test runs on REAL timers: if the assertion below fails, an in-`try`
+    // cancel() never runs and the 15s interval it leaks is still ref'd, so the
+    // jest process hangs instead of reporting the failure. Measured: >300s of
+    // silence, which in CI (no --forceExit, timeout-minutes: 20) would surface as
+    // an opaque job timeout rather than "1 test failed" — the exact regression
+    // this test exists to make legible.
+    let res: Response | undefined;
+    try {
+      res = GET(makeReq());
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(unrefed).toHaveLength(1);
+    } finally {
+      if (res) await res.body!.cancel();
+      spy.mockRestore();
+    }
+  });
+
+  it('delivers a heartbeat frame once the configured interval elapses, and repeats on it', async () => {
+    // The behavioural half: the configured delay really does produce a frame,
+    // at 2s rather than 15s, and keeps producing them on that cadence. What it
+    // does NOT prove is that nothing arrives earlier — that side is the
+    // setInterval delay assertion in the test above; a "nothing yet" check here
+    // would need a speculative read that swallows the next chunk. Only reads
+    // expected to resolve are issued.
+    configMock.sseHeartbeatMs = 2000;
+    jest.useFakeTimers();
+    try {
+      const res = GET(makeReq());
+      const reader = res.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        'retry: 2000\n: connected\n\n',
+      );
+
+      jest.advanceTimersByTime(2000);
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        ': heartbeat\n\n',
+      );
+      // Repeats on that cadence rather than firing once.
+      jest.advanceTimersByTime(2000);
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        ': heartbeat\n\n',
+      );
+      await reader.cancel();
     } finally {
       jest.useRealTimers();
     }
@@ -648,7 +787,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
     try {
-      expect(await readNext(reader)).toBe(PRELUDE);
+      expect(await readNext(reader)).toBe(prelude());
     } finally {
       await reader.cancel();
     }
@@ -701,7 +840,7 @@ describe('GET /api/events/stream — cleanup', () => {
     // survives the abort rather than being dropped mid-queue.
     const reader = res.body!.getReader();
     try {
-      expect(await readNext(reader)).toBe(PRELUDE);
+      expect(await readNext(reader)).toBe(prelude());
     } finally {
       await reader.cancel();
     }

@@ -186,7 +186,26 @@ export function GET(req: NextRequest) {
       // production, because a freshly started process has an empty backlog
       // and the heartbeat below is the first thing that writes).
       // A comment frame is ignored by every SSE parser, including EventSource.
-      ctrl.enqueue(enc.encode(': connected\n\n'));
+      //
+      // ONE enqueue, not two. `readFrames` in the tests pushes one decoded
+      // string per read(), and the route's frame indices are its enqueue order,
+      // so splitting the prelude would shift every replay/dedup assertion. It
+      // is also one fewer write on the socket.
+      //
+      // `retry:` tells an EventSource how long to wait before reconnecting.
+      // Browsers default to ~3 s; advertising the heartbeat interval instead
+      // gives a reconnecting client a server-chosen floor, so a console stuck in
+      // a reconnect loop backs off to the cadence this server actually expects
+      // rather than hammering at the browser default. Note the coupling cuts
+      // both ways: below ~3 s this makes clients reconnect FASTER than their
+      // default, so a sub-3s heartbeat trades keepalive headroom for reconnect
+      // pressure on the capacity gate (documented in docs/operations.md).
+      // config.sseHeartbeatMs is clamped to 1000-2147483647 in @/lib/config, so
+      // this always renders as ASCII digits — a `retry:` value that is not all
+      // digits (e.g. String(1e21) === "1e+21") must be ignored by the client.
+      ctrl.enqueue(
+        enc.encode(`retry: ${config.sseHeartbeatMs}\n: connected\n\n`),
+      );
 
       // Track ids already enqueued so backlog replay + the
       // subscription-arrival queue don't double-deliver any event that
@@ -231,9 +250,10 @@ export function GET(req: NextRequest) {
       for (const evt of subscriptionBuffer) sendEvent(evt);
       subscriptionBuffer.length = 0;
 
-      // Heartbeat. Proactively cleans up if the request was aborted
-      // since the last tick, so we don't keep ticking against a dead
-      // controller for up to 15s.
+      // Heartbeat, at config.sseHeartbeatMs (default 15s, floored at 1s —
+      // see readHeartbeatMs in @/lib/config for why the floor is mandatory).
+      // Proactively cleans up if the request was aborted since the last tick,
+      // so we don't keep ticking against a dead controller for a whole interval.
       heartbeat = setInterval(() => {
         if (req.signal.aborted) {
           cleanup('abort');
@@ -262,7 +282,10 @@ export function GET(req: NextRequest) {
           // synthesised trigger for a real branch, not a live failure mode.
           cleanup('enqueue-failed');
         }
-      }, 15_000);
+      }, config.sseHeartbeatMs);
+      // Preserve the unref: the open socket is what keeps the event loop alive,
+      // so unref only ensures a lingering timer never blocks shutdown
+      // (see src/lib/shutdown.ts).
       heartbeat.unref?.();
 
       const onAbort = () => {
