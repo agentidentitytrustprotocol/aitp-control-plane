@@ -161,7 +161,7 @@ to stop that from happening. So the interval must sit **below** the timeout:
   deployment behind an edge with a long or absent idle timeout may legitimately
   want a slow heartbeat.
 
-Five behaviours worth knowing before you change it:
+Six behaviours worth knowing before you change it:
 
 - **It is clamped to a 1000 ms floor.** `SSE_HEARTBEAT_MS=0` and negative values
   are *accepted* by the env parser (`"0"` is a non-empty string, so it is not
@@ -181,6 +181,11 @@ Five behaviours worth knowing before you change it:
 - **It is read once, at boot.** The config object is built at module load, so
   changing the variable on a running instance has no effect until the process
   restarts (on Railway, an env change triggers one).
+- **One edge case scales with it:** a request whose client had already
+  disconnected before the handler ran holds its capacity slot until the next
+  heartbeat tick notices, because there is no abort event left to fire. That is
+  one `SSE_HEARTBEAT_MS` — a second at the floor, five minutes at `300000`. Every
+  other disconnect releases the slot immediately.
 - **It also sets the clients' reconnect delay, so lowering it is not free.** The
   prelude advertises `retry: <this value>`, and a browser `EventSource` waits
   that long before reconnecting. It cuts both ways. Browsers default to roughly

@@ -110,6 +110,12 @@ describe('SSE metrics, end to end through /api/metrics', () => {
   it('reports a capacity rejection as rejected_total, without counting an open', async () => {
     // Drive the real cap rather than poking the global: this is the only test
     // that exercises refusal -> scrape as one path.
+    //
+    // The previous value is saved and put back, not deleted: this file loads the
+    // REAL @/lib/config, so an ambient MAX_SSE_CONNECTIONS in the environment is
+    // part of the state this test borrows, and deleting it would change the
+    // behaviour of anything that ran afterwards in this worker.
+    const previousCap = process.env.MAX_SSE_CONNECTIONS;
     process.env.MAX_SSE_CONNECTIONS = '1';
     jest.resetModules();
     const freshStream = (
@@ -129,7 +135,8 @@ describe('SSE metrics, end to end through /api/metrics', () => {
 
       await first.body!.cancel();
     } finally {
-      delete process.env.MAX_SSE_CONNECTIONS;
+      if (previousCap === undefined) delete process.env.MAX_SSE_CONNECTIONS;
+      else process.env.MAX_SSE_CONNECTIONS = previousCap;
       jest.resetModules();
     }
   });

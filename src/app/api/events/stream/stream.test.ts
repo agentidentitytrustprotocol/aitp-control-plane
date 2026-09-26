@@ -80,12 +80,33 @@ jest.mock('@/lib/config', () => ({ config: configMock }));
 // calls, so binding the fake there covers the requestId child too.
 const logInfo = jest.fn();
 const logWarn = jest.fn();
-// When true, EVERY logging call throws — exercises the route's safely() guard.
+// Two independent failure modes, because they reach DIFFERENT safely() calls in
+// the route and an earlier version of this file conflated them:
+//   logShouldThrow  — childLogger() itself throws, so the route never gets a
+//     logger and falls back to NOOP_LOGGER. This only exercises the safely()
+//     around the construction; every later log call is a silent no-op and could
+//     not throw even if its guard were removed.
+//   logCallsShouldThrow — childLogger() succeeds and returns a logger whose
+//     info/warn throw on every call. This is the only mode that reaches the
+//     safely() wrappers at the open, close and capacity-warn call sites.
 let logShouldThrow = false;
+let logCallsShouldThrow = false;
 jest.mock('@/lib/logger', () => ({
   childLogger: (bindings: Record<string, unknown>) => {
     childBindings.push(bindings);
     if (logShouldThrow) throw new Error('pino transport exploded');
+    if (logCallsShouldThrow) {
+      return {
+        info: (...args: unknown[]) => {
+          logInfo(...args);
+          throw new Error('pino write failed');
+        },
+        warn: (...args: unknown[]) => {
+          logWarn(...args);
+          throw new Error('pino write failed');
+        },
+      };
+    }
     return { info: logInfo, warn: logWarn };
   },
 }));
@@ -173,6 +194,7 @@ beforeEach(() => {
   logInfo.mockClear();
   logWarn.mockClear();
   logShouldThrow = false;
+  logCallsShouldThrow = false;
   childBindings = [];
 });
 
@@ -428,18 +450,22 @@ describe('GET /api/events/stream — dedup across backlog and live buffer', () =
     onSubscribe = () => publish(late);
 
     const res = GET(makeReq());
-    // 3, not 2: frame 0 is the #89 prelude, the two events follow.
-    const frames = await readFrames(res, 3);
-    expect(frames).toHaveLength(3);
-    expect(frames[0]).toBe(prelude());
-    expect(frames[1]).toContain('"id":"early"');
-    expect(frames[2]).toContain('"id":"late"');
-
-    // No third frame shows up for the duplicate live delivery — confirm
-    // by cancelling and checking nothing further was ever enqueued for
-    // 'late' beyond the one frame already captured above.
-    const lateCount = frames.filter((f) => f.includes('"id":"late"')).length;
-    expect(lateCount).toBe(1);
+    // Read with an explicit reader rather than readFrames(): the assertion that
+    // matters is that a FOURTH frame never arrives, and readFrames(res, 3) stops
+    // at three and cancels, so a duplicate sitting behind them would go unread
+    // and unnoticed — counting duplicates among the three frames read cannot
+    // detect a deleted dedup.
+    const reader = res.body!.getReader();
+    try {
+      // 3, not 2: frame 0 is the #89 prelude, the two events follow.
+      expect(await readNext(reader)).toBe(prelude());
+      expect(await readNext(reader)).toContain('"id":"early"');
+      expect(await readNext(reader)).toContain('"id":"late"');
+      // The duplicate live delivery of `late` must not be enqueued at all.
+      expect(await readNext(reader)).toBe(TIMEOUT);
+    } finally {
+      await reader.cancel();
+    }
   });
 });
 
@@ -792,11 +818,13 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     await res.body!.cancel();
   });
 
-  it('keeps serving the stream when the logger throws on every call', async () => {
-    // safely() is load-bearing, not decorative: the open log runs AFTER
-    // acquireSseSlot(), so an unguarded throw there would 500 the request and
-    // leak a capacity slot for the life of the process. Deleting the try/catch
-    // must fail here.
+  it('keeps serving the stream when building the logger throws', async () => {
+    // Mode 1: childLogger() itself throws. The safely() around the construction
+    // is load-bearing, not decorative — it runs on the request path and an
+    // unguarded throw there 500s the request. (It is ordered BEFORE
+    // acquireSseSlot(), so it would not leak a slot; the mode that reaches the
+    // post-acquire log calls is the test below.) Deleting the try/catch at that
+    // one call site must fail here.
     logShouldThrow = true;
     const res = GET(makeReq());
     expect(res.status).toBe(200);
@@ -816,12 +844,60 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
     expect(listeners).toHaveLength(0);
   });
 
-  it('still answers the capacity 503 when the logger throws', () => {
+  it('still answers the capacity 503 when building the logger throws', () => {
     logShouldThrow = true;
     configMock.maxSseConnections = 1;
     globalThis.__sseOpenCount = 1;
     const res = GET(makeReq());
     expect(res.status).toBe(503);
+    expect(getSseMetrics().rejectedTotal).toBe(1);
+  });
+
+  it('serves the stream and cleans up when every log CALL throws', async () => {
+    // Mode 2, and the one that actually reaches the three safely() wrappers at
+    // the log call sites. Mode 1 cannot: when childLogger() throws, the route
+    // keeps NOOP_LOGGER, whose info/warn are no-ops that could not throw even
+    // with their guards removed — which is why deleting those three try/catches
+    // used to fail nothing while a comment here claimed otherwise.
+    //
+    // The open log runs AFTER acquireSseSlot(), so an unguarded throw there 500s
+    // the request with a capacity slot already taken — leaked for the life of the
+    // process. The close log runs inside cleanup(), where an unguarded throw
+    // rejects the consumer's cancel() promise (and, on the abort path, throws
+    // inside an event listener).
+    logCallsShouldThrow = true;
+    const res = GET(makeReq());
+    expect(res.status).toBe(200);
+    // The logger was reached — this is not passing because nothing logged.
+    expect(logInfo).toHaveBeenCalledTimes(1);
+
+    const reader = res.body!.getReader();
+    try {
+      expect(await readNext(reader)).toBe(prelude());
+    } finally {
+      // Must not reject: the close log throws inside cleanup().
+      await reader.cancel();
+    }
+    expect(logInfo).toHaveBeenCalledTimes(2);
+    // Slot released, subscription dropped, counters intact — everything the
+    // logger's failure must not be able to take with it.
+    expect(getSseMetrics()).toEqual({
+      open: 0,
+      openedTotal: 1,
+      rejectedTotal: 0,
+    });
+    expect(listeners).toHaveLength(0);
+  });
+
+  it('still answers the capacity 503 when the warn CALL throws', () => {
+    // The third guarded call site: the capacity path's log.warn, which sits
+    // between recordSseRejected() and the 503 response.
+    logCallsShouldThrow = true;
+    configMock.maxSseConnections = 1;
+    globalThis.__sseOpenCount = 1;
+    const res = GET(makeReq());
+    expect(res.status).toBe(503);
+    expect(logWarn).toHaveBeenCalledTimes(1);
     expect(getSseMetrics().rejectedTotal).toBe(1);
   });
 });
