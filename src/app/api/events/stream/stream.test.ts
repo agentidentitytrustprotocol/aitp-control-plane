@@ -1,4 +1,10 @@
 // Unit tests for GET /api/events/stream (SSE) — verifies:
+//   • the connect-time prelude: a `: connected` comment frame is the first
+//     chunk enqueued, even with an empty backlog and no publish. This is the
+//     #89 regression guard — without it Next never calls res.flushHeaders()
+//     and the client gets no status line until the 15s heartbeat. The
+//     companion stream.flush.test.ts proves the byte reaches a real socket;
+//     these tests pin the ordering and the wire text.
 //   • the capacity gate: at/above config.maxSseConnections returns 503
 //     SSE_CAPACITY with Retry-After, without opening a stream
 //   • backlog replay is filtered by ?type / ?run_id / ?aid
@@ -11,6 +17,8 @@
 // @/lib/audit/stream's eventBus and @/lib/config are both mocked with
 // small controllable fakes. No database, no real event bus singleton.
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { jest } from '@jest/globals';
 
 type FakeEvent = {
@@ -59,6 +67,11 @@ jest.mock('@/lib/config', () => ({ config: configMock }));
 import { GET } from './route';
 import { NextRequest } from 'next/server';
 
+// The exact bytes the route must put on the wire first. Spelled out rather
+// than imported so a change to the route's prelude has to be re-stated here
+// deliberately — it is a wire format, not an implementation detail.
+const PRELUDE = ': connected\n\n';
+
 function makeReq(qs = '', signal?: AbortSignal): NextRequest {
   return new NextRequest(
     new Request(
@@ -81,6 +94,29 @@ async function readFrames(res: Response, count: number): Promise<string[]> {
   return frames;
 }
 
+// Reads the next chunk but gives up after `ms`, resolving the sentinel
+// instead. Without the race an unfixed route would HANG here for the full 15s
+// heartbeat interval and the test would time out opaquely rather than fail
+// with a readable diff. Callers must run on real timers (see the note on the
+// fake-timer test at the bottom of this file).
+const TIMEOUT = '__TIMEOUT__';
+async function readNext(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms = 250,
+): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read().then((r) => new TextDecoder().decode(r.value)),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function ev(over: Partial<FakeEvent> & { id: string; type: string }): FakeEvent {
   return { ts: '2026-01-01T00:00:00.000Z', payload: {}, ...over };
 }
@@ -95,6 +131,136 @@ beforeEach(() => {
   globalThis.__sseOpenCount = 0;
 });
 
+describe('GET /api/events/stream — connect-time prelude (issue #89)', () => {
+  it('sends the prelude with an EMPTY backlog and no publish, without waiting for the heartbeat', async () => {
+    // The production case on a fresh deploy: the in-process bus is empty, so
+    // pre-#89 nothing at all was enqueued at connect and Next withheld the
+    // status line until the 15s heartbeat. Every other test in this file
+    // pre-seeds `backlog`, which is exactly why none of them caught it.
+    expect(backlog).toHaveLength(0);
+    const res = GET(makeReq());
+    expect(res.status).toBe(200);
+
+    const reader = res.body!.getReader();
+    try {
+      expect(await readNext(reader)).toBe(PRELUDE);
+    } finally {
+      // Not optional: cancel() is the only route into the handler's cleanup()
+      // (route.ts cancel hook), which clears the 15s interval and unsubscribes.
+      // readFrames() does this for the other tests; this one bypasses it.
+      await reader.cancel();
+    }
+    expect(globalThis.__sseOpenCount).toBe(0);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it('emits the prelude ahead of the backlog replay and of the drained live buffer', async () => {
+    // An event published the instant subscribe() runs is buffered by the
+    // route's `draining` guard and emitted during the replay/drain. So a
+    // prelude moved to the END of start() would land after this event and
+    // frame 0 would change.
+    //
+    // Note what this does NOT prove: moving the enqueue to just *after*
+    // eventBus.subscribe() but still before the replay leaves frame order
+    // identical, because the `draining` buffer defers delivery either way.
+    // Relative ordering against subscribe() is simply not observable through
+    // the public ReadableStream API — the test below enforces it at the
+    // source level instead. Keeping the two separate rather than letting this
+    // one's name overclaim.
+    const late = ev({ id: 'late', type: 'x' });
+    onSubscribe = () => publish(late);
+
+    const res = GET(makeReq());
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+    const frames = await readFrames(res, 2);
+    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[1]).toContain('"id":"late"');
+  });
+
+  it('keeps the prelude enqueue the first statement of a synchronous start(), ahead of subscribe and replay', () => {
+    // A SOURCE-ORDER assertion, deliberately, and the only kind that can hold
+    // this invariant. The whole #89 defect is about *when* the first chunk is
+    // handed to Next's adapter. Two refactors would restore the bug while every
+    // behavioural test above stayed green:
+    //   • moving the enqueue after eventBus.subscribe() — the route's
+    //     `draining` buffer defers delivery either way, so no frame order
+    //     changes and nothing observable through the ReadableStream API moves;
+    //   • putting an `await` in front of it — start() would return to the
+    //     caller before the chunk is queued, so `new Response(stream)` ships
+    //     with an empty queue and pipe-readable's write() never runs.
+    // Cheap, greppable, and it fails on exactly those two edits (both were
+    // confirmed to fail this test, and to pass without it).
+    //
+    // Patterns are regexes rather than literals so renaming the controller
+    // parameter, or reflowing the code, does not produce a false failure.
+    const src = readFileSync(join(__dirname, 'route.ts'), 'utf8');
+    const startMatch = /\n\s*start\((\w+)\)\s*\{/.exec(src);
+    expect(startMatch).not.toBeNull();
+    const ctrlName = startMatch![1];
+
+    const at = (re: RegExp, what: string): number => {
+      const m = re.exec(src);
+      // Throw by name rather than returning -1 and silently comparing it to an
+      // offset: a stale pattern here must read as "the pattern went stale", not
+      // as "the ordering invariant broke".
+      if (!m) throw new Error(`route.ts no longer contains ${what}`);
+      return m.index;
+    };
+    // Asserting a sorted LABEL order, not raw offsets: a failure then reads as
+    // "subscribe now comes before the prelude", not "Expected: > 4556".
+    const marks: Array<[string, number]> = [
+      ['start() opens', startMatch!.index],
+      ['prelude enqueue', at(/enqueue\([^\n]*': connected/, "the ': connected' prelude enqueue")],
+      ['eventBus.subscribe', at(/eventBus\.subscribe\(/, 'eventBus.subscribe(')],
+      ['backlog replay', at(/eventBus\.getBacklog\(/, 'eventBus.getBacklog(')],
+    ];
+    expect(
+      [...marks].sort((a, b) => a[1] - b[1]).map(([label]) => label),
+    ).toEqual([
+      'start() opens',
+      'prelude enqueue',
+      'eventBus.subscribe',
+      'backlog replay',
+    ]);
+
+    // "First statement" literally: between the `start(…) {` header and the
+    // enqueue there may be comments and blank lines, and nothing else. Both
+    // line and block comment forms are stripped, so reflowing the explanatory
+    // comment above the enqueue cannot fail this.
+    // Back up to the start of the enqueue's own LINE, so the receiver
+    // (`ctrl.`) is not left dangling in the preamble slice.
+    const enqueueLineStart = src.lastIndexOf('\n', marks[1][1]);
+    const preambleCode = src
+      .slice(startMatch!.index, enqueueLineStart)
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+      .join('\n')
+      .replace(startMatch![0], '')
+      .trim();
+    expect(preambleCode).toBe('');
+
+    // And start() itself must stay synchronous: an async start() hands the
+    // chunk to pipeTo a microtask after the Response has already been returned.
+    expect(/async\s+start\s*\(/.test(src)).toBe(false);
+    expect(ctrlName).toBeTruthy();
+  });
+
+  it('sends the prelude and nothing else when the filters match no backlog event', async () => {
+    backlog = [ev({ id: 'a', type: 'handshake.start' })];
+    const res = GET(makeReq('?type=nonexistent'));
+
+    const reader = res.body!.getReader();
+    try {
+      expect(await readNext(reader)).toBe(PRELUDE);
+      // Nothing follows: a filtered-out backlog must not leak a data frame,
+      // and the prelude must not be emitted twice.
+      expect(await readNext(reader, 100)).toBe(TIMEOUT);
+    } finally {
+      await reader.cancel();
+    }
+  });
+});
+
 describe('GET /api/events/stream — capacity gate', () => {
   it('returns 503 SSE_CAPACITY at the connection cap, without subscribing', async () => {
     configMock.maxSseConnections = 1;
@@ -102,7 +268,16 @@ describe('GET /api/events/stream — capacity gate', () => {
     const res = GET(makeReq());
     expect(res.status).toBe(503);
     expect(res.headers.get('Retry-After')).toBe('30');
-    expect(await res.json()).toEqual({
+    expect(res.headers.get('Content-Type')).toBe('application/json');
+    // Read the body once, so the "no prelude" check and the shape check are
+    // made against the same bytes.
+    const body = await res.text();
+    // The rejection returns before any stream is constructed, so the #89
+    // prelude must not appear — a 503 whose body started with an SSE comment
+    // would be unparseable JSON for the client.
+    expect(body).not.toContain(PRELUDE);
+    expect(body.startsWith('{')).toBe(true);
+    expect(JSON.parse(body)).toEqual({
       error: 'too many open SSE connections; retry after current streams drain',
       code: 'SSE_CAPACITY',
     });
@@ -120,6 +295,10 @@ describe('GET /api/events/stream — capacity gate', () => {
   });
 });
 
+// Frame index == enqueue order: readFrames() pushes one decoded string per
+// read() and each ctrl.enqueue() is exactly one chunk. The #89 prelude is
+// frame 0 on every accepted connection, so every replayed event below sits at
+// frames[1] onwards.
 describe('GET /api/events/stream — backlog replay + filters', () => {
   it('replays only backlog events matching ?type', async () => {
     backlog = [
@@ -127,9 +306,10 @@ describe('GET /api/events/stream — backlog replay + filters', () => {
       ev({ id: 'b', type: 'handshake.complete' }),
     ];
     const res = GET(makeReq('?type=handshake.complete'));
-    const frames = await readFrames(res, 1);
-    expect(frames).toHaveLength(1);
-    expect(frames[0]).toContain('"id":"b"');
+    const frames = await readFrames(res, 2);
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[1]).toContain('"id":"b"');
   });
 
   it('replays only backlog events matching ?run_id (and its ?runId alias)', async () => {
@@ -138,8 +318,8 @@ describe('GET /api/events/stream — backlog replay + filters', () => {
       ev({ id: 'b', type: 'x', runId: 'run-2' }),
     ];
     const res = GET(makeReq('?run_id=run-2'));
-    const frames = await readFrames(res, 1);
-    expect(frames[0]).toContain('"id":"b"');
+    const frames = await readFrames(res, 2);
+    expect(frames[1]).toContain('"id":"b"');
   });
 
   it('replays only backlog events matching ?aid against either aidA or aidB', async () => {
@@ -149,15 +329,17 @@ describe('GET /api/events/stream — backlog replay + filters', () => {
       ev({ id: 'c', type: 'x', aidA: 'aid:pubkey:3' }),
     ];
     const res = GET(makeReq('?aid=aid:pubkey:2'));
-    const frames = await readFrames(res, 1);
-    expect(frames[0]).toContain('"id":"b"');
+    const frames = await readFrames(res, 2);
+    expect(frames[1]).toContain('"id":"b"');
   });
 
   it('sends each backlog event as its own `data: {...}\\n\\n` SSE frame', async () => {
     backlog = [ev({ id: 'a', type: 'x' })];
     const res = GET(makeReq());
-    const [frame] = await readFrames(res, 1);
-    expect(frame).toBe(`data: ${JSON.stringify(backlog[0])}\n\n`);
+    const frames = await readFrames(res, 2);
+    // Exact equality, deliberately: the prelude must not have been folded into
+    // the event frame, and the event frame's bytes are the client contract.
+    expect(frames[1]).toBe(`data: ${JSON.stringify(backlog[0])}\n\n`);
   });
 });
 
@@ -172,10 +354,12 @@ describe('GET /api/events/stream — dedup across backlog and live buffer', () =
     onSubscribe = () => publish(late);
 
     const res = GET(makeReq());
-    const frames = await readFrames(res, 2);
-    expect(frames).toHaveLength(2);
-    expect(frames[0]).toContain('"id":"early"');
-    expect(frames[1]).toContain('"id":"late"');
+    // 3, not 2: frame 0 is the #89 prelude, the two events follow.
+    const frames = await readFrames(res, 3);
+    expect(frames).toHaveLength(3);
+    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[1]).toContain('"id":"early"');
+    expect(frames[2]).toContain('"id":"late"');
 
     // No third frame shows up for the duplicate live delivery — confirm
     // by cancelling and checking nothing further was ever enqueued for
@@ -190,8 +374,9 @@ describe('GET /api/events/stream — live delivery after replay', () => {
     const res = GET(makeReq());
     expect(listeners).toHaveLength(1);
     publish(ev({ id: 'live-1', type: 'x' }));
-    const frames = await readFrames(res, 1);
-    expect(frames[0]).toContain('"id":"live-1"');
+    const frames = await readFrames(res, 2);
+    expect(frames[0]).toBe(PRELUDE);
+    expect(frames[1]).toContain('"id":"live-1"');
   });
 });
 
@@ -202,6 +387,33 @@ describe('GET /api/events/stream — cleanup', () => {
     expect(globalThis.__sseOpenCount).toBe(1);
     await res.body!.cancel();
     expect(listeners).toHaveLength(0);
+    expect(globalThis.__sseOpenCount).toBe(0);
+  });
+
+  it('runs cleanup when the request aborts immediately after connect, and the queued prelude is still drainable', async () => {
+    // The tight-reconnect case: a client that hangs up before reading anything.
+    // The prelude is already in the stream queue at this point, so this also
+    // pins that enqueueing it cannot leak a slot, a subscription or a timer.
+    const controller = new AbortController();
+    const res = GET(makeReq('', controller.signal));
+    expect(globalThis.__sseOpenCount).toBe(1);
+
+    controller.abort();
+    // Abort propagation through Request.signal is not guaranteed synchronous;
+    // yield one macrotask so this asserts the handler's listener, not timing.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(listeners).toHaveLength(0);
+    expect(globalThis.__sseOpenCount).toBe(0);
+
+    // ctrl.close() leaves already-queued chunks readable, so the prelude
+    // survives the abort rather than being dropped mid-queue.
+    const reader = res.body!.getReader();
+    try {
+      expect(await readNext(reader)).toBe(PRELUDE);
+    } finally {
+      await reader.cancel();
+    }
+    // cleanup() is idempotent: the cancel above must not double-decrement.
     expect(globalThis.__sseOpenCount).toBe(0);
   });
 

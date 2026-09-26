@@ -81,6 +81,18 @@ export function GET(req: NextRequest) {
 
   const stream = new ReadableStream<Uint8Array>({
     start(ctrl) {
+      // MUST be the first statement, before any await: force Next's Node
+      // adapter to flush the status line + headers now. It defers
+      // res.flushHeaders() to the first body chunk
+      // (next/dist/server/pipe-readable.js:59-74), so a stream that stays
+      // silent until its first event sends NO headers at all — clients and
+      // proxies with a sub-heartbeat first-byte timeout see a dead hang with
+      // not even an HTTP status line (issue #89: 15s to first byte in
+      // production, because a freshly started process has an empty backlog
+      // and the heartbeat below is the first thing that writes).
+      // A comment frame is ignored by every SSE parser, including EventSource.
+      ctrl.enqueue(enc.encode(': connected\n\n'));
+
       // Track ids already enqueued so backlog replay + the
       // subscription-arrival queue don't double-deliver any event that
       // existed in both. Without this, an event published mid-replay
