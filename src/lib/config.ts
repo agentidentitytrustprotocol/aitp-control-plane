@@ -187,7 +187,11 @@ if (
   // `Number` ignores surrounding whitespace, so without the trim a value of
   // "70000\n" would put a raw newline in the middle of the warning. The marker
   // keeps a truncated value from reading as a complete one.
-  const rawEnv = (process.env.SSE_HEARTBEAT_MS ?? '').trim();
+  // `String(...)` rather than `?? ''`: if this warning is firing then the
+  // variable is set and numeric, because the 15 000 default is below the
+  // threshold — so a nullish branch here is unreachable and would sit
+  // permanently uncovered.
+  const rawEnv = String(process.env.SSE_HEARTBEAT_MS).trim();
   const raw = rawEnv.length > 40 ? `${rawEnv.slice(0, 40)}…(truncated)` : rawEnv;
   // Reported separately from the effective value, because a clamp from above is
   // the one case where the number an operator wrote and the number the server
