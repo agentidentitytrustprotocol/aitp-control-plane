@@ -103,21 +103,31 @@ output — the reason the standalone opt-in is env-gated at all, recorded in
 `next.config.ts`. So gate attachment was proven in a configuration the image
 never runs, and in the artifact that actually deploys nothing tested it.
 
-This section covers the **static** half: assertions against the built artifact
-that need no server and no database. Booting the image and asserting gate
-attachment, the signing path and the CORS build-freeze over HTTP is the other
-half of the same effort and is documented here as it lands.
+It has two halves. The **static** half asserts against the built artifact and
+needs no server and no database. The **live** half stands up a real deployment —
+its own private network, its own Postgres, the repo's own migrations — and runs
+the image against it. Gate attachment, the signing path and the CORS
+build-freeze build on that live substrate and are documented here as they land.
 
 ```sh
 npm run verify:image                        # host platform
 npm run verify:image -- --platform linux/amd64
 ```
 
+It needs the repo's dev dependencies installed (`npm ci`): migrations go through
+`npm run db:migrate`, and the runtime image bundles no `drizzle-kit`.
+
 It builds the image for one platform, then asserts against the built artifact:
 
 - **The NAPI binary loads** — `typeof require('aitp').AitpAgent === 'function'`
   inside the image, i.e. under the image's arch and libc, not the build host's.
-- **The OpenTelemetry SDK was traced in** — `@opentelemetry/sdk-node` resolves.
+- **The OpenTelemetry SDK was traced in** — the `@opentelemetry` scope exists
+  under `.next/node_modules` and `sdk-node` resolves *through that traced path*.
+  Resolving it the obvious way instead, from the image's working directory, would
+  answer a weaker question: a bare `require.resolve` finds the copy in
+  `/app/node_modules` and so passes on an image where nothing was traced at all.
+  Being installed is not being traced, and only the traced copy is what the
+  compiled server chunks load.
 - **Every traced external resolves.** `.next/node_modules` holds one hashed
   entry per traced external (`aitp-<16 hex>`, and the compiled server chunks ask
   for exactly that hashed specifier). Each must be a **symlink** whose realpath
@@ -130,6 +140,44 @@ It builds the image for one platform, then asserts against the built artifact:
   `scripts/image-artifact-baseline.json`, plus the assertion that the `aitp`
   binary carries the `linux-<arch>-gnu` token the requested platform asked for.
   That last one catches an amd64 image shipping an arm64 binary, or none.
+
+It then stands up the **live** half and runs the image for real:
+
+- A run-unique private bridge network, so the app reaches Postgres by container
+  name — the same topology locally and in CI, depending on nothing like
+  `host.docker.internal`.
+- `postgres:16-alpine` (the pin `ci.yml` and `docker-compose.yml` already use),
+  waited on via its **own** healthcheck rather than a third readiness idiom.
+- **Migrations, applied from the host** through `npm run db:migrate`, against an
+  ephemeral loopback-bound port. On the host because the runtime image bundles no
+  `drizzle-kit`; ephemeral because a fixed 5432/5433 collides with
+  `docker-compose` and with `ci.yml`'s service container. Postgres keeps its data
+  directory on a **tmpfs**, so no anonymous volume is created and there is nothing
+  to leak — the database is throwaway, and this is faster besides.
+- **The schema is then verified**, not assumed from drizzle-kit's exit code. This
+  matters more than it sounds: `/api/health` probes the database with `SELECT 1`,
+  which needs no schema, so against a *completely unmigrated* database it still
+  answers `db: "ok"` with the right AID and a 200. Every live check below would be
+  green. The harness therefore counts tables in `public` and rows in
+  `drizzle.__drizzle_migrations` and fails if either is zero.
+- The image itself, detached, on that network, and `/api/health` asserted to
+  report **`db: "ok"`** and an **`aid`** equal to one derived independently from
+  `CP_AID_SEED_HEX` on the host with `node:crypto` alone. Deriving it with the SDK
+  would compare the SDK against itself; deriving it independently makes it a real
+  cross-implementation check.
+
+Migrations are **not optional**, and the reason is specific rather than
+housekeeping: unmigrated, the revocation producer catches the failed DB read and
+publishes an **empty but validly signed** list. A signature check would then pass
+against an image whose database access is completely broken, and `/api/audit` with
+a valid key would answer 500, leaving no way to tell an attached gate from one
+that rejects everything. An unmigrated harness is a harness that lies.
+
+The health assertion checks `db` **before** the HTTP status, deliberately.
+`/api/health` answers 503 whenever the DB ping fails, so a status-first assertion
+reports "status 503" — the symptom — for an unreachable database and buries the
+cause in a JSON blob. All three properties are still asserted; only the order of
+the messages changes.
 
 Two properties make it worth more than a smoke test:
 
@@ -492,7 +540,8 @@ hard-kill it mid-drain. Point your LB/orchestrator readiness probe at
 - **`DATABASE_URL`** — Postgres connection string (required).
 - **`DB_POOL_MAX`** (default 20) — connection pool size.
 - Migrations run via `npm run db:migrate` from a checkout; the runtime image
-  does not bundle `drizzle-kit`. See the internal
+  does not bundle `drizzle-kit` — which is also why `verify:image` applies them
+  from the host rather than from inside the container. See the internal
   [deployment guide](https://github.com/agentidentitytrustprotocol/aitp-control-plane/tree/main/internal_docs)
   for the migration step against a hosted database.
 

@@ -12,14 +12,19 @@
  * at all. This harness exists to close that gap (aitp-control-plane#68).
  *
  * ── WHAT THIS FILE COVERS TODAY ────────────────────────────────────────────
- * Static assertions against a BUILT IMAGE, needing no server and no database:
- * the NAPI binary loads, the OpenTelemetry tree was traced in, every traced
- * external is a symlink that resolves, and the `.node` inventory matches a
- * committed baseline including the arch token. That is the whole of it. The
- * HTTP-level work — booting the image against an ephemeral Postgres and
- * asserting gate attachment, the revocation signing path and the CORS
- * build-freeze — lands in later commits of this series. Nothing below should be
- * read as already proving any of that.
+ * First, static assertions against a BUILT IMAGE, needing no server and no
+ * database: the NAPI binary loads, the OpenTelemetry tree was traced in, every
+ * traced external present is a symlink that resolves, and the `.node` inventory
+ * matches a committed baseline including the arch token.
+ *
+ * Then a LIVE SUBSTRATE: a run-unique private bridge network, an ephemeral
+ * Postgres, the repo's own migrations applied from the host, and the image itself
+ * run against them — with `/api/health` asserted to report `db: "ok"` and an AID
+ * equal to one derived independently from `CP_AID_SEED_HEX` on the host.
+ *
+ * What is NOT here yet: gate attachment, the revocation signing path and the CORS
+ * build-freeze, which land in later commits of this series. The substrate they
+ * need now exists; nothing below should be read as already asserting them.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -59,15 +64,18 @@
  * pinned the event loop. The Docker analogue is a foreground `docker run` or a
  * `docker logs -f`: a long-lived child holding pipes. The design that cannot
  * reproduce it:
- *   - One-shot probe containers — all this file creates today — run to completion
- *     under a per-call timeout and are registered for teardown BEFORE they are
- *     started, so a signal mid-probe still sweeps them even if `--rm` never
- *     fires.
- *   - RULE for the long-lived containers the later commits add: they must start
- *     DETACHED (`docker run -d`), so nothing long-lived is ever a child of this
- *     process, and their logs must be read with ONE-SHOT `docker logs`, never
- *     `-f` — a `docker logs -f` is precisely the long-lived child holding pipes
- *     that caused the incident below.
+ *   - One-shot probe containers run to completion under a per-call timeout and are
+ *     registered for teardown BEFORE they are started, so a signal mid-probe still
+ *     sweeps them even if `--rm` never fires. Registration-before-creation is not
+ *     stylistic: `docker rm -f <name>` issued in the window between the daemon
+ *     creating a container and starting it removes nothing, which is how an
+ *     earlier revision of this file leaked twelve containers in state `created`.
+ *   - The long-lived containers (Postgres and the app) start DETACHED
+ *     (`docker run -d`), so nothing long-lived is ever a child of this process,
+ *     and their logs are read with ONE-SHOT `docker logs`, never `-f` — a
+ *     `docker logs -f` is precisely the long-lived child holding pipes that caused
+ *     the incident below. IN FORCE NOW; it was a rule for later commits when this
+ *     file created only probe containers.
  *   - Every resource is registered in a `Set` the moment it is created and torn
  *     down by an idempotent cleanup that is safe to call twice.
  *   - Teardown is wired to `finally`, `process.on('exit')`, SIGINT and SIGTERM.
@@ -102,13 +110,21 @@
  *     --keep                 skip teardown (prints the cleanup commands)
  *     --prune                sweep leaked resources from an earlier crashed run
  *     --update-baseline      rewrite scripts/image-artifact-baseline.json
+ *     --allow-removals       with --update-baseline: consent to a shrinking set
  *     --help
+ *
+ * Requires the repo's dev dependencies on the host (`npm ci`): migrations run
+ * through the repo's own `npm run db:migrate`, and the runtime image bundles no
+ * drizzle-kit.
  *
  * Testability hooks: AITP_VERIFY_IMAGE_WATCHDOG_MS overrides the post-build
  * ceiling and AITP_VERIFY_IMAGE_BUILD_MS the build ceiling, so both timeout paths
  * can be exercised deliberately (set one to 1000) without editing this file.
- * There is no test runner wired to a .mjs script in this repo, so a negative path
- * with no hook is not falsifiable from a diff plus output.
+ * AITP_VERIFY_IMAGE_PAUSE_MS holds the live substrate up once it is ready, so the
+ * teardown-on-SIGINT path can be exercised with a network and two containers all
+ * live — a window under a second wide otherwise. There is no test runner wired to
+ * a .mjs script in this repo, so a negative path with no hook is not falsifiable
+ * from a diff plus output.
  *
  * NOT torn down: the IMAGE. Teardown covers containers and networks; the built
  * image is deliberately left in the local daemon under a deterministic tag, so a
@@ -120,6 +136,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -148,8 +165,19 @@ const RESOLVE_FROM = '/app/.next/server/chunks';
 // ── timeouts ────────────────────────────────────────────────────────────────
 const DEFAULT_DOCKER_MS = 60_000;
 const PROBE_MS = 120_000;
-/** Post-build ceiling. A hang must fail loudly and fast, never burn a CI slot. */
-const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 12 * 60_000;
+/**
+ * Post-build ceiling. A hang must fail loudly and fast, never burn a CI slot.
+ *
+ * It must comfortably exceed the worst realistic post-build case, or it fires
+ * first and reports "something hung" in place of the specific, actionable
+ * "Postgres never became healthy, here are its logs". Budget: four probes at
+ * PROBE_MS (8 min) — and the file notes probe timeouts are realistic under QEMU —
+ * plus PG_READY_MS (3 min) plus APP_READY_MS (4 min) plus MIGRATE_MS (3 min) is
+ * about 18 minutes, so 25 leaves genuine headroom rather than the 2-4 minutes a
+ * 20-minute ceiling left. Keep BUILD_MS_NATIVE + this BELOW the `verify-image`
+ * job's `timeout-minutes` in ci.yml.
+ */
+const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 25 * 60_000;
 /**
  * Build ceilings, deliberately separate from the watchdog so "the build hung"
  * and "a check hung" are distinguishable. Keep BUILD_MS_NATIVE + WATCHDOG_MS
@@ -160,6 +188,46 @@ const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 12 * 60
 const BUILD_MS_NATIVE = Number(process.env.AITP_VERIFY_IMAGE_BUILD_MS) || 25 * 60_000;
 const BUILD_MS_EMULATED =
   Number(process.env.AITP_VERIFY_IMAGE_BUILD_MS) || 60 * 60_000;
+
+// ── live-substrate settings ─────────────────────────────────────────────────
+/**
+ * Readiness deadlines, deliberately SEPARATE from the watchdog and generous
+ * enough for an emulated boot. Elapsed time is printed on success so a slow boot
+ * is visible rather than mysterious.
+ */
+const PG_READY_MS = 180_000;
+const APP_READY_MS = 240_000;
+/** Per-request deadline, so one wedged route cannot consume the watchdog. */
+const HTTP_MS = 20_000;
+/** Deadline for the migration child — the one long-running process that is not a
+ *  `docker` call, and so the one place a wedge could otherwise eat the watchdog. */
+const MIGRATE_MS = 180_000;
+
+/**
+ * The CORS origin the CONTAINER is run with.
+ *
+ * `.invalid` is reserved by RFC 2606 and can never resolve, so this can never
+ * collide with a real origin. It also differs from the value the Dockerfile bakes
+ * in at build time; no check compares the two yet, and when the CORS build-freeze
+ * check lands that difference is what will make it falsifiable.
+ */
+const RUNTIME_ORIGIN = 'https://runtime-probe.invalid';
+/** A fixed NON-PRODUCTION seed, so the derived AID is deterministic and can be
+ *  asserted. Not a secret, and never used anywhere but this harness. */
+const SEED_HEX = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+/**
+ * Must be NON-EMPTY. With `API_KEYS` empty under `NODE_ENV=production` the gate
+ * answers 503 SERVER_MISCONFIGURED rather than 401, so an empty value here would
+ * silently exercise a different code path than the one being asserted.
+ */
+const API_KEY = 'verify-image-harness-key-0000';
+/** >= 32 chars, or EnrollmentService throws when first constructed. */
+const ENROLLMENT_SECRET = 'verify-image-harness-secret-min-thirty-two-chars';
+/** Matches ci.yml and docker-compose.yml rather than introducing a third pin. */
+const PG_IMAGE = 'postgres:16-alpine';
+const PG_DB = 'aitp_verify_image';
+const PG_USER = 'postgres';
+const PG_PASS = 'postgres';
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -388,13 +456,50 @@ function dockerStream(args, { timeoutMs }) {
   });
 }
 
+/**
+ * Spawn a child that LEADS ITS OWN PROCESS GROUP, so teardown can signal the group
+ * and reach grandchildren.
+ *
+ * `npm run <script>` is `npm` with the real work as a grandchild, and `child.kill()`
+ * reaches only `npm` — leaving the process that holds the database connection alive.
+ *
+ * This exists as a helper rather than two lines at the call site because the two
+ * halves MUST NOT drift apart: `detached: true` is what makes the pid a group
+ * leader, and the marker is what tells teardown to use a negative pid. Set the
+ * marker without detaching and the group kill fails with ESRCH, which teardown can
+ * only answer by killing the child alone — the grandchild then orphans while
+ * teardown reports success. Verified: that is exactly what happens. Binding them
+ * together in one function makes the mismatch unrepresentable.
+ */
+function spawnOwnGroup(cmd, args, opts2) {
+  const child = spawn(cmd, args, { ...opts2, detached: true });
+  child.__ownsProcessGroup = true;
+  return child;
+}
+
 // ── teardown ────────────────────────────────────────────────────────────────
 function killLiveChildren() {
   for (const child of liveChildren) {
+    // Kill the child's whole PROCESS GROUP where it has one, not just the child.
+    // `npm run db:migrate` is `npm` with drizzle-kit as a grandchild, and
+    // `child.kill()` reaches only `npm` — leaving drizzle-kit orphaned. Children
+    // that need this are spawned `detached: true` so they lead their own group and
+    // the negative pid cannot possibly signal this process. Falls back to the plain
+    // kill for the `docker` children, which have no group of their own.
     try {
-      child.kill('SIGKILL');
+      if (child.__ownsProcessGroup && child.pid) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
     } catch {
-      /* already gone */
+      // A group kill can legitimately fail with ESRCH — the group is already gone,
+      // or the flag was set on a child that was NOT spawned `detached`, in which case
+      // its pid leads no group. Swallowing that would leave the child alive while
+      // teardown reported success: green while false, which is the failure shape this
+      // file keeps finding. Always fall back to killing the child directly.
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* genuinely gone */
+      }
     }
     child.stdout?.destroy();
     child.stderr?.destroy();
@@ -407,7 +512,7 @@ function printKeepInstructions() {
   const ns = [...networks];
   if (!cs.length && !ns.length) return;
   console.log('\n--keep: resources left running. Remove them with:');
-  if (cs.length) console.log(`  docker rm -f ${cs.join(' ')}`);
+  if (cs.length) console.log(`  docker rm -f -v ${cs.join(' ')}`);
   if (ns.length) console.log(`  docker network rm ${ns.join(' ')}`);
   console.log(`  # or sweep every orphan of this harness: node scripts/verify-image.mjs --prune`);
 }
@@ -470,15 +575,21 @@ function cleanupSync() {
   networks.clear();
 
   // Fast path: remove what we know we created, by name.
+  //
+  // `-v` everywhere a container is removed. An image that declares a VOLUME makes
+  // an anonymous volume on `docker run`, and `docker rm -f` without `-v` strands
+  // it — a leak the container/network registries cannot see, so the harness would
+  // report clean while leaking. Postgres is additionally run on a tmpfs so no such
+  // volume exists in the first place; this is the backstop, not the fix.
   for (const c of cs) {
-    spawnSync('docker', ['rm', '-f', c], { stdio: 'ignore', timeout: 30_000 });
+    spawnSync('docker', ['rm', '-f', '-v', c], { stdio: 'ignore', timeout: 30_000 });
   }
 
   // Correctness path: containers FIRST — `network rm` fails while an endpoint is
   // still attached.
   sweepByLabelSync('container', () =>
     dockerSyncLines(['ps', '-aq', '--filter', `label=${RUN_LABEL}=${RUN_ID}`]),
-  (ids) => spawnSync('docker', ['rm', '-f', ...ids], { stdio: 'ignore', timeout: 30_000 }));
+  (ids) => spawnSync('docker', ['rm', '-f', '-v', ...ids], { stdio: 'ignore', timeout: 30_000 }));
 
   for (const n of ns) {
     spawnSync('docker', ['network', 'rm', n], { stdio: 'ignore', timeout: 20_000 });
@@ -846,6 +957,468 @@ function normaliseNativePath(p) {
 }
 
 // ── check runner ────────────────────────────────────────────────────────────
+// ── live substrate ──────────────────────────────────────────────────────────
+//
+// Everything below stands up a REAL deployment of the image: its own bridge
+// network, its own Postgres, the repo's own migrations, and the image itself run
+// against them. The static probes above can only see the artifact's shape; these
+// are what let later checks assert behaviour over HTTP.
+//
+// Every resource is registered for teardown BEFORE it is created. That ordering
+// is not stylistic: `docker rm -f <name>` issued between the daemon creating a
+// container and starting it removes nothing, which is how an earlier revision of
+// this file leaked twelve containers in state `created` under a SIGINT sweep.
+
+/**
+ * Derive `aid:pubkey:<base64url(raw Ed25519 public key)>` from a 32-byte seed,
+ * using `node:crypto` and NOTHING else.
+ *
+ * Deriving it with the SDK would compare the SDK against itself and prove
+ * nothing. This is an independent implementation, so the health-check assertion
+ * becomes a genuine cross-implementation equality — and it keeps the harness's
+ * host side free of any native dependency, which matters because the host may be
+ * a different arch from the image. Same discipline as the hand-rolled verifier in
+ * src/e2e/revocation-flow.integration.test.ts.
+ */
+function deriveAid(seedHex) {
+  const seed = Buffer.from(seedHex, 'hex');
+  if (seed.length !== 32) {
+    fail(`CP_AID_SEED_HEX must decode to 32 bytes, got ${seed.length}`);
+  }
+  // A PKCS#8 Ed25519 private key is a fixed 16-byte prefix followed by the seed.
+  const pkcs8 = Buffer.concat([
+    Buffer.from('302e020100300506032b657004220420', 'hex'),
+    seed,
+  ]);
+  const priv = createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+  const spki = createPublicKey(priv).export({ format: 'der', type: 'spki' });
+  // The last 32 bytes of an Ed25519 SPKI DER are the raw public key.
+  return `aid:pubkey:${spki.subarray(spki.length - 32).toString('base64url')}`;
+}
+
+/** An HTTP request with its own deadline, so one wedged route cannot eat the
+ *  watchdog. Returns the parsed body when it is JSON, the raw text otherwise. */
+async function httpReq(base, pathname, opts2 = {}) {
+  const { method = 'GET', key = null, origin = true, timeoutMs = HTTP_MS } = opts2;
+  const headers = {};
+  if (key) headers.authorization = `Bearer ${key}`;
+  if (origin) headers.origin = RUNTIME_ORIGIN;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}${pathname}`, { method, headers, signal: ac.signal });
+    const text = await res.text();
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
+    }
+    return { status: res.status, headers: res.headers, body, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** One-shot `docker logs`. Never `-f`: a follower is a long-lived child holding
+ *  pipes open, which is precisely the 18-minute-hang bug class. */
+async function containerLogs(name) {
+  const { stdout, stderr } = await docker(['logs', name], {
+    allowFail: true,
+    timeoutMs: 60_000,
+  });
+  return `${stdout}${stderr}`.trim() || '(no output)';
+}
+
+/** A run-unique private bridge network, so the app reaches Postgres by container
+ *  name — identical locally and in CI. */
+async function createNetwork() {
+  const name = nameFor('net');
+  networks.add(name);
+  await docker(['network', 'create', ...labelArgs(), name], { timeoutMs: 60_000 });
+  return name;
+}
+
+/**
+ * Note what is NOT passed here: `--platform`. Postgres runs NATIVE even when the
+ * image under test is emulated, so an amd64 run on an arm64 host has an emulated
+ * app talking to a native Postgres. That is deliberate — only container-to-container
+ * TCP crosses the boundary, and emulating the database would slow every run for no
+ * assertion gained. The consequence to know: an emulated run does not exercise an
+ * all-one-arch substrate. The image under test is always the requested platform,
+ * which is the thing this harness is about.
+ */
+async function startPostgres(net) {
+  const name = nameFor('pg');
+  containers.add(name);
+  await docker(
+    [
+      'run',
+      '-d',
+      '--name',
+      name,
+      '--network',
+      net,
+      // Loopback-bound EPHEMERAL port. Never 0.0.0.0, and never a fixed 5432 or
+      // 5433: those collide with docker-compose and with ci.yml's service.
+      '-p',
+      '127.0.0.1:0:5432',
+      // Keep the data directory in RAM so NO anonymous volume is ever created.
+      //
+      // postgres:16-alpine declares `VOLUME /var/lib/postgresql/data`, so a plain
+      // `docker run` makes an anonymous volume and `docker rm -f` without `-v`
+      // leaves it behind — on success as much as on failure. Measured: ~46 MB per
+      // run, surviving every exit path. Worse than the disk cost, it was INVISIBLE
+      // to this harness's own leak check, which counts containers and networks; a
+      // run could report "nothing leaked" while leaking. A volume that never
+      // exists cannot be forgotten, and the database is throwaway, so tmpfs is
+      // both the smaller surface and the faster one. `-v` on the removals below is
+      // the backstop for anything that still manages to create one.
+      '--tmpfs',
+      '/var/lib/postgresql/data:rw,size=512m',
+      '-e',
+      `POSTGRES_USER=${PG_USER}`,
+      '-e',
+      `POSTGRES_PASSWORD=${PG_PASS}`,
+      '-e',
+      `POSTGRES_DB=${PG_DB}`,
+      // The container's OWN healthcheck, same idiom as ci.yml and
+      // docker-compose.yml, rather than inventing a third readiness convention.
+      '--health-cmd',
+      `pg_isready -U ${PG_USER} -d ${PG_DB}`,
+      '--health-interval',
+      '2s',
+      '--health-timeout',
+      '5s',
+      '--health-retries',
+      '30',
+      ...labelArgs(),
+      PG_IMAGE,
+    ],
+    { timeoutMs: 180_000 },
+  );
+
+  const started = Date.now();
+  for (;;) {
+    const { stdout } = await docker(['inspect', '-f', '{{.State.Health.Status}}', name], {
+      allowFail: true,
+      timeoutMs: 20_000,
+    });
+    if (stdout.trim() === 'healthy') break;
+    if (Date.now() - started > PG_READY_MS) {
+      fail(
+        `Postgres never became healthy in ${Math.round(PG_READY_MS / 1000)}s ` +
+          `(last status: ${stdout.trim() || 'unknown'}). Its logs:\n${await containerLogs(name)}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  const { stdout: portOut } = await docker(['port', name, '5432/tcp'], { timeoutMs: 20_000 });
+  const hostPort = portOut.trim().split('\n')[0]?.split(':').pop();
+  if (!hostPort) {
+    fail(
+      `could not read Postgres's published host port from \`docker port\`: ` +
+        `${JSON.stringify(portOut)}. Migrations run from the host against that port, so ` +
+        'there is nothing to fall back to.',
+    );
+  }
+  console.log(
+    `postgres healthy in ${((Date.now() - started) / 1000).toFixed(1)}s ` +
+      `(127.0.0.1:${hostPort})`,
+  );
+  return { name, hostPort };
+}
+
+/**
+ * Apply the repo's own migrations from the HOST.
+ *
+ * Mandatory, and the reason is empirical rather than tidy-minded: unmigrated,
+ * src/lib/revocation/producer.ts catches the DB read failure and publishes an
+ * EMPTY BUT VALIDLY SIGNED list, so a signature check would pass against an image
+ * whose database access is completely broken; and /api/audit with a valid key
+ * answers 500, so there would be no way to tell an attached gate from a rejecting
+ * one. An unmigrated harness is a harness that lies.
+ *
+ * On the host because the runtime image bundles no drizzle-kit — see
+ * docs/operations.md. That is why Postgres publishes an ephemeral host port at
+ * all.
+ */
+async function migrate(hostPort) {
+  const url = `postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${hostPort}/${PG_DB}`;
+  const started = Date.now();
+  await new Promise((resolve, reject) => {
+    const child = spawnOwnGroup('npm', ['run', 'db:migrate'], {
+      cwd: ROOT,
+      env: { ...process.env, DATABASE_URL: url },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    liveChildren.add(child);
+    const out = [];
+    // Every `docker` call carries its own deadline so no single wedged invocation
+    // can consume the whole post-build ceiling. This child is the one long-running
+    // process that is not a `docker` call, and it needs the same treatment:
+    // drizzle-kit blocked on a Postgres advisory lock would otherwise burn the
+    // entire watchdog and then report "something hung" instead of naming the step.
+    //
+    // Kill the GROUP, not the child. An earlier revision killed only `npm` and
+    // reasoned that leaving the child inside this process group was safer, because
+    // an interactive Ctrl-C signals the whole foreground group and would reach
+    // drizzle-kit directly. That reasoning was measured only against
+    // process-group signals, and it does not hold for a signal aimed at this
+    // process's pid alone (a supervisor, `timeout`, `kill -INT <pid>`) or for this
+    // timeout path — both of which orphaned drizzle-kit. Since teardown runs on
+    // every one of those paths anyway, owning the group and killing it explicitly
+    // covers all of them.
+    //
+    // ONE MEASURED TRADE-OFF, stated rather than glossed: under `kill -9` aimed at
+    // this harness's process group, the OLD arrangement killed the grandchild as a
+    // side effect (it shared our group) whereas now it survives, because our handler
+    // never runs to kill its group. That path already leaked the container and the
+    // network on both arrangements — SIGKILL is not a path any teardown can cover —
+    // so it trades a process leak on one uncatchable path for correctness on the
+    // three catchable ones. Worth the exchange, but it is an exchange.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Only signal a child that is still running. `clearTimeout` happens in the
+      // `close` handler, so there is a narrow window where the child has exited, its
+      // close event is still queued, and the OS has reused its pid as a new group
+      // leader — a negative-pid SIGKILL would then hit an unrelated process group.
+      // Sub-millisecond and needs pid wraparound, but this is a kill by negative pid,
+      // where being wrong is expensive.
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }, MIGRATE_MS);
+    child.stdout.on('data', (d) => out.push(String(d)));
+    child.stderr.on('data', (d) => out.push(String(d)));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      liveChildren.delete(child);
+      reject(new Error(`could not run \`npm run db:migrate\`: ${e.message}`));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      liveChildren.delete(child);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (timedOut) {
+        reject(
+          new Error(
+            `migrations TIMED OUT after ${Math.round(MIGRATE_MS / 1000)}s — most likely ` +
+              `drizzle-kit is blocked on a lock. Output so far:\n${out.join('').trim()}`,
+          ),
+        );
+        return;
+      }
+      if (code !== 0) {
+        // Never continue to checks against a half-migrated schema: they would
+        // report application bugs that are really missing tables.
+        reject(
+          new Error(
+            `migrations FAILED (drizzle-kit exit ${code}). Nothing is checked against a ` +
+              `half-migrated schema.\n${out.join('').trim()}`,
+          ),
+        );
+        return;
+      }
+      resolve();
+    });
+  });
+  console.log(`migrations applied in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+}
+
+/**
+ * Prove the migrations actually built a schema, rather than trusting exit 0.
+ *
+ * This is load-bearing, and the reason is measured rather than theoretical: with
+ * NO migrations applied at all, `/api/health` still answers
+ * `{"ok":true,...,"db":"ok"}` with the correct AID and a 200, because its DB probe
+ * is `SELECT 1` — which needs no schema. So check 7 is fully green against a
+ * completely unmigrated database, and drizzle-kit's exit code was the only thing
+ * standing between this harness and the "harness that lies" its own comments warn
+ * about. Any exit-0 no-op — a drizzle-kit behaviour change, a journal pointing
+ * somewhere empty, a DATABASE_URL resolved differently than intended — would print
+ * "migrations applied" and sail through.
+ *
+ * Queried through `docker exec` on the Postgres container so this needs no psql on
+ * the host.
+ */
+async function assertSchemaMigrated(pgName) {
+  let expected;
+  try {
+    expected = JSON.parse(
+      readFileSync(path.join(ROOT, 'drizzle', 'meta', '_journal.json'), 'utf8'),
+    ).entries.length;
+  } catch (err) {
+    fail(`could not read drizzle/meta/_journal.json to learn the migration count: ${err.message}`);
+  }
+  if (!expected) {
+    fail('drizzle/meta/_journal.json lists no migrations, so there is nothing to verify');
+  }
+  // Keep stderr: without it a psql that could not run at all (binary missing, exec
+  // denied, container restarting) yields empty stdout, Number('') is 0, and the
+  // failure below blames the migration for what is really a broken query. Fails
+  // closed either way, but the diagnosis has to name the right thing.
+  const problems = [];
+  const q = async (sql) => {
+    const { stdout, stderr } = await docker(
+      ['exec', pgName, 'psql', '-U', PG_USER, '-d', PG_DB, '-tAc', sql],
+      { timeoutMs: 60_000, allowFail: true },
+    );
+    if (stderr.trim()) problems.push(stderr.trim());
+    return stdout.trim();
+  };
+  const why = () =>
+    problems.length ? `\npsql also reported:\n  ${[...new Set(problems)].join('\n  ')}` : '';
+  const tables = Number(
+    await q("select count(*) from information_schema.tables where table_schema = 'public'"),
+  );
+  const applied = Number(await q('select count(*) from drizzle.__drizzle_migrations'));
+  // Lead with the query failure when there was one. Otherwise this reports "the
+  // schema holds 0 tables" — a count that was never actually measured, because
+  // Number('') is 0 — and buries the real cause below the fold.
+  if (problems.length) {
+    fail(
+      'could not read the schema back to confirm the migrations applied, so whether ' +
+        'they did is unknown. psql reported:\n  ' +
+        [...new Set(problems)].join('\n  '),
+    );
+  }
+  if (!Number.isInteger(tables) || tables === 0) {
+    fail(
+      `migrations reported success but the public schema holds ${JSON.stringify(tables)} ` +
+        'tables. Nothing downstream would notice: /api/health probes the database with ' +
+        'SELECT 1, so it answers db:"ok" against an empty database.',
+    );
+  }
+  // Compare against the EXPECTED count, not against zero. "At least one migration
+  // ran" is a weaker claim than the spec asks for — it says never to proceed
+  // against a half-migrated schema — and a partial apply that exits 0 (a truncated
+  // journal, a future drizzle-kit that stops early) would satisfy a non-zero check
+  // and print a number nobody compares. The expected count is free: it is the
+  // journal this repo commits.
+  if (applied !== expected) {
+    fail(
+      `drizzle.__drizzle_migrations holds ${JSON.stringify(applied)} row(s) but ` +
+        `drizzle/meta/_journal.json lists ${expected} migration(s). The schema is ` +
+        'partially applied, which the plan explicitly says never to run checks against — ' +
+        'a half-migrated database produces failures that look like application bugs.' +
+        why(),
+    );
+  }
+  console.log(`schema verified: ${tables} tables, ${applied}/${expected} migrations applied`);
+}
+
+/**
+ * Run the image under test against the substrate and wait until it answers.
+ *
+ * `label` distinguishes several app containers in one run; `extraEnv` is how a
+ * later check varies one variable while holding the rest fixed.
+ */
+async function startApp(net, pgName, platform, label, extraEnv = {}) {
+  const name = nameFor(label);
+  containers.add(name);
+  const env = {
+    DATABASE_URL: `postgres://${PG_USER}:${PG_PASS}@${pgName}:5432/${PG_DB}`,
+    CORS_ORIGIN: RUNTIME_ORIGIN,
+    API_KEYS: API_KEY,
+    CP_AID_SEED_HEX: SEED_HEX,
+    ENROLLMENT_SECRET,
+    // Explicit and generous: a future change to the defaults in src/lib/config.ts
+    // must not be able to make these checks flaky through rate limiting.
+    RATE_LIMIT_PUBLIC_PER_IP_MIN: '10000',
+    RATE_LIMIT_API_KEY_PER_MIN: '10000',
+    RATE_LIMIT_ENROLLMENT_PER_IP_MIN: '10000',
+    ...extraEnv,
+  };
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+  await docker(
+    [
+      'run',
+      '-d',
+      '--name',
+      name,
+      '--network',
+      net,
+      '--platform',
+      platform,
+      // Ephemeral and loopback-bound: a fixed 4000 would collide with a local
+      // `npm run dev`.
+      '-p',
+      '127.0.0.1:0:4000',
+      ...envArgs,
+      ...labelArgs(),
+      opts.tag,
+    ],
+    { timeoutMs: 180_000 },
+  );
+
+  const { stdout: portOut } = await docker(['port', name, '4000/tcp'], { timeoutMs: 20_000 });
+  const hostPort = portOut.trim().split('\n')[0]?.split(':').pop();
+  if (!hostPort) {
+    fail(`could not read the app's published host port from \`docker port\`: ${JSON.stringify(portOut)}`);
+  }
+  const base = `http://127.0.0.1:${hostPort}`;
+
+  const started = Date.now();
+  for (;;) {
+    // Poll liveness ALONGSIDE the HTTP probe. A container that dies from a
+    // native-module failure is then reported in about a second with its logs,
+    // instead of as a four-minute timeout with no explanation.
+    const { stdout: running } = await docker(['inspect', '-f', '{{.State.Running}}', name], {
+      allowFail: true,
+      timeoutMs: 20_000,
+    });
+    const state = running.trim();
+    if (state === 'false') {
+      fail(
+        `the app container exited during readiness, after ` +
+          `${((Date.now() - started) / 1000).toFixed(1)}s. Its logs:\n${await containerLogs(name)}`,
+      );
+    }
+    // Neither `true` nor `false` means `docker inspect` could not answer — the
+    // container was removed out of band, or the daemon is unwell. Without this the
+    // loop would spin out the full readiness deadline and then blame a slow boot.
+    if (state !== 'true') {
+      fail(
+        `\`docker inspect\` reported the app container's running state as ` +
+          `${JSON.stringify(state)}, which is neither "true" nor "false" — the container ` +
+          'has probably been removed from under this run, or the daemon is failing to ' +
+          'answer. Not waiting out the readiness deadline for that.',
+      );
+    }
+    try {
+      // BREAK ON ANY HTTP RESPONSE — never on `res.ok`, never on a 200.
+      // src/app/api/health/route.ts answers 503 whenever the DB ping fails, so a
+      // status-gated loop would spin out the whole deadline on exactly the
+      // misconfiguration this substrate exists to report, and the `db: "ok"`
+      // assertion would be unreachable by construction. Readiness means "the
+      // server answered"; what it answered is a separate, later check.
+      await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(3000) });
+      break;
+    } catch {
+      if (Date.now() - started > APP_READY_MS) {
+        fail(
+          `the app never answered on ${base} within ${Math.round(APP_READY_MS / 1000)}s. ` +
+            `Its logs:\n${await containerLogs(name)}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  console.log(
+    `app "${label}" answered in ${((Date.now() - started) / 1000).toFixed(1)}s (${base})`,
+  );
+  return { name, base };
+}
+
 const results = [];
 
 async function runCheck(id, title, fn) {
@@ -891,7 +1464,7 @@ async function prune() {
   for (const line of cs.split('\n').map((l) => l.trim()).filter(Boolean)) {
     const [name, runId] = line.split('\t');
     if (runId === RUN_ID) continue;
-    await docker(['rm', '-f', name], { allowFail: true, timeoutMs: 30_000 });
+    await docker(['rm', '-f', '-v', name], { allowFail: true, timeoutMs: 30_000 });
     console.log(`  pruned container ${name} (run ${runId || 'unlabelled'})`);
     removed++;
   }
@@ -1309,6 +1882,76 @@ async function main() {
     return `${nativeModules.length} native module(s): ${nativeModules.join(', ')}`;
   });
 
+  // ── live substrate ───────────────────────────────────────────────────────
+  //
+  // Deliberately AFTER the --update-baseline branch returns: regenerating the
+  // baseline is a static operation and must not pay for a Postgres boot and a
+  // migration run.
+  //
+  // Not gated on the structural checks above, on purpose. If the native binary is
+  // missing the app container dies, and the readiness loop reports that in about
+  // a second with the container's own logs — which is a better diagnosis than
+  // skipping the live half and saying nothing about it.
+  console.log('\nstanding up the live substrate');
+  const net = await createNetwork();
+  const pg = await startPostgres(net);
+  await migrate(pg.hostPort);
+  await assertSchemaMigrated(pg.name);
+  const app = await startApp(net, pg.name, platform, 'app');
+
+  // Testability hook, same rationale as the two timeout hooks. The whole run
+  // takes about five seconds locally, so the window in which a network, a
+  // Postgres and an app container are ALL live is well under a second — too
+  // narrow to aim a signal at reliably. Teardown across every exit path is the
+  // property this harness most needs to keep (an earlier revision leaked twelve
+  // containers here), and a property that cannot be tested on demand is one that
+  // rots. Set AITP_VERIFY_IMAGE_PAUSE_MS to hold the substrate up and Ctrl-C into
+  // it. Unset in normal runs, including CI.
+  const pauseMs = Number(process.env.AITP_VERIFY_IMAGE_PAUSE_MS) || 0;
+  if (pauseMs) {
+    console.log(
+      `AITP_VERIFY_IMAGE_PAUSE_MS=${pauseMs}: holding 1 network and 2 containers up. ` +
+        'Ctrl-C now to exercise teardown.',
+    );
+    await new Promise((r) => setTimeout(r, pauseMs));
+  }
+
+  const expectedAid = deriveAid(SEED_HEX);
+
+  await runCheck(7, '/api/health reports db ok and the seed-derived AID', async () => {
+    const r = await httpReq(app.base, '/api/health');
+    // ORDER MATTERS. `db` is asserted BEFORE the status, because route.ts answers
+    // 503 whenever the DB ping fails: a status-first assertion reports "status
+    // 503" for an unreachable database, which is the symptom rather than the
+    // cause, and buries the actual finding in a JSON blob. Checking `db` first
+    // means the most specific available message is the one that fires. All three
+    // properties are still asserted.
+    if (r.body?.db !== 'ok') {
+      fail(
+        `db is ${JSON.stringify(r.body?.db)}, expected "ok" — the container cannot reach ` +
+          `Postgres at ${pg.name}:5432 (HTTP status was ${r.status}; route.ts answers 503 ` +
+          `when the DB ping fails). The app's logs:\n${await containerLogs(app.name)}`,
+      );
+    }
+    if (r.body?.aid !== expectedAid) {
+      fail(
+        'the served AID is not the one CP_AID_SEED_HEX derives to:\n' +
+          `  expected (host, node:crypto): ${expectedAid}\n` +
+          `  served   (image, aitp SDK):   ${r.body?.aid}`,
+      );
+    }
+    // Reached only when the DB is healthy and the AID is right, so a non-200 here
+    // is a genuinely different problem and deserves its own message.
+    if (r.status !== 200) {
+      fail(
+        `db and aid are both correct but the status is ${r.status}, not 200 ` +
+          `(body: ${JSON.stringify(r.body)})`,
+      );
+    }
+    // Print expectedAid, not r.body.aid: they are asserted equal just above, but the
+    // label says "derived on the host", so the host's value is the honest one to show.
+    return `db=ok  aid=${expectedAid}\n(derived independently on the host from CP_AID_SEED_HEX)`;
+  });
 
   const failures = results.filter((r) => !r.ok).length;
   if (failures) throw new Error(`${failures}/${results.length} image checks FAILED`);

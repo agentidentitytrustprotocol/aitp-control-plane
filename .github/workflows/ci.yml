@@ -195,18 +195,21 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Looks INSIDE the shipped standalone image — the artifact that actually
-  # deploys. Today it proves the native NAPI binary loads under the image's own
-  # arch and libc, that the OpenTelemetry tree was traced in, that every traced
-  # external is a symlink that resolves, and that the `.node` inventory matches
-  # scripts/image-artifact-baseline.json including the arch token.
+  # deploys. Statically it proves the native NAPI binary loads under the image's
+  # own arch and libc, that the OpenTelemetry tree was traced in, that every
+  # traced external present is a symlink that resolves, and that the `.node`
+  # inventory matches scripts/image-artifact-baseline.json including the arch
+  # token. It then RUNS the image against an ephemeral Postgres on a private
+  # network, applies the repo's own migrations, and asserts /api/health reports
+  # `db: "ok"` and the AID that CP_AID_SEED_HEX derives to.
   #
   # `verify:gate` in build-and-test covers the request gate, but only under
   # `next start` — which next.config.ts records as incompatible with
   # `output: 'standalone'`, so it proves the gate in a configuration the image
-  # never runs. Closing that half (booting this image against an ephemeral
-  # Postgres and asserting gate attachment, the signing path and the CORS
-  # build-freeze) is the rest of #68 and arrives in later commits; this comment
-  # is updated when it does.
+  # never runs. Closing that half (gate attachment, the signing path and the CORS
+  # build-freeze, all against the live substrate this job now stands up) is the
+  # rest of #68 and arrives in later commits; this comment is updated when it
+  # does.
   #
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
   # wrong architecture, or whose traced externals had stopped resolving, would
@@ -230,11 +233,12 @@ jobs:
   verify-image:
     name: Verify shipped image (amd64)
     runs-on: ubuntu-latest
-    # Must EXCEED the harness's own ceilings (25-minute build timeout + 12-minute
-    # post-build watchdog = 37) or GitHub kills the job first and the harness never
+    # Must EXCEED the harness's own ceilings (25-minute build timeout + 25-minute
+    # post-build watchdog = 50) or GitHub kills the job first and the harness never
     # gets to print which of the two it was — losing exactly the distinction those
-    # two separate timeouts exist to give. Keep this above their sum.
-    timeout-minutes: 45
+    # two separate timeouts exist to give. Keep this above their sum, with room for
+    # checkout, setup-node, npm ci and setup-buildx on top.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -243,6 +247,14 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Needed for drizzle-kit only. The harness applies the repo's own migrations
+      # from the HOST, because the runtime image bundles no drizzle-kit — without
+      # them src/lib/revocation/producer.ts publishes an empty-but-validly-signed
+      # list and the live checks would pass against a broken database.
+      - name: Install dependencies
+        run: npm ci
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
