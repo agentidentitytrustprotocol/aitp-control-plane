@@ -29,7 +29,9 @@ spec rather than restate it.
   big). Such a field is always optional and additive — absent means "not
   applicable here", never "unknown".
 
-  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`. A `500` is the one status that does **not** carry the error shape above — its body is whatever the framework renders.
+  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
+
+  A `500` is the one status that **may or may not** carry the shape above, so do not assume a body: `POST /api/revocation/entries` returns `{ "error": ..., "code": "INSERT_FAILED" }`, while an unhandled internal fault — such as the deliberate rethrow on `POST /api/registry/enroll` — reaches you as a framework `500` with an **empty body**.
 
 ## Authentication
 

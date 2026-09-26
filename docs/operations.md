@@ -254,13 +254,17 @@ which is the whole point of the metric:
   rejects *every* enrollment while this counter stays flat at zero.
 - **The rethrow to `500`** — an unclassifiable internal fault.
 
-So the two loudest fleet-wide breakages are invisible in this metric, and — be
-blunt about it — **there is currently no other in-process signal for them
-either**: the route logs only classified verification failures, the proxy logs
-nothing, and `rate_limit_drops` moves only on a `429`. Until that is fixed
-(tracked as an open question on the #69 plan) the detection path for those cases
-is your ingress or load balancer: alert on the enroll route's `5xx` rate and on a
-sustained `400` rate, not on this counter.
+The first two are the loudest fleet-wide breakages, and — be blunt about it —
+**neither has any other in-process signal**: the route logs only classified
+verification failures, `src/proxy.ts` has no logger at all, and
+`rate_limit_drops` moves only on a `429`. Until that is fixed (tracked as an open
+question on the #69 plan) the detection path for those two is your ingress or
+load balancer: alert on the enroll route's `5xx` rate and on a sustained `400`
+rate, not on this counter.
+
+The third — the rethrow to `500` — *is* visible, but only in the application log:
+Next prints the error and a stack trace to stderr. So during a `500` incident
+read the pod logs; for the other two there is nothing there to read.
 
 Its `code` label is a bounded set of **ten** values — the eight codes the `aitp`
 SDK documents for manifest verification, plus:

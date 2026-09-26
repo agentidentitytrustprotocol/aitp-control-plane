@@ -24,9 +24,13 @@ ENV NEXT_OUTPUT=standalone
 #
 # They are NOT satisfying a boot-time config validation, as this comment used to
 # claim — there isn't one: src/lib/config.ts only `console.warn`s, and
-# EnrollmentService is constructed lazily on the first enrollment request. Which
-# of these the build would actually fail without has not been measured, so treat
-# them as belt-and-braces rather than each one load-bearing.
+# EnrollmentService is constructed lazily on first use. Measured: `next build`
+# with NEXT_OUTPUT=standalone, NODE_ENV=production and ALL of these unset exits 0
+# and builds every route, so none of them is load-bearing for the build.
+# (CP_AID_SEED_HEX's production throw lives inside initCpIdentity(), reached from
+# a handler, not at module scope.) They are kept as belt-and-braces so the build
+# never depends on that staying true.
+#
 # These are NOT real secrets and are overridden by the runtime
 # environment — never baked into the final runner image.
 ENV NODE_ENV=production \

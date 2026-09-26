@@ -14,10 +14,12 @@ import { ManifestRejectedError } from './verify-error';
 // copy of the code and message, and the two implementations genuinely disagree
 // on `expires_at: 0` (guarded here via `typeof === 'number'`, treated as absent
 // there via `if (manifest.expires_at)`). This side of that divergence is pinned
-// in enrollment-guards.test.ts and both sides are documented in docs/api.md;
-// nothing asserts agents/route.ts's side, so a change there would go unnoticed
-// here. De-duplicating the guard is its own change, tracked as an open question
-// on the #69 plan.
+// in enrollment-guards.test.ts and both sides are documented in docs/api.md.
+// agents/route.ts's guard IS asserted for its code and message (agents.test.ts,
+// and cross-route in flow.integration.test.ts) — what nothing asserts is its
+// handling of `expires_at: 0`, so a change to that side would go unnoticed.
+// De-duplicating the guard is its own change, tracked as an open question on the
+// #69 plan.
 const REGISTRATION_EXPIRY_GUARD_MS = 5 * 60 * 1000;
 
 // Enrollment tokens are short-lived bearer credentials. The lifetime is

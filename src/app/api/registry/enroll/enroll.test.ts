@@ -178,9 +178,12 @@ describe('POST /api/registry/enroll', () => {
     // value outside the allowlist, which is NOT forwarded.
     //
     // This is the mechanism the expiry guard's own code rides on:
-    // `enrollment.ts` decides the condition and this route only has to accept
-    // the value. (The route does name MANIFEST_EXPIRED itself, but only for the
-    // separate SDK-`expired` translation, which never reaches this branch.)
+    // `enrollment.ts` decides the *condition* and this route only has to accept
+    // the value. The route does name MANIFEST_EXPIRED twice — in
+    // REJECTION_CODES, which is precisely what lets this branch forward it (drop
+    // it from the allowlist and this test fails), and in the separate
+    // SDK-`expired` translation, which never reaches this branch. What the route
+    // has no knowledge of is the condition, not the value.
     verifyAndIssueTokenMock.mockImplementation(() => {
       throw new ManifestRejectedError('expiring too soon', 'MANIFEST_EXPIRED');
     });
