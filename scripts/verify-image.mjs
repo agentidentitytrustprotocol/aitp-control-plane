@@ -127,15 +127,34 @@
  * closure of everything that runs before the gate decides. This check pins part of that
  * closure, not all of it:
  *
- *   1. THE DEPENDENCY TREE, apart from `node_modules/next`. **A KNOWN OPEN HOLE.** A
- *      closure chunk can `require()` a traced external, and that package runs in the
- *      gate's realm. Measured: `[root-of-the-server]__1up5uol._.js` requires `pino`, and
- *      appending a `Set.prototype.has` shim to `/app/node_modules/pino/pino.js` flipped
- *      four un-probed routes from 401 to a handler-reached 500 while ALL 13 CHECKS PASSED
- *      (`aitp-attack24:pino-external`). Closing it means pinning `/app/node_modules`,
- *      which costs either the "one pin serves both arches" property (native packages are
- *      arch-specific) or leaves `.node` bytes unpinned. That trade-off is UNRESOLVED and
- *      escalated, not silently chosen — see plans/verify-image-harness.md Phase 4.
+ *   1. THE DEPENDENCY TREE, apart from `node_modules/next`. **OUT OF SCOPE BY DELIBERATE
+ *      DECISION — read this before "fixing" it.** A closure chunk can `require()` a traced
+ *      external, and that package runs in the gate's realm. Measured:
+ *      `[root-of-the-server]__1up5uol._.js` requires `pino`, and appending a
+ *      `Set.prototype.has` shim to `/app/node_modules/pino/pino.js` flipped four un-probed
+ *      routes from 401 to a handler-reached 500 while ALL 13 CHECKS PASSED
+ *      (`aitp-attack24:pino-external`), with the gate region, the whole bootGraph and
+ *      nextTreeSha all byte-identical.
+ *        WHAT THIS CHECK GUARANTEES is that THIS REPO'S OWN COMPILED OUTPUT — the gate's
+ *      compiled logic, the middleware/instrumentation chunk graph, the framework tree that
+ *      invokes it, and the image's process config — is byte-for-byte the reviewed code. That
+ *      is the regression class #68 was filed for: a bundler swap, a Next.js upgrade, a
+ *      next.config.ts or Dockerfile edit, or a src/proxy.ts rename silently DETACHING the
+ *      gate. It does NOT guarantee that no installed dependency's code was tampered with
+ *      after install, and it is not meant to.
+ *        WHY: that is a supply-chain-integrity question with a better owner. `npm ci`
+ *      installs strictly from package-lock.json and verifies each tarball against that
+ *      lockfile's `integrity` hash — in the Dockerfile and in every ci.yml job;
+ *      package-lock.json is committed, so a dependency change is a reviewable diff; and
+ *      ci.yml's `Dependency audit (prod, high+)` job is this repo's standing check on the
+ *      tree itself. An attacker who can rewrite /app/node_modules inside the image can
+ *      equally rewrite the `node` binary, which item 3 below already places out of reach of
+ *      anything that READS files out of the image. Closing it here would cost either the
+ *      measured "one pin serves both arches with no normalisation" property (native packages
+ *      are arch-specific) or leave `.node` bytes unpinned — a different hole of the same
+ *      shape. So this is a STATED SCOPE LINE, not deferred work; there is deliberately no
+ *      follow-up issue for it. Revisit it, if ever, as "should the image pin its dependency
+ *      tree?" — not as "check 13 has a hole".
  *   2. ROUTE-HANDLER CHUNKS (`.next/server/chunks/_next-internal_server_app_api_*`).
  *      Outside the loader closure by construction, but they run in the same PROCESS, so a
  *      shim installed while a public route is handled can poison a later gate decision.
