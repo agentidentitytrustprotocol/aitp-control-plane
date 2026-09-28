@@ -440,6 +440,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   | rebuild of unchanged source | byte-identical |
   | **adding a new `/api/*` route** | **byte-identical**, filename hash included |
   | **a `node:24-slim` base-image patch release** | **does not move the pin** — but only because `NODE_VERSION` and `YARN_VERSION` are excluded from the `Env` comparison by name. See below; without that exclusion this was the pin's most frequent mover, and the loudest |
+  | **a build host with a different CPU count** (13-core dev machine vs a 4-vCPU CI runner) | **does not move the pin** — but only because `"cpus":<n>` in `server.js` is canonicalised. Caught by CI's first real run; see below |
 
   **Why two `Env` keys are excluded, and why that is not softening the equality.**
   `NODE_VERSION` and `YARN_VERSION` come from `node:24-slim`, not from this repo's
@@ -456,6 +457,33 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   decides what code runs stays pinned — `NODE_OPTIONS` above all, `PATH`, `NODE_ENV`,
   `HOSTNAME`, `PORT`, `NEXT_TELEMETRY_DISABLED` — and keys are excluded by **name**, so
   nothing can be smuggled in under one. Do not grow that list to quiet a red check.
+
+  **And why `server.js`'s `"cpus"` is canonicalised — the same argument, found the hard
+  way.** Next inlines the fully-resolved `nextConfig` into the standalone boot script, and
+  that config carries `experimental.cpus`, which Next defaults from the **build host's core
+  count**. A 13-core dev machine bakes in `"cpus":13`; a 4-vCPU `ubuntu-latest` runner bakes
+  in `"cpus":3`. That one byte (`server.js` 7851 vs 7850) failed check 13 on this job's very
+  first real CI run — with the *ambiguous load-path triage*, on a build nobody had touched,
+  while the gate region, every chunk, `nextTreeSha` and `imageConfig` were all
+  byte-identical. Left alone it would be red on any machine whose core count differs from
+  whoever last re-pinned, which is a guaranteed route to reflex re-pinning.
+
+  So the digest is taken over `server.js` with the exact literal `"cpus":<digits>` replaced
+  by a placeholder, and nothing else. This is the **same category** as `NODE_VERSION`: not
+  compiled output, not this repo's code, but `os.cpus().length` from whichever machine ran
+  `next build`, captured verbatim. The prohibition on normalising is about compiled output —
+  the thing an attacker edits and the thing five probe-based formulations were defeated on —
+  and every other byte of `server.js` remains pinned, the rest of the inlined config
+  included. Verified: `"cpus"` is the only host-derived value in the file (every other
+  number is a fixed Next default; no paths, hostnames, timestamps or user names), the
+  canonicalised digest is identical at 3, 13 and 95 cores, and a
+  `Module.prototype._compile` injection — the measured attack that put `server.js` in this
+  pin in the first place — is still caught.
+
+  **These two are the first and last exclusions of their kind.** A third would mean the pin
+  has started measuring the build host instead of the build, and the answer then is to make
+  the build reproducible — pin `experimental.cpus` in `next.config.ts`, digest-pin the base
+  image — not to widen the exclusions.
 
   That last row is the one that decides whether this is livable: the middleware and
   instrumentation chunks are referenced only by their loaders and contain no route

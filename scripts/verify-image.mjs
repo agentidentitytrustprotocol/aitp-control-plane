@@ -2037,6 +2037,47 @@ async function withImageContainer(tag, platform, fn) {
  */
 const UNPINNED_ENV_KEYS = new Set(['NODE_VERSION', 'YARN_VERSION']);
 
+/**
+ * `server.js` carries ONE value derived from the BUILD MACHINE rather than from this
+ * repo, and it must be neutralised or the pin is unusable. Measured on CI's first run.
+ *
+ * Next inlines the fully-resolved `nextConfig` into the standalone boot script, and that
+ * config includes `experimental.cpus`, which Next defaults from the build host's core
+ * count. A 13-core dev machine bakes in `"cpus":13`; a 4-vCPU `ubuntu-latest` runner
+ * bakes in `"cpus":3`. That is a ONE-BYTE difference — `server.js` was 7851 bytes locally
+ * and 7850 in CI — and it failed check 13 with the ambiguous load-path triage on a build
+ * nobody had touched, while the gate region, every chunk, `nextTreeSha` and `imageConfig`
+ * were all byte-identical. Unfixed, the check would be red on any machine whose core count
+ * differs from whoever last re-pinned, which guarantees the reflex re-pinning this design
+ * cannot survive.
+ *
+ * WHY THIS IS NOT "teaching the comparison to tolerate variation". The prohibition that
+ * matters — stated in this file's header and in docs/operations.md — is against tolerating
+ * variation in COMPILED OUTPUT, because that is the thing an attacker edits and the thing
+ * five probe-based formulations were defeated on. `experimental.cpus` is not compiled
+ * output and not this repo's code: it is `os.cpus().length` from whichever machine ran
+ * `next build`, captured verbatim. It is the same category as the base image's
+ * `NODE_VERSION` (see UNPINNED_ENV_KEYS) — build-host metadata masquerading as artifact
+ * content. Every other byte of `server.js` stays pinned, including the whole rest of the
+ * inlined config; the substitution is anchored to the exact literal `"cpus":<digits>` and
+ * rewrites nothing else, so a `Module.prototype._compile` hook — the measured attack that
+ * put `server.js` in this pin at all (`aitp-attack21`) — is still caught.
+ *
+ * Verified to be the ONLY host-derived value in the file: every other number in the
+ * inlined config is a fixed Next default, and there are no absolute paths, hostnames,
+ * timestamps or user names in it.
+ *
+ * THIS IS THE SECOND AND LAST EXCLUSION OF ITS KIND. A third would mean this pin has
+ * started measuring the build host instead of the build, and the answer then is to make
+ * the build reproducible (pin `experimental.cpus` in `next.config.ts`, digest-pin the
+ * base image) rather than to widen the exclusions.
+ */
+function canonicaliseServerJs(buf) {
+  const text = buf.toString('utf8');
+  const canon = text.replace(/"cpus":\d+/g, '"cpus":<BUILD_HOST_CPUS>');
+  return Buffer.from(canon, 'utf8');
+}
+
 /** The pinned subset of `docker image inspect`'s Config, in a fixed key order. */
 async function readImageConfig(tag) {
   const { stdout } = await docker(['image', 'inspect', tag, '--format', '{{json .Config}}'], {
@@ -2224,8 +2265,9 @@ async function extractGatePin(tag, platform) {
     // the Next server that loads the middleware chunk, so a compile hook here rewrites
     // the gate before it runs. Pinned as a first-class member of the boot graph.
     const serverBuf = await readFile('/app/server.js');
+    const serverCanon = canonicaliseServerJs(serverBuf);
     const bootGraph = [
-      { path: 'server.js', bytes: serverBuf.length, sha256: sha256Hex(serverBuf) },
+      { path: 'server.js', bytes: serverCanon.length, sha256: sha256Hex(serverCanon) },
     ];
 
     // The middleware loader — the gate's own chunk graph — and the entry module the
