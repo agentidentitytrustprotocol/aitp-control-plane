@@ -280,14 +280,16 @@ jobs:
   verify-image:
     name: Verify shipped image (amd64)
     runs-on: ubuntu-latest
-    # Must EXCEED the harness's own ceilings (25-minute build timeout + 40-minute
-    # post-build watchdog = 65) or GitHub kills the job first and the harness never
-    # gets to print which of the two it was — losing exactly the distinction those
-    # two separate timeouts exist to give. Keep this above their sum, with room for
+    # Must EXCEED the harnesses' own ceilings (25-minute build timeout + 40-minute
+    # post-build watchdog = 65, plus verify-sse-stream's 10-minute watchdog on the
+    # same image = 75) or GitHub kills the job first and neither harness gets to
+    # print which of its two timeouts it was — losing exactly the distinction those
+    # separate timeouts exist to give. Keep this above their sum, with room for
     # checkout, setup-node, npm ci and setup-buildx on top. The watchdog grew from
-    # 25 to 40 when the OTEL_ENABLED=true container added a second app boot; if it
-    # moves again, this number moves with it.
-    timeout-minutes: 75
+    # 25 to 40 when the OTEL_ENABLED=true container added a second app boot, and
+    # this job grew from 75 to 90 when the SSE step was added; if either moves
+    # again, this number moves with it.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -308,11 +310,43 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # --tag is passed EXPLICITLY, even though it is the harness's default, because
+      # the step below reuses this exact image. An invisible coupling to a default
+      # would break silently the day someone changed it; spelled out, the two steps
+      # are visibly about the same artifact.
       - name: Verify the shipped image
         run: >-
           npm run verify:image --
           --platform linux/amd64
+          --tag aitp-control-plane:verify-image
           --inventory-out image-inventory-amd64.json
+
+      # A SECOND HARNESS AGAINST THE SAME IMAGE, not a second job, and the reason is
+      # the build: `verify:image` deliberately leaves the image in the local daemon,
+      # so this step costs seconds instead of a second cold multi-minute build. It is
+      # a separate FILE (three harnesses, three configurations — see the header of
+      # scripts/verify-sse-stream.mjs) sharing one BUILD.
+      #
+      # WHAT IT ADDS that nothing else in CI covers: it opens real SSE connections to
+      # the shipped standalone server and MEASURES the time to the first response
+      # byte. Issue #89 was a stream that wrote nothing at connect, so Next never
+      # called res.flushHeaders() and clients got no status line at all until the 15 s
+      # heartbeat — a defect entirely invisible to a unit test of the route (which
+      # receives a Response object, never a socket) and to `verify:image` (which
+      # asserts on structure and on non-streaming responses). It also pins the
+      # prelude's bytes, the absence of content-encoding under
+      # `Accept-Encoding: gzip, br` (only meaningful with Next's real compression
+      # middleware in the path), the keepalive interval on the wire, and the
+      # 503 SSE_CAPACITY refusal in a second container.
+      #
+      # Being a step in THIS job rather than a job of its own also means docker-publish
+      # — which `needs: verify-image` — is gated on it for free.
+      - name: Verify the SSE streaming contract in the same image
+        run: >-
+          npm run verify:sse --
+          --platform linux/amd64
+          --tag aitp-control-plane:verify-image
+          --no-build
 
       # ALWAYS, not only on success. Both arches normalise to the same shape, so the
       # whole value of this file is the case where they legitimately DIVERGE — and a
@@ -345,11 +379,12 @@ jobs:
     name: Verify shipped image (arm64, opt-in)
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.verify_image_arm64
-    # Higher than the amd64 leg's 75 and than docker-build-check-arm64's 45: this one
+    # Higher than the amd64 leg's 90 and than docker-build-check-arm64's 45: this one
     # pays QEMU emulation for the BUILD (the harness allows 60 minutes for an
     # emulated build, against 25 native) and then boots two app containers and a
-    # Postgres on top of it.
-    timeout-minutes: 120
+    # Postgres on top of it, plus the SSE harness's two more containers and its own
+    # 10-minute watchdog. 60 + 40 + 10 = 110, so 135 leaves room for setup on top.
+    timeout-minutes: 135
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -377,7 +412,21 @@ jobs:
         run: >-
           npm run verify:image --
           --platform linux/arm64
+          --tag aitp-control-plane:verify-image
           --inventory-out image-inventory-arm64.json
+
+      # The SSE streaming contract on the emulated arch too — see the amd64 leg for
+      # what it covers and why it reuses that job's image rather than building again.
+      # The flush budget is 1 s against a measured ~7-20 ms in a native container, so
+      # QEMU's slowdown has two orders of magnitude of headroom; if that ever stops
+      # being true the harness's own output prints the measured number, so the
+      # decision is made on data rather than on a guess.
+      - name: Verify the SSE streaming contract in the same image
+        run: >-
+          npm run verify:sse --
+          --platform linux/arm64
+          --tag aitp-control-plane:verify-image
+          --no-build
 
       - name: Upload the normalised artifact inventory
         if: always()

@@ -801,11 +801,92 @@ Two things to know about what it leaves behind:
   discarded with the job. `docker volume prune` is the right tool locally, at a
   time of your choosing.
 
-The two harnesses are deliberately **not** merged: `verify:gate` owns the
+### Verifying the SSE stream in the shipped image
+
+```sh
+npm run verify:sse                             # builds, then runs the image
+npm run verify:sse -- --no-build --tag <tag>    # reuse an image you already have
+```
+
+`scripts/verify-sse-stream.mjs` is the third harness, and the only one that
+**measures a latency**. It runs the shipped image and opens real SSE connections
+to `GET /api/events/stream`, on an **empty backlog** — the state of a freshly
+deployed process, and the exact state issue
+[#89](https://github.com/agentidentitytrustprotocol/aitp-control-plane/issues/89)
+occurred in. Seven checks:
+
+1. **The time to the first response byte**, twice: on the route's first-ever
+   request (cold, so the compiled chunk's load is in the number) and on a second
+   connection. Both must be under **1 s**. Measured: ~20 ms and ~7 ms in a native
+   container.
+2. **The header contract**, with `Accept-Encoding: gzip, br` on the request:
+   `text/event-stream`, `no-transform`, `x-accel-buffering: no`,
+   `transfer-encoding: chunked`, and **no** `content-encoding` or
+   `content-length`. That last pair only means something here — Next's real
+   `compression` middleware is in the path, and the only reason it skips this
+   response is the `no-transform` token.
+3. **The first body frame, byte for byte**: `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n`.
+4. **The heartbeat**, on the wire, between half and three times
+   `SSE_HEARTBEAT_MS` after the prelude — both bounds, because too *fast* is the
+   32-bit `setInterval` overflow the config clamps for.
+5. **The `sse stream opened` / `sse stream closed` log lines** reach the
+   container's stdout, so the observability added for #89 is known to survive the
+   standalone build.
+6. **`503 SSE_CAPACITY`** for a second concurrent stream, in a second container
+   run with `MAX_SSE_CONNECTIONS=1`.
+7. **Both containers still running** at the end, so nothing above is green on a
+   process that died after answering.
+
+Checks 3 and 4 are what make check 1 non-vacuous, and the direction matters: a
+fast first byte only proves a *prelude* flush if the bytes **were** the prelude
+— on pre-fix code the first bytes are a heartbeat, which is a flush too. The
+container therefore runs with `SSE_HEARTBEAT_MS` at twice the budget (asserted,
+not assumed), so "inside the budget" and "the heartbeat did it" are mutually
+exclusive arithmetic.
+
+**It is falsifiable, and that was measured rather than asserted.** Against an
+image built with the prelude removed, checks 1, 3 and 4 fail and the output names
+the cause: *"2 of 2 connections missed the 1000 ms budget … EVERY BREACH IS AT
+SSE_HEARTBEAT_MS (2000 ms): the first bytes were a HEARTBEAT, not a connect
+prelude."*
+
+Two differences from `verify:image` worth knowing:
+
+- **No Postgres, on purpose.** The route touches no database — its event bus is
+  in-process — and a database would *cost* fidelity: an audit write would put an
+  event in the backlog, and a replayed `data:` frame would flush the headers
+  instead of the prelude, which is check 1 passing for the wrong reason. So
+  `DATABASE_URL` points at a closed port and `/api/health` answering `503` is the
+  correct readiness signal.
+- **It reads a raw socket, not `fetch`.** #89's symptom was literally "not even an
+  HTTP status line", and a client that helpfully injects `accept-encoding`,
+  decompresses bodies and normalises headers is the wrong instrument for
+  asserting on exactly those things. The cost is a chunked-transfer decoder in
+  the harness; `--parse-fixture <file>` runs that decoder alone over a local file
+  with no Docker (and self-checks it by re-parsing one byte at a time), and
+  `--dump-wire <file>` writes the raw bytes of a real run to make such a file.
+
+It runs in CI as a **second step inside the `verify-image` job**, against the
+image that job has already built (`--no-build --tag …`), so it costs seconds
+rather than a second cold build — and because `docker-publish` needs
+`verify-image`, a publish is gated on it for free. Teardown follows the same
+contract as `verify:image` (registered before created, detached containers,
+one-shot `docker logs`, a synchronous sweep on every exit path including
+`SIGINT`), plus one resource class the sibling does not have: **open sockets**,
+destroyed first, because a stream that never ends is a handle that would
+otherwise keep the process alive forever.
+
+`--allow-skip` turns "no Docker daemon" into an exit 0 with a loud message.
+Never pass it in CI: the in-process equivalent that needs no Docker is
+`src/app/api/events/stream/stream.flush.test.ts`, which runs on every `npm test`.
+
+The three harnesses are deliberately **not** merged: `verify:gate` owns the
 `next start` path, a real developer workflow, and owns its own build;
-`verify:image` owns the standalone artifact and does *not* own the build
-environment — the `Dockerfile` does. Two harnesses, two configurations, one
-shared discipline. Duplicated assertions rot at different rates.
+`verify:image` owns the standalone artifact's structure, gate, signing and OTel
+paths and does *not* own the build environment — the `Dockerfile` does; and
+`verify:sse` owns one route's wire behaviour over time in that same artifact.
+Three harnesses, three configurations, one shared discipline. Duplicated
+assertions rot at different rates.
 
 ## Rate limiting
 
