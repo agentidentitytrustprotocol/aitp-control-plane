@@ -1022,6 +1022,75 @@ For per-stream detail, the route logs exactly two lines per connection —
 Nothing is logged per heartbeat, so the volume is bounded by connect rate, which
 the rate limiter already caps.
 
+### "The stream never responds" — and the invariant that prevents it
+
+> **THE INVARIANT. Every streaming route in this repo must write a byte at
+> connect time, before any `await`.**
+>
+> Next.js deliberately withholds the response headers until the first body chunk.
+> The adapter that pipes a route handler's `ReadableStream` into the Node
+> `ServerResponse` calls `res.flushHeaders()` from its `write()` callback and
+> nowhere else — `node_modules/next/dist/server/pipe-readable.js:59-74`, whose own
+> comment says so: *"this ensures that we don't actually flush the headers until
+> we've started writing chunks."* It is intentional (it lets a handler still change
+> the status while the body is pending) and it is not specific to
+> `output: 'standalone'` — the same module serves `next start` and `next dev`.
+>
+> **So a stream that stays silent sends no status line and no headers at all.** Not
+> a slow response: *no response*, indistinguishable from a hung connection, until
+> something writes. `curl` reports `http=000`, zero bytes and exit 28.
+
+That was issue
+[#89](https://github.com/agentidentitytrustprotocol/aitp-control-plane/issues/89),
+in full: `/api/events/stream` wrote nothing at connect, its in-process event bus is
+empty on a fresh deploy so the backlog replay wrote nothing either, and the 15-second
+heartbeat was therefore the first thing to put a byte on the wire. Every client with
+a first-byte timeout under 15 s saw a dead hang. The fix is one `ctrl.enqueue` as the
+literal first statement of `start()` — see the route's own comment there for the
+constraint that keeps it a single write — and the before/after measurements are
+recorded on issue #89 itself.
+
+Nothing structurally prevents the next streaming route from repeating it, which is
+why this is written down. A lint rule is not practical for the shape; the two things
+that are:
+
+- `src/app/api/events/stream/stream.flush.test.ts` — pipes the route's real
+  `Response.body` through Next's real adapter into an `http.createServer` and asserts
+  on a raw socket. Runs on every `npm test`. **Copy it for any new streaming route.**
+- `npm run verify:sse` — the same property in the shipped image, measured. See
+  [Verifying the SSE stream in the shipped image](#verifying-the-sse-stream-in-the-shipped-image).
+
+#### If a "stream is dead" report arrives anyway
+
+**Measure first, in this order.** The point is to place the delay on one side of a
+boundary before touching anything:
+
+```sh
+# 1. The CP itself, directly. <1 s and `: connected` first = the route is healthy.
+curl -sN -H "Accept: text/event-stream" -H "Authorization: Bearer $API_KEY" \
+  "$CP_URL/api/events/stream" --max-time 8 \
+  -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer}\n'
+
+# 2. The same stream through the console's proxy route — the full production path.
+curl -sN -H "Accept: text/event-stream" \
+  https://aitp-ui-console.vercel.app/api/cp/events/stream --max-time 45 \
+  -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer} total=%{time_total}\n'
+
+# 3. Was the handler even reached? /api/metrics is public and rate-limit exempt.
+curl -s "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
+```
+
+Read the three together:
+
+| What you see | What it means |
+|---|---|
+| `: connected` arrives first and `starttransfer` is well under the heartbeat interval | The stream works. Look at the client, not the server. **Reference numbers, measured 2026-09-28:** **0.007 s** from the CP's own container; **0.33 s warm / 1.13-1.30 s cold through the production console** — the spread is TLS, cross-region routing and a cold Vercel function, not buffering, since a buffering layer does not sometimes take 0.3 s. Compare against 15.047 s before the fix. |
+| `http=000`, zero bytes, exit 28 | No headers were ever sent. The invariant above is broken — a streaming route is writing nothing at connect. This is #89's exact signature. |
+| `starttransfer` ≈ `SSE_HEARTBEAT_MS` | Same thing, seen from the other end: the *heartbeat* is flushing the headers. Do **not** "fix" it by lowering `SSE_HEARTBEAT_MS`; that hides it. |
+| CP direct is fast, console path is slow | The residual delay is in the proxy/platform, not this repo. File it against `aitp-ui-console` with both numbers, noting that #89's root cause was CP-side and is fixed, and that its `proxySse()` was ruled out (a structurally identical route through the same function always returned immediately — because its upstream wrote a byte on connect, which is the whole of the invariant above). |
+| `sse_streams_open` flat at `0` while a client claims to be connecting | The handler is not being reached at all. Look at the request gate, the URL, or the proxy — not at the route. |
+| `sse_streams_opened_total` climbing while `sse_streams_open` stays flat | **A DIFFERENT SYMPTOM, not a regression of the #89 fix.** Streams are being accepted and then dying, which is what an edge idle timeout or a serverless function duration cap looks like. The console's route is a Vercel function holding the upstream `fetch` open for the life of the stream, so its `maxDuration` bounds every stream through it. Measured 2026-09-28: two streams through the console each survived a full 45 s uninterrupted, delivering the prelude plus exactly the two `: heartbeat` frames a 15 s interval predicts, so no such cap was in force then. Compare the dying interval against `SSE_HEARTBEAT_MS` and against that cap before suspecting the route. |
+
 ## Webhook delivery
 
 Each delivery retries up to `WEBHOOK_RETRY_ATTEMPTS` (default 3) with
