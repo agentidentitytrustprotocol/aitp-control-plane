@@ -117,7 +117,9 @@ that actually deploys**. The signing path, the CORS build-freeze and the
 `OTEL_ENABLED=true` path all build on that same substrate, and all of them are
 documented below.
 
-The two harnesses are **deliberately not merged**. `verify:gate` owns the
+The harnesses are **deliberately not merged** (there are three — the SSE stream
+check is described [below](#verifying-the-sse-stream-in-the-shipped-image)).
+`verify:gate` owns the
 `next start` path — a real developer workflow — and owns its own build, because it
 must bake a `CORS_ORIGIN` that differs from the runtime one. This one owns the
 standalone Docker artifact and does not own the build; the `Dockerfile` does. It
@@ -714,7 +716,7 @@ container). `--platform` takes **one** platform per invocation —
 | `audit` | no new high-severity advisory in production dependencies | yes |
 | `docker-build-check` | the image *builds* for amd64. Nothing more: its own comment scopes it to that | yes |
 | `docker-build-check-arm64` | the image builds for arm64. Opt-in via the `arch:arm64` PR label | no (skippable) |
-| **`verify-image`** | **everything on this page: the shipped amd64 image's native paths, gate attachment, signing path, CORS build-freeze and OTel path** | **yes** |
+| **`verify-image`** | **everything on this page: the shipped amd64 image's native paths, gate attachment, signing path, CORS build-freeze and OTel path — and, as a second step reusing the same image, the SSE streaming contract (`verify:sse`)** | **yes** |
 | `verify-image-arm64` | the same, for arm64 under QEMU. Opt-in via the `verify_image_arm64` dispatch input | no (skippable) |
 | `docker-publish` | pushes the multi-arch image to GHCR on `main`. **`needs: [build-and-test, verify-image]`** | — |
 
@@ -817,18 +819,24 @@ occurred in. Seven checks:
 
 1. **The time to the first response byte**, twice: on the route's first-ever
    request (cold, so the compiled chunk's load is in the number) and on a second
-   connection. Both must be under **1 s**. Measured: ~20 ms and ~7 ms in a native
-   container.
+   connection. Both must be under **1 s**. Measured on a native arm64 container:
+   **15-25 ms** per connection, cold and warm alike (that span is socket connect +
+   request + first byte, curl's `time_starttransfer`).
 2. **The header contract**, with `Accept-Encoding: gzip, br` on the request:
    `text/event-stream`, `no-transform`, `x-accel-buffering: no`,
    `transfer-encoding: chunked`, and **no** `content-encoding` or
    `content-length`. That last pair only means something here — Next's real
-   `compression` middleware is in the path, and the only reason it skips this
-   response is the `no-transform` token.
-3. **The first body frame, byte for byte**: `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n`.
-4. **The heartbeat**, on the wire, between half and three times
-   `SSE_HEARTBEAT_MS` after the prelude — both bounds, because too *fast* is the
-   32-bit `setInterval` overflow the config clamps for.
+   `compression` middleware is in the path, and the `no-transform` token is one of
+   the reasons it skips this response (its size threshold is another; the check
+   cannot tell them apart, and asserts the absence rather than the cause).
+3. **The first body frame, byte for byte**:
+   `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n` — **and in one write**, asserted as
+   a first chunked chunk of exactly 25 bytes, since Node frames one `res.write()`
+   as one chunk and the frame text alone cannot see write boundaries.
+4. **The heartbeat as the next frame after the prelude**, between half and three
+   times `SSE_HEARTBEAT_MS` — both bounds, because too *fast* is the 32-bit
+   `setInterval` overflow the config clamps for. (One interval of observation, so
+   nothing is claimed about later frames.)
 5. **The `sse stream opened` / `sse stream closed` log lines** reach the
    container's stdout, so the observability added for #89 is known to survive the
    standalone build.
@@ -1084,7 +1092,7 @@ Read the three together:
 
 | What you see | What it means |
 |---|---|
-| `: connected` arrives first and `starttransfer` is well under the heartbeat interval | The stream works. Look at the client, not the server. **Reference numbers, measured 2026-09-28:** **0.007 s** from the CP's own container; **0.33 s warm / 1.13-1.30 s cold through the production console** — the spread is TLS, cross-region routing and a cold Vercel function, not buffering, since a buffering layer does not sometimes take 0.3 s. Compare against 15.047 s before the fix. |
+| `: connected` arrives first and `starttransfer` is well under the heartbeat interval | The stream works. Look at the client, not the server. **Reference numbers, measured:** **0.007 s** with `curl` against the CP's own container (2026-09-25; `verify:sse`'s own socket client reports 0.015-0.025 s for the same flush, its connect and request included); **0.33 s warm / 1.13-1.30 s cold through the production console** (2026-09-28) — the spread is TLS, cross-region routing and a cold Vercel function, not buffering, since a buffering layer does not sometimes take 0.3 s. Compare against 15.047 s before the fix. |
 | `http=000`, zero bytes, exit 28 | No headers were ever sent. The invariant above is broken — a streaming route is writing nothing at connect. This is #89's exact signature. |
 | `starttransfer` ≈ `SSE_HEARTBEAT_MS` | Same thing, seen from the other end: the *heartbeat* is flushing the headers. Do **not** "fix" it by lowering `SSE_HEARTBEAT_MS`; that hides it. |
 | CP direct is fast, console path is slow | The residual delay is in the proxy/platform, not this repo. File it against `aitp-ui-console` with both numbers, noting that #89's root cause was CP-side and is fixed, and that its `proxySse()` was ruled out (a structurally identical route through the same function always returned immediately — because its upstream wrote a byte on connect, which is the whole of the invariant above). |

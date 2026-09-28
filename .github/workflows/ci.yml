@@ -417,10 +417,14 @@ jobs:
 
       # The SSE streaming contract on the emulated arch too — see the amd64 leg for
       # what it covers and why it reuses that job's image rather than building again.
-      # The flush budget is 1 s against a measured ~7-20 ms in a native container, so
-      # QEMU's slowdown has two orders of magnitude of headroom; if that ever stops
-      # being true the harness's own output prints the measured number, so the
-      # decision is made on data rather than on a guess.
+      # The flush budget is 1 s against 15-25 ms measured natively, so QEMU has ~40x
+      # of headroom on the warm connection; the cold one also pays for the route's
+      # first chunk load under emulation, which is the thinner margin of the two. If
+      # that ever stops being true the harness prints both measured numbers, and on an
+      # emulated platform its breach message says so and points at check 3's frame 0
+      # — a prelude means "slow", a heartbeat means #89 — so the call is made on data
+      # rather than on a guess. This leg is opt-in, so a flake here cannot block a
+      # merge.
       - name: Verify the SSE streaming contract in the same image
         run: >-
           npm run verify:sse --

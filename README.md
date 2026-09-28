@@ -192,7 +192,7 @@ ship. An arm64 arm of the same harness is opt-in from the Actions tab.
 
 Alongside it, in the same job and against the same image, `npm run verify:sse`
 opens real SSE connections to `GET /api/events/stream` and **measures the time to
-the first response byte** (under 1 s, against ~20 ms measured), pins the connect
+the first response byte** (under 1 s, against 15-25 ms measured), pins the connect
 prelude's bytes, the absence of `content-encoding` under
 `Accept-Encoding: gzip, br`, the keepalive interval on the wire, and the
 `503 SSE_CAPACITY` refusal. That is the regression gate on

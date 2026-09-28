@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * SSE streaming conformance in the SHIPPED IMAGE — the container-level gate on
- * issue #89 (plan `plans/sse-stream-header-flush.md`, Phase 4).
+ * issue #89.
  *
  * #89 was: `GET /api/events/stream` wrote no bytes at connect, and Next defers
  * `res.flushHeaders()` to the first body chunk
@@ -192,7 +192,10 @@
  * daemon under a deterministic tag so a failure can be re-probed with `--no-build`.
  * Remove it by hand (`docker image rm <tag>`); `--prune` does not touch images. One
  * consequence: the tag is not run-unique, so pass `--tag` when running two
- * platforms concurrently.
+ * platforms concurrently — and `--no-build` therefore checks the tag's architecture
+ * against the platform before running it (`assertImageMatchesPlatform`, ported from
+ * the sibling), because a stale cross-arch tag would otherwise run under emulation
+ * with nothing but a Docker warning.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -214,11 +217,15 @@ const RUN_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 
 /**
  * The #89 gate: how long the first response byte may take.
  *
- * 1 s is the plan's acceptance criterion, and it is loose on purpose — the
- * measured figure is ~7 ms in a native container and 4.7 ms in the in-process
- * adapter harness, so this has two orders of magnitude of headroom and is not a
- * performance assertion. What it is is the boundary between "the prelude flushed
- * the headers" and "nothing wrote until the heartbeat", which is the whole of #89.
+ * 1 s is the plan's acceptance criterion, and it is loose on purpose. What this
+ * harness itself measures on a native arm64 container is 15-25 ms per connection
+ * (that is socket connect + request + first byte, the same span curl calls
+ * `time_starttransfer`); a bare `curl` against the same container measured 7 ms,
+ * and the in-process adapter harness 4.7 ms. So the budget carries one to two
+ * orders of magnitude of headroom and is not a performance assertion. What it is
+ * is the boundary between "the prelude flushed the headers" and "nothing wrote
+ * until the heartbeat", which is the whole of #89. Under QEMU emulation the
+ * headroom is smaller; see the note in the breach diagnosis below.
  */
 const FLUSH_BUDGET_MS = 1000;
 /**
@@ -847,6 +854,39 @@ async function assertDockerAvailable() {
   }
 }
 
+/**
+ * The `--no-build` guard, ported from `verify-image.mjs`'s
+ * `assertImageMatchesPlatform`: with --no-build this harness runs whatever the tag
+ * points at, and the tag is deliberately NOT run-unique, so a stale tag from another
+ * architecture is a live footgun. Without this, a missing tag reaches `docker run`
+ * and comes back as exit 125 with a wall of pull-access noise, and a cross-arch tag
+ * runs with nothing but Docker's own warning.
+ */
+async function assertImageMatchesPlatform(tag, platform) {
+  let inspected;
+  try {
+    const { stdout } = await docker(['image', 'inspect', tag, '--format', '{{.Architecture}}'], {
+      timeoutMs: 30_000,
+    });
+    inspected = stdout.trim();
+  } catch {
+    fail(
+      `no local image tagged \`${tag}\`. Drop --no-build to build it, or pass --tag with a ` +
+        'tag that exists. (In CI this harness reuses the image the verify-image step in the ' +
+        'same job already built.)',
+    );
+  }
+  const want = platformArch(platform);
+  if (inspected !== want) {
+    fail(
+      `image \`${tag}\` is ${inspected} but --platform asked for ${want}. Running it would ` +
+        'fail with an opaque `exec format error`, or silently under emulation; rebuild ' +
+        'without --no-build.',
+    );
+  }
+  return inspected;
+}
+
 async function hostPlatform() {
   const { stdout } = await docker(['info', '--format', '{{.OSType}}/{{.Architecture}}'], {
     timeoutMs: 30_000,
@@ -1096,6 +1136,18 @@ function createBodyReader({ chunked }) {
    *  `content-length` rather than from the connection closing — which under HTTP/1.1
    *  keep-alive it never does. */
   let bodyBytes = 0;
+  /**
+   * Byte length of each chunked-transfer chunk, in arrival order.
+   *
+   * This is the ONLY place write boundaries survive: `emit()` below reassembles text
+   * across chunks and splits it on `\n\n`, so a frame equality cannot see how many
+   * writes produced it. Node's HTTP layer frames one `res.write()` as one chunk, so
+   * chunk lengths are the wire's record of the server's write calls — which is what
+   * makes check 3's "the prelude arrived in ONE write" an assertion rather than
+   * prose. Left empty on the fixed-length path, where there are no chunks and a
+   * per-read length would mean nothing but TCP segmentation.
+   */
+  const chunkSizes = [];
 
   const emit = (s, at) => {
     text += s;
@@ -1137,6 +1189,7 @@ function createBodyReader({ chunked }) {
       if (state === 'data') {
         if (pending.length < need) return;
         bodyBytes += need;
+        chunkSizes.push(need);
         emit(decoder.write(pending.subarray(0, need)), at);
         pending = pending.subarray(need);
         need = 0;
@@ -1181,6 +1234,11 @@ function createBodyReader({ chunked }) {
     get bodyBytes() {
       return bodyBytes;
     },
+    /** Chunked-transfer chunk lengths in arrival order — the wire's record of the
+     *  server's write boundaries. Empty on the fixed-length path. */
+    get chunkSizes() {
+      return chunkSizes;
+    },
     /** A partial frame: decoded bytes not yet terminated by a blank line. */
     get partial() {
       return carry;
@@ -1220,6 +1278,8 @@ function openStream(hostPort, { path: reqPath = '/api/events/stream', key = API_
     const startedAt = now();
     let connectedAt = null;
     let firstByteAt = null;
+    /** When the header block finished parsing — see `headMs`. */
+    let headAt = null;
     let head = null;
     let reader = null;
     const raw = dump ? [] : null;
@@ -1323,6 +1383,7 @@ function openStream(hostPort, { path: reqPath = '/api/events/stream', key = API_
         }
         if (!parsed) return;
         head = parsed;
+        headAt = at;
         const te = (head.headers.get('transfer-encoding') ?? '').toLowerCase();
         reader = createBodyReader({ chunked: te.includes('chunked') });
         clearTimeout(timer);
@@ -1340,11 +1401,10 @@ function openStream(hostPort, { path: reqPath = '/api/events/stream', key = API_
         reader.push(d, at);
       } catch (err) {
         failure = new Error(`could not decode the response body on ${reqPath}: ${err.message}`);
-        if (waiter) {
-          const w = waiter;
-          waiter = null;
-          w.reject(failure);
-        }
+        // `rejectWaiters`, not an inline reject of `waiter` alone: it clears each
+        // waiter's deadline timer and covers `bodyWaiter` too, which an inline reject
+        // left pending until its own timeout fired.
+        rejectWaiters(failure);
         socket.destroy();
         return;
       }
@@ -1414,10 +1474,19 @@ function openStream(hostPort, { path: reqPath = '/api/events/stream', key = API_
         return firstByteAt - startedAt;
       },
       get headMs() {
-        return now() - firstByteAt;
+        // `headAt`, not `now()`: this is the header block's own latency, stamped when
+        // the block finished parsing. Computing it at call time reported however long
+        // the caller had been awaiting frames as header-block latency — invisible
+        // today only because check 1 reads it one microtask after an already-resolved
+        // frame.
+        return headAt - firstByteAt;
       },
       get frames() {
         return reader.frames;
+      },
+      /** Chunked chunk lengths — see `createBodyReader`. Check 3 asserts on [0]. */
+      get chunkSizes() {
+        return reader.chunkSizes;
       },
       get partial() {
         return reader.partial;
@@ -1566,6 +1635,10 @@ async function main() {
       `  body: ${chunked ? 'chunked' : 'identity'}, ${bulk.frames.length} complete frame(s), ` +
         `${bulk.pendingBytes} undecoded byte(s), ${bulk.complete ? 'terminated' : 'NOT terminated'}`,
     );
+    // The write boundaries, printed because frames cannot show them: this is what
+    // check 3's "in ONE write" reads, and the difference between one `ctrl.enqueue`
+    // and two is visible here and nowhere else.
+    if (chunked) console.log(`  chunk sizes (server write boundaries): [${bulk.chunkSizes}]`);
     for (const [i, f] of bulk.frames.entries()) console.log(`  frame ${i}: ${show(f.text)}`);
     if (bulk.partial) console.log(`  unterminated tail: ${show(bulk.partial)}`);
 
@@ -1601,7 +1674,11 @@ async function main() {
       drip.frames.every((f, i) => f.text === bulk.frames[i].text) &&
       drip.partial === bulk.partial &&
       drip.complete === bulk.complete &&
-      drip.bodyBytes === bulk.bodyBytes;
+      drip.bodyBytes === bulk.bodyBytes &&
+      // Chunk sizes too: check 3 asserts on chunkSizes[0], so a decoder whose write
+      // boundaries shifted with the read splits would make that assertion depend on
+      // TCP rather than on the server.
+      String(drip.chunkSizes) === String(bulk.chunkSizes);
     if (!same) {
       fail(
         'the body parses DIFFERENTLY one byte at a time than in bulk — the decoder is not ' +
@@ -1668,7 +1745,10 @@ async function main() {
   }
 
   if (opts.build) await buildImage(platform, opts.tag, emulated);
-  else console.log('--no-build: reusing the existing local tag');
+  else {
+    const arch = await assertImageMatchesPlatform(opts.tag, platform);
+    console.log(`--no-build: reusing the existing local tag (${opts.tag}, ${arch})`);
+  }
 
   // The build has its own timeout above; this ceiling covers the checks, so "the
   // build hung" and "a check hung" are distinguishable.
@@ -1683,8 +1763,9 @@ async function main() {
   // the honest COLD number and the one a fresh deploy's first client actually sees;
   // the second is the steady-state header-flush latency. Asserting only the warm one
   // would let a pathological cold path pass; asserting only the cold one would put a
-  // one-off module load inside a latency budget. Both are held to FLUSH_BUDGET_MS —
-  // measured at ~7 ms in a native container, so there is no tension in practice.
+  // one-off module load inside a latency budget. Both are held to FLUSH_BUDGET_MS,
+  // which this harness measures at 15-25 ms per connection on a native container, so
+  // there is no tension in practice.
   let cold = null;
   let warm = null;
   try {
@@ -1702,6 +1783,7 @@ async function main() {
   }
   const coldFirstByteMs = cold.firstByteMs;
   const coldFrame0 = cold.frames[0]?.text ?? '';
+  const coldFirstChunkBytes = cold.chunkSizes[0] ?? null;
   cold.close();
 
   try {
@@ -1751,7 +1833,15 @@ async function main() {
                 'src/app/api/events/stream/route.ts.'
               : 'The breaches are NOT at the heartbeat interval, so this is not #89 in its ' +
                 'original shape: something else delayed the first write. Read check 3\'s frames ' +
-                "and the container's logs."),
+                "and the container's logs.") +
+            (emulated
+              ? `\nNOTE: ${platform} is EMULATED here. A cold breach can be a slow first ` +
+                'route-chunk load under QEMU rather than #89 — and if it happens to land near ' +
+                `${HEARTBEAT_MS}ms the diagnosis above cannot tell the two apart. Check 3's ` +
+                'frame 0 decides it: a prelude means the write happened and was merely slow; a ' +
+                'heartbeat means nothing was written at connect. Re-run natively before ' +
+                'concluding this is a regression.'
+              : ''),
         );
       }
       return (
@@ -1796,11 +1886,15 @@ async function main() {
       }
       // THE ABSENCES. This is the assertion that only means something in the shipped
       // artifact: Next's router-server enables its `compression` middleware by
-      // default, and the only reason it skips this response is the `no-transform`
-      // above. A future next.config.ts change, or a `cache-control` edit that drops
-      // that token, would gzip the stream — and a gzip stream buffers, which is #89
-      // with a different cause. The in-process adapter harness cannot see this: a
-      // bare http.createServer has no compression middleware in the path.
+      // default, and `no-transform` above is one of the reasons it skips this
+      // response — honestly, not the only one, since `compression`'s default size
+      // threshold also declines a 25-byte first chunk, and this check cannot tell the
+      // two apart. What it can do is fail if a content coding ever appears, from any
+      // cause: a gzip stream buffers, which is #89 with a different cause. (Dropping
+      // `no-transform` is caught by the `cache-control` assertion above, and any
+      // layer that actually buffered would breach check 1.) The in-process adapter
+      // harness cannot see any of this: a bare http.createServer has no compression
+      // middleware in the path.
       for (const name of ['content-encoding', 'content-length']) {
         if (warm.headers.has(name)) {
           fail(
@@ -1822,7 +1916,7 @@ async function main() {
     },
   );
 
-  await runCheck(3, 'the first body frame is exactly the connect prelude', () => {
+  await runCheck(3, 'the first body frame is exactly the connect prelude, in ONE write', () => {
     // BYTE EQUALITY, and it is what makes check 1 non-vacuous. A fast first byte
     // proves only that SOMETHING was written; this proves it was the prelude and not
     // a replayed backlog event (the other way a fast flush could happen) or a
@@ -1847,13 +1941,41 @@ async function main() {
         );
       }
     }
+    // ONE WRITE, ASSERTED. The frame equality above cannot see write count: the body
+    // reader reassembles decoded text across chunk boundaries and splits on `\n\n`,
+    // so two `ctrl.enqueue` calls produce the identical frame 0. Chunked chunk
+    // lengths are the wire's record of the server's write calls (Node frames one
+    // `res.write()` as one chunk), so this is where "in ONE write" stops being prose.
+    // It matters because the prelude is a single documented frame: a split would put
+    // `retry:` and `: connected` in different chunks, and any proxy or client that
+    // acts per chunk would see a partial frame first.
+    const want = Buffer.byteLength(PRELUDE);
+    for (const [label, got] of [
+      ['cold connection', coldFirstChunkBytes],
+      ['warm connection', warm.chunkSizes[0] ?? null],
+    ]) {
+      if (got !== want) {
+        fail(
+          `the ${label} delivered the prelude in a first chunked chunk of ${got ?? 'no'} ` +
+            `byte(s), expected all ${want} in one. The prelude must be a single ` +
+            '`ctrl.enqueue` in src/app/api/events/stream/route.ts — one write, one chunk, ' +
+            'one frame. Two enqueues would pass the byte equality above and still split the ' +
+            'frame on the wire.',
+        );
+      }
+    }
     return (
-      `both connections opened with ${show(PRELUDE)} — one write, and retry: tracks the ` +
-      `container's SSE_HEARTBEAT_MS=${HEARTBEAT_MS}`
+      `both connections opened with ${show(PRELUDE)} in ONE ${want}-byte chunked chunk (so ` +
+      `one server write), and retry: tracks the container's SSE_HEARTBEAT_MS=${HEARTBEAT_MS}`
     );
   });
 
-  await runCheck(4, 'the heartbeat arrives on time, and nothing else arrives', async () => {
+  // The title says "is the NEXT frame" and means exactly that: this check reads frame
+  // 1 and asserts it is the keepalive, which is what rules out a data frame having
+  // flushed the headers. It says nothing about frame 2 onwards, and deliberately — a
+  // check that claimed "nothing else ever arrives" would be claiming more than one
+  // heartbeat interval of observation can support.
+  await runCheck(4, 'the heartbeat is the NEXT frame after the prelude, and on time', async () => {
     // FRAME 0 MUST BE THE PRELUDE, or this check has no premise. Measured, against a
     // pre-Phase-1 image: without this guard the check PASSED and its own detail line
     // said "2 s after the prelude" when frame 0 was a heartbeat and the interval
