@@ -177,7 +177,18 @@ npm run test:conformance  # protocol-conformance subset of the integration suite
 Unit tests (`*.test.ts`) are colocated with the code and mock the database;
 integration tests (`*.integration.test.ts`) run against a real Postgres and
 exercise routes/services end-to-end. CI runs both plus a production
-`next build`, a dependency audit, and a Docker image build check on PRs.
+`next build`, a dependency audit, a Docker image build check on PRs, and
+`npm run verify:image` — which builds the standalone image and then asserts, first
+statically and then against the artifact running on an ephemeral Postgres, that the
+native NAPI and traced-external paths resolve inside it, that the request gate is
+really **attached** (the one thing `next start` cannot show for a standalone build),
+that **the image's compiled gate is byte-identical to the reviewed one** (an equality
+pin, after five successive attempts to establish the same thing by probing the gate's
+behaviour were each defeated), that the revocation list's signature verifies
+two independent ways, that CORS comes from the runtime environment rather than the
+value baked at build time, and that the `OTEL_ENABLED=true` path loads and
+instruments. **Publishing to GHCR is gated on it**, so an unverified image cannot
+ship. An arm64 arm of the same harness is opt-in from the Actions tab.
 
 Bring up the test database:
 

@@ -12,6 +12,7 @@
     "test:integration": "jest --config jest.integration.config.js --passWithNoTests",
     "test:conformance": "jest --config jest.integration.config.js --passWithNoTests --testPathPatterns 'conformance|cp-manifest'",
     "verify:gate": "node scripts/verify-request-gate.mjs --build",
+    "verify:image": "node scripts/verify-image.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
