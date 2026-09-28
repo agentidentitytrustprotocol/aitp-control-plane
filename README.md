@@ -190,6 +190,17 @@ value baked at build time, and that the `OTEL_ENABLED=true` path loads and
 instruments. **Publishing to GHCR is gated on it**, so an unverified image cannot
 ship. An arm64 arm of the same harness is opt-in from the Actions tab.
 
+Alongside it, in the same job and against the same image, `npm run verify:sse`
+opens real SSE connections to `GET /api/events/stream` and **measures the time to
+the first response byte** (under 1 s, against 7-27 ms measured), pins the connect
+prelude's bytes, the absence of `content-encoding` under
+`Accept-Encoding: gzip, br`, the keepalive interval on the wire, and the
+`503 SSE_CAPACITY` refusal. That is the regression gate on
+[#89](https://github.com/agentidentitytrustprotocol/aitp-control-plane/issues/89),
+where the stream wrote nothing at connect and so sent no HTTP status line at all
+until its 15-second heartbeat — invisible to a unit test of the route, which
+receives a `Response` object and never a socket.
+
 Bring up the test database:
 
 ```bash

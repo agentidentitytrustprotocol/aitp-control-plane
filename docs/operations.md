@@ -117,7 +117,9 @@ that actually deploys**. The signing path, the CORS build-freeze and the
 `OTEL_ENABLED=true` path all build on that same substrate, and all of them are
 documented below.
 
-The two harnesses are **deliberately not merged**. `verify:gate` owns the
+The harnesses are **deliberately not merged** (there are three — the SSE stream
+check is described [below](#verifying-the-sse-stream-in-the-shipped-image)).
+`verify:gate` owns the
 `next start` path — a real developer workflow — and owns its own build, because it
 must bake a `CORS_ORIGIN` that differs from the runtime one. This one owns the
 standalone Docker artifact and does not own the build; the `Dockerfile` does. It
@@ -714,7 +716,7 @@ container). `--platform` takes **one** platform per invocation —
 | `audit` | no new high-severity advisory in production dependencies | yes |
 | `docker-build-check` | the image *builds* for amd64. Nothing more: its own comment scopes it to that | yes |
 | `docker-build-check-arm64` | the image builds for arm64. Opt-in via the `arch:arm64` PR label | no (skippable) |
-| **`verify-image`** | **everything on this page: the shipped amd64 image's native paths, gate attachment, signing path, CORS build-freeze and OTel path** | **yes** |
+| **`verify-image`** | **everything on this page: the shipped amd64 image's native paths, gate attachment, signing path, CORS build-freeze and OTel path — and, as a second step reusing the same image, the SSE streaming contract (`verify:sse`)** | **yes** |
 | `verify-image-arm64` | the same, for arm64 under QEMU. Opt-in via the `verify_image_arm64` dispatch input | no (skippable) |
 | `docker-publish` | pushes the multi-arch image to GHCR on `main`. **`needs: [build-and-test, verify-image]`** | — |
 
@@ -801,11 +803,99 @@ Two things to know about what it leaves behind:
   discarded with the job. `docker volume prune` is the right tool locally, at a
   time of your choosing.
 
-The two harnesses are deliberately **not** merged: `verify:gate` owns the
+### Verifying the SSE stream in the shipped image
+
+```sh
+npm run verify:sse                             # builds, then runs the image
+npm run verify:sse -- --no-build --tag <tag>    # reuse an image you already have
+```
+
+`scripts/verify-sse-stream.mjs` is the third harness, and the only one that
+**measures a latency**. It runs the shipped image and opens real SSE connections
+to `GET /api/events/stream`, on an **empty backlog** — the state of a freshly
+deployed process, and the exact state issue
+[#89](https://github.com/agentidentitytrustprotocol/aitp-control-plane/issues/89)
+occurred in. Seven checks:
+
+1. **The time to the first response byte**, twice: on the route's first-ever
+   request (cold, so the compiled chunk's load is in the number) and on a second
+   connection. Both must be under **1 s**. Measured on a native arm64 container:
+   **7-27 ms** per connection over ten observed connections, cold and warm alike (that
+   span is socket connect +
+   request + first byte, curl's `time_starttransfer`).
+2. **The header contract**, with `Accept-Encoding: gzip, br` on the request:
+   `text/event-stream`, `no-transform`, `x-accel-buffering: no`,
+   `transfer-encoding: chunked`, and **no** `content-encoding` or
+   `content-length`. That last pair only means something here — Next's real
+   `compression` middleware is in the path, and the `no-transform` token is one of
+   the reasons it skips this response (its size threshold is another; the check
+   cannot tell them apart, and asserts the absence rather than the cause).
+3. **The first body frame, byte for byte**:
+   `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n` — **and in one write**, asserted as
+   a first chunked chunk of exactly 25 bytes, since Node frames one `res.write()`
+   as one chunk and the frame text alone cannot see write boundaries.
+4. **The heartbeat as the next frame after the prelude**, between half and three
+   times `SSE_HEARTBEAT_MS` — both bounds, because too *fast* is the 32-bit
+   `setInterval` overflow the config clamps for. (One interval of observation, so
+   nothing is claimed about later frames.)
+5. **The `sse stream opened` / `sse stream closed` log lines** reach the
+   container's stdout, so the observability added for #89 is known to survive the
+   standalone build.
+6. **`503 SSE_CAPACITY`** for a second concurrent stream, in a second container
+   run with `MAX_SSE_CONNECTIONS=1`.
+7. **Both containers still running** at the end, so nothing above is green on a
+   process that died after answering.
+
+Checks 3 and 4 are what make check 1 non-vacuous, and the direction matters: a
+fast first byte only proves a *prelude* flush if the bytes **were** the prelude
+— on pre-fix code the first bytes are a heartbeat, which is a flush too. The
+container therefore runs with `SSE_HEARTBEAT_MS` at twice the budget (asserted,
+not assumed), so "inside the budget" and "the heartbeat did it" are mutually
+exclusive arithmetic.
+
+**It is falsifiable, and that was measured rather than asserted.** Against an
+image built with the prelude removed, checks 1, 3 and 4 fail and the output names
+the cause: *"2 of 2 connections missed the 1000 ms budget … EVERY BREACH IS AT
+SSE_HEARTBEAT_MS (2000 ms): the first bytes were a HEARTBEAT, not a connect
+prelude."*
+
+Two differences from `verify:image` worth knowing:
+
+- **No Postgres, on purpose.** The route touches no database — its event bus is
+  in-process — and a database would *cost* fidelity: an audit write would put an
+  event in the backlog, and a replayed `data:` frame would flush the headers
+  instead of the prelude, which is check 1 passing for the wrong reason. So
+  `DATABASE_URL` points at a closed port and `/api/health` answering `503` is the
+  correct readiness signal.
+- **It reads a raw socket, not `fetch`.** #89's symptom was literally "not even an
+  HTTP status line", and a client that helpfully injects `accept-encoding`,
+  decompresses bodies and normalises headers is the wrong instrument for
+  asserting on exactly those things. The cost is a chunked-transfer decoder in
+  the harness; `--parse-fixture <file>` runs that decoder alone over a local file
+  with no Docker (and self-checks it by re-parsing one byte at a time), and
+  `--dump-wire <file>` writes the raw bytes of a real run to make such a file.
+
+It runs in CI as a **second step inside the `verify-image` job**, against the
+image that job has already built (`--no-build --tag …`), so it costs seconds
+rather than a second cold build — and because `docker-publish` needs
+`verify-image`, a publish is gated on it for free. Teardown follows the same
+contract as `verify:image` (registered before created, detached containers,
+one-shot `docker logs`, a synchronous sweep on every exit path including
+`SIGINT`), plus one resource class the sibling does not have: **open sockets**,
+destroyed first, because a stream that never ends is a handle that would
+otherwise keep the process alive forever.
+
+`--allow-skip` turns "no Docker daemon" into an exit 0 with a loud message.
+Never pass it in CI: the in-process equivalent that needs no Docker is
+`src/app/api/events/stream/stream.flush.test.ts`, which runs on every `npm test`.
+
+The three harnesses are deliberately **not** merged: `verify:gate` owns the
 `next start` path, a real developer workflow, and owns its own build;
-`verify:image` owns the standalone artifact and does *not* own the build
-environment — the `Dockerfile` does. Two harnesses, two configurations, one
-shared discipline. Duplicated assertions rot at different rates.
+`verify:image` owns the standalone artifact's structure, gate, signing and OTel
+paths and does *not* own the build environment — the `Dockerfile` does; and
+`verify:sse` owns one route's wire behaviour over time in that same artifact.
+Three harnesses, three configurations, one shared discipline. Duplicated
+assertions rot at different rates.
 
 ## Rate limiting
 
@@ -940,6 +1030,75 @@ For per-stream detail, the route logs exactly two lines per connection —
 `enqueue-failed`) — plus one `sse stream rejected` warning per capacity refusal.
 Nothing is logged per heartbeat, so the volume is bounded by connect rate, which
 the rate limiter already caps.
+
+### "The stream never responds" — and the invariant that prevents it
+
+> **THE INVARIANT. Every streaming route in this repo must write a byte at
+> connect time, before any `await`.**
+>
+> Next.js deliberately withholds the response headers until the first body chunk.
+> The adapter that pipes a route handler's `ReadableStream` into the Node
+> `ServerResponse` calls `res.flushHeaders()` from its `write()` callback and
+> nowhere else — `node_modules/next/dist/server/pipe-readable.js:59-74`, whose own
+> comment says so: *"this ensures that we don't actually flush the headers until
+> we've started writing chunks."* It is intentional (it lets a handler still change
+> the status while the body is pending) and it is not specific to
+> `output: 'standalone'` — the same module serves `next start` and `next dev`.
+>
+> **So a stream that stays silent sends no status line and no headers at all.** Not
+> a slow response: *no response*, indistinguishable from a hung connection, until
+> something writes. `curl` reports `http=000`, zero bytes and exit 28.
+
+That was issue
+[#89](https://github.com/agentidentitytrustprotocol/aitp-control-plane/issues/89),
+in full: `/api/events/stream` wrote nothing at connect, its in-process event bus is
+empty on a fresh deploy so the backlog replay wrote nothing either, and the 15-second
+heartbeat was therefore the first thing to put a byte on the wire. Every client with
+a first-byte timeout under 15 s saw a dead hang. The fix is one `ctrl.enqueue` as the
+literal first statement of `start()` — see the route's own comment there for the
+constraint that keeps it a single write — and the before/after measurements are
+recorded on issue #89 itself.
+
+Nothing structurally prevents the next streaming route from repeating it, which is
+why this is written down. A lint rule is not practical for the shape; the two things
+that are:
+
+- `src/app/api/events/stream/stream.flush.test.ts` — pipes the route's real
+  `Response.body` through Next's real adapter into an `http.createServer` and asserts
+  on a raw socket. Runs on every `npm test`. **Copy it for any new streaming route.**
+- `npm run verify:sse` — the same property in the shipped image, measured. See
+  [Verifying the SSE stream in the shipped image](#verifying-the-sse-stream-in-the-shipped-image).
+
+#### If a "stream is dead" report arrives anyway
+
+**Measure first, in this order.** The point is to place the delay on one side of a
+boundary before touching anything:
+
+```sh
+# 1. The CP itself, directly. <1 s and `: connected` first = the route is healthy.
+curl -sN -H "Accept: text/event-stream" -H "Authorization: Bearer $API_KEY" \
+  "$CP_URL/api/events/stream" --max-time 8 \
+  -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer}\n'
+
+# 2. The same stream through the console's proxy route — the full production path.
+curl -sN -H "Accept: text/event-stream" \
+  https://aitp-ui-console.vercel.app/api/cp/events/stream --max-time 45 \
+  -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer} total=%{time_total}\n'
+
+# 3. Was the handler even reached? /api/metrics is public and rate-limit exempt.
+curl -s "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
+```
+
+Read the three together:
+
+| What you see | What it means |
+|---|---|
+| `: connected` arrives first and `starttransfer` is well under the heartbeat interval | The stream works. Look at the client, not the server. **Reference numbers, measured:** **0.007 s** with `curl` against the CP's own container (2026-09-25; `verify:sse`'s own socket client reports 0.015-0.025 s for the same flush, its connect and request included); **0.33 s warm / 1.13-1.30 s cold through the production console** (2026-09-28) — the spread is TLS, cross-region routing and a cold Vercel function, not buffering, since a buffering layer does not sometimes take 0.3 s. Compare against 15.047 s before the fix. |
+| `http=000`, zero bytes, exit 28 | No headers were ever sent. The invariant above is broken — a streaming route is writing nothing at connect. This is #89's exact signature. |
+| `starttransfer` ≈ `SSE_HEARTBEAT_MS` | Same thing, seen from the other end: the *heartbeat* is flushing the headers. Do **not** "fix" it by lowering `SSE_HEARTBEAT_MS`; that hides it. |
+| CP direct is fast, console path is slow | The residual delay is in the proxy/platform, not this repo. File it against `aitp-ui-console` with both numbers, noting that #89's root cause was CP-side and is fixed, and that its `proxySse()` was ruled out (a structurally identical route through the same function always returned immediately — because its upstream wrote a byte on connect, which is the whole of the invariant above). |
+| `sse_streams_open` flat at `0` while a client claims to be connecting | The handler is not being reached at all. Look at the request gate, the URL, or the proxy — not at the route. |
+| `sse_streams_opened_total` climbing while `sse_streams_open` stays flat | **A DIFFERENT SYMPTOM, not a regression of the #89 fix.** Streams are being accepted and then dying, which is what an edge idle timeout or a serverless function duration cap looks like. The console's route is a Vercel function holding the upstream `fetch` open for the life of the stream, so its `maxDuration` bounds every stream through it. Measured 2026-09-28: two streams through the console each survived a full 45 s uninterrupted, delivering the prelude plus exactly the two `: heartbeat` frames a 15 s interval predicts, so no such cap was in force then. Compare the dying interval against `SSE_HEARTBEAT_MS` and against that cap before suspecting the route. |
 
 ## Webhook delivery
 
