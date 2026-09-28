@@ -417,8 +417,8 @@ jobs:
 
       # The SSE streaming contract on the emulated arch too — see the amd64 leg for
       # what it covers and why it reuses that job's image rather than building again.
-      # The flush budget is 1 s against 15-25 ms measured natively, so QEMU has ~40x
-      # of headroom on the warm connection; the cold one also pays for the route's
+      # The flush budget is 1 s against 7-27 ms measured natively, so QEMU has ~37x of
+      # headroom at the worst connection observed; the cold one also pays for the route's
       # first chunk load under emulation, which is the thinner margin of the two. If
       # that ever stops being true the harness prints both measured numbers, and on an
       # emulated platform its breach message says so and points at check 3's frame 0

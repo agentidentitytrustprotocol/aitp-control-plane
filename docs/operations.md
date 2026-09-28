@@ -820,7 +820,8 @@ occurred in. Seven checks:
 1. **The time to the first response byte**, twice: on the route's first-ever
    request (cold, so the compiled chunk's load is in the number) and on a second
    connection. Both must be under **1 s**. Measured on a native arm64 container:
-   **15-25 ms** per connection, cold and warm alike (that span is socket connect +
+   **7-27 ms** per connection over ten observed connections, cold and warm alike (that
+   span is socket connect +
    request + first byte, curl's `time_starttransfer`).
 2. **The header contract**, with `Accept-Encoding: gzip, br` on the request:
    `text/event-stream`, `no-transform`, `x-accel-buffering: no`,

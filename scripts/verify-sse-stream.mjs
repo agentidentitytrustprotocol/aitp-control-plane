@@ -43,9 +43,11 @@
  *      `no-transform`, `x-accel-buffering: no`, `transfer-encoding: chunked`, and
  *      NO `content-encoding` and no `content-length`.
  *   3. THE FIRST BODY FRAME IS EXACTLY THE PRELUDE — byte equality against
- *      `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n`.
- *   4. THE SECOND FRAME IS EXACTLY ONE `: heartbeat\n\n`, arriving no sooner than
- *      half and no later than three times SSE_HEARTBEAT_MS.
+ *      `retry: <SSE_HEARTBEAT_MS>\n: connected\n\n`, AND IN ONE SERVER WRITE,
+ *      asserted as a first chunked chunk holding the whole prelude.
+ *   4. THE NEXT FRAME AFTER THE PRELUDE IS `: heartbeat\n\n`, arriving no sooner
+ *      than half and no later than three times SSE_HEARTBEAT_MS. One interval is
+ *      observed, so nothing is claimed about later frames.
  *   5. THE ROUTE'S LIFECYCLE LOG LINES reach the container's stdout.
  *   6. OVER THE CAP, a second concurrent stream is refused `503` with
  *      `code: SSE_CAPACITY` — in a SECOND container started with
@@ -218,7 +220,7 @@ const RUN_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 
  * The #89 gate: how long the first response byte may take.
  *
  * 1 s is the plan's acceptance criterion, and it is loose on purpose. What this
- * harness itself measures on a native arm64 container is 15-25 ms per connection
+ * harness itself measures on a native arm64 container is 7-27 ms per connection
  * (that is socket connect + request + first byte, the same span curl calls
  * `time_starttransfer`); a bare `curl` against the same container measured 7 ms,
  * and the in-process adapter harness 4.7 ms. So the budget carries one to two
@@ -1675,15 +1677,22 @@ async function main() {
       drip.partial === bulk.partial &&
       drip.complete === bulk.complete &&
       drip.bodyBytes === bulk.bodyBytes &&
+      drip.pendingBytes === bulk.pendingBytes &&
       // Chunk sizes too: check 3 asserts on chunkSizes[0], so a decoder whose write
       // boundaries shifted with the read splits would make that assertion depend on
       // TCP rather than on the server.
       String(drip.chunkSizes) === String(bulk.chunkSizes);
     if (!same) {
+      // EVERY compared field is printed, not just the frames: when only the chunk sizes
+      // diverge — the field check 3's write-count assertion rests on — a message showing
+      // matching frame counts sends the reader looking in the wrong place.
+      const describe = (r) =>
+        `${r.frames.length} frame(s), partial ${show(r.partial)}, chunk sizes ` +
+        `[${r.chunkSizes}], ${r.bodyBytes} body byte(s), ${r.pendingBytes} undecoded, ` +
+        `${r.complete ? 'terminated' : 'NOT terminated'}`;
       fail(
         'the body parses DIFFERENTLY one byte at a time than in bulk — the decoder is not ' +
-          `resumable.\n  bulk: ${bulk.frames.length} frame(s), partial ${show(bulk.partial)}\n` +
-          `  drip: ${drip.frames.length} frame(s), partial ${show(drip.partial)}`,
+          `resumable.\n  bulk: ${describe(bulk)}\n  drip: ${describe(drip)}`,
       );
     }
     console.log(
@@ -1764,7 +1773,7 @@ async function main() {
   // the second is the steady-state header-flush latency. Asserting only the warm one
   // would let a pathological cold path pass; asserting only the cold one would put a
   // one-off module load inside a latency budget. Both are held to FLUSH_BUDGET_MS,
-  // which this harness measures at 15-25 ms per connection on a native container, so
+  // which this harness measures at 7-27 ms per connection on a native container, so
   // there is no tension in practice.
   let cold = null;
   let warm = null;
