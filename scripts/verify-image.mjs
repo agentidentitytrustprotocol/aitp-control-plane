@@ -202,8 +202,14 @@
  * the absence of its warning in the logs is asserted. Measured: against an unmigrated
  * database every other assertion in the group still passes.
  *
- * What is NOT here yet: the CORS build-freeze, which lands in a later commit of
- * this series. Nothing below should be read as already asserting it.
+ *   THE CORS BUILD-FREEZE (check 19). The served access-control-allow-origin must
+ * equal the value the CONTAINER was started with and DIFFER from the value the
+ * Dockerfile bakes at build time — parsed out of the Dockerfile, never hardcoded here.
+ * Asserting mere presence would pass on a build-frozen artifact, which is the exact
+ * failure being guarded against.
+ *
+ * What is NOT here yet: the OTEL_ENABLED=true pass, which lands in a later commit
+ * of this series. Nothing below should be read as already asserting it.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -222,15 +228,15 @@
  * sibling harness.
  *
  * ── THE CONTRACT THIS FILE IS HELD TO ─────────────────────────────────────
- * Rule 1 binds the CORS check that is still to come; it is written here, ahead of
- * the code, because it is the reason that check will be worth having. Rules 2 and 3
- * are in force now.
- *   1. THE RUNTIME ENVIRONMENT DIFFERS FROM THE BUILD ENVIRONMENT. When the CORS
- *      check lands it must assert the served header equals the RUNTIME value AND
- *      differs from the value baked into the Dockerfile — parsed out of the
- *      Dockerfile, never hardcoded here, since this harness does not choose it.
- *      Asserting mere presence would pass on a build-frozen artifact, which is
- *      the exact failure being guarded against.
+ * All three rules are in force.
+ *   1. THE RUNTIME ENVIRONMENT DIFFERS FROM THE BUILD ENVIRONMENT. Check 19 asserts
+ *      the served CORS header equals the RUNTIME value AND differs from the value
+ *      baked into the Dockerfile — parsed out of the Dockerfile, never hardcoded
+ *      here, since this harness does not choose it. Asserting mere presence would
+ *      pass on a build-frozen artifact, which is the exact failure being guarded
+ *      against. There is deliberately no literal copy of the baked origin in this
+ *      file: a copy-pasted one would decay into "a header is present" the moment
+ *      someone edited the Dockerfile.
  *   2. EXPECTATIONS COME FROM A COMMITTED, HUMAN-AUDITABLE SNAPSHOT, never
  *      re-derived from the thing under test. Here that is
  *      `scripts/image-artifact-baseline.json`. IN FORCE NOW.
@@ -518,9 +524,9 @@ const SWEEP_MAX_LIST_ERRORS = 5;
  * The CORS origin the CONTAINER is run with.
  *
  * `.invalid` is reserved by RFC 2606 and can never resolve, so this can never
- * collide with a real origin. It also differs from the value the Dockerfile bakes
- * in at build time; no check compares the two yet, and when the CORS build-freeze
- * check lands that difference is what will make it falsifiable.
+ * collide with a real origin. It must also DIFFER from the value the Dockerfile bakes
+ * at build time — that difference is what makes check 19 falsifiable, and check 19
+ * fails loudly with a collision message if someone ever makes the two equal.
  */
 const RUNTIME_ORIGIN = 'https://runtime-probe.invalid';
 /** A fixed NON-PRODUCTION seed, so the derived AID is deterministic and can be
@@ -2527,6 +2533,112 @@ process.stdout.write(JSON.stringify({ ok, err, tamperedRejected, tamperedErr }))
 `;
 }
 
+// ── the CORS build-freeze (check 19) ────────────────────────────────────────
+//
+// RULE 1 OF THIS HARNESS'S CONTRACT, transplanted into the image: THE RUNTIME
+// ENVIRONMENT DIFFERS FROM THE BUILD ENVIRONMENT. Asserting that an
+// `access-control-allow-origin` header is merely PRESENT would pass on a
+// build-frozen artifact, which is the exact failure being guarded against — and it is
+// a live risk, not a hypothetical one: next.config.ts records that Next evaluates
+// `headers()` at BUILD time, which is precisely why src/proxy.ts applies CORS
+// per-request from src/lib/config.ts instead.
+//
+// ONE PRECISION THAT SHAPES HOW THIS CAN BE EXERCISED. `CORS_HEADERS` in
+// src/proxy.ts is a MODULE-LEVEL const, built once at process start from
+// `appConfig.corsOrigin`, which is itself a module-load snapshot of `process.env`. So
+// the value is CAPTURED AT CONTAINER START and APPLIED per request. That is exactly
+// what defeats the build-time freeze and is all this check needs — but it means the
+// variable is NOT re-read per request. Anyone who tries to "verify" this by mutating
+// the environment of a running container will see no change and will wrongly conclude
+// the check is broken. The only way to vary it is a new container.
+//
+// WHY THE BUILD-TIME VALUE IS PARSED OUT OF THE DOCKERFILE RATHER THAN HARDCODED.
+// The sibling harness (scripts/verify-request-gate.mjs) owns BOTH sentinels because it
+// runs its own build. This one does not: the build-time value is baked by the
+// Dockerfile and is not this harness's to choose. A copy-pasted literal here would
+// silently decay into "a header is present" the moment someone edited the Dockerfile,
+// which is the same decay the sibling warns about for a CI env var. Parsing keeps the
+// coupling checkable and local — and there is deliberately no literal copy of the
+// baked origin anywhere in this file.
+
+/**
+ * Read one `ENV <name>=<value>` from the Dockerfile.
+ *
+ * Folds backslash continuations into logical lines FIRST, because the Dockerfile's
+ * build-stage block is a single multi-line `ENV` and the key this check needs sits on
+ * a continuation line. A line-at-a-time scan happens to work on today's layout and
+ * would break silently the moment the key moved to the instruction's first line —
+ * the parser would find nothing, and a parser that quietly returns `undefined` turns
+ * this check green and useless.
+ *
+ * Fails loudly on: no match, more than one DISTINCT value, and the legacy
+ * `ENV <name> <value>` (space) form, which this repo does not use and which a
+ * `<name>=` regex would silently miss.
+ */
+function dockerfileEnvValue(name) {
+  const dockerfile = path.join(ROOT, 'Dockerfile');
+  let text;
+  try {
+    text = readFileSync(dockerfile, 'utf8');
+  } catch (err) {
+    fail(`could not read ${path.relative(ROOT, dockerfile)}: ${err.message}`);
+  }
+  const logical = [];
+  let acc = '';
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    // A comment line is a comment even in the middle of a continuation.
+    if (/^\s*#/.test(line)) continue;
+    if (/\\\s*$/.test(line)) {
+      acc += `${line.replace(/\\\s*$/, '')} `;
+      continue;
+    }
+    logical.push(acc + line);
+    acc = '';
+  }
+  if (acc) logical.push(acc);
+
+  const found = [];
+  for (const line of logical) {
+    if (!/^\s*ENV\s/i.test(line)) continue;
+    if (new RegExp(`(?:^|\\s)${name}\\s+[^=\\s]`).test(line)) {
+      fail(
+        `${path.relative(ROOT, dockerfile)} sets ${name} with the legacy space-separated ` +
+          '`ENV <name> <value>` form. This parser only understands `ENV <name>=<value>`, ' +
+          'which is what the file uses everywhere today, and it refuses rather than ' +
+          `guessing: silently missing ${name} would leave this check asserting only that ` +
+          'a CORS header is present, which passes on the build-frozen artifact it exists ' +
+          `to catch.\nThe instruction was: ${line.trim().slice(0, 300)}`,
+      );
+    }
+    const re = new RegExp(`(?:^|\\s)${name}=(\\S+)`, 'g');
+    for (let m = re.exec(line); m; m = re.exec(line)) {
+      // Strip one layer of matching quotes; Docker accepts `k="v"`.
+      found.push(m[1].replace(/^(["'])(.*)\1$/, '$2'));
+    }
+  }
+  if (!found.length) {
+    fail(
+      `no \`ENV ${name}=...\` found in ${path.relative(ROOT, dockerfile)}.\n` +
+        'This check compares the SERVED CORS origin against the value the image was ' +
+        'BUILT with, and it parses that value out of the Dockerfile rather than ' +
+        'hardcoding it — so a missing line is a FAILURE and never a skip. If the ' +
+        `variable really is gone from the build stage, this check's premise is gone ` +
+        'with it and it should be rewritten, not made to pass.',
+    );
+  }
+  const distinct = [...new Set(found)];
+  if (distinct.length > 1) {
+    fail(
+      `${path.relative(ROOT, dockerfile)} sets ${name} to more than one value ` +
+        `(${distinct.map((v) => JSON.stringify(v)).join(', ')}), so "the value the image ` +
+        'was built with" is ambiguous. Resolve it in the Dockerfile; this check will not ' +
+        'pick one.',
+    );
+  }
+  return distinct[0];
+}
+
 /** An HTTP request with its own deadline, so one wedged route cannot eat the
  *  watchdog. Returns the parsed body when it is JSON, the raw text otherwise. */
 async function httpReq(base, pathname, opts2 = {}) {
@@ -3062,6 +3174,66 @@ async function assertRevocationDbReadHappened(app) {
   return (
     `no ${JSON.stringify(REVOCATION_DB_FALLBACK)} in ${logs.split('\n').length} log line(s) ` +
     '— the signed list came from a real DB read, not from the empty-list fallback'
+  );
+}
+
+/** Check 19, and part of check 20: the CORS build-freeze. */
+async function assertCorsIsRuntimeNotBuild(app) {
+  const baked = dockerfileEnvValue('CORS_ORIGIN');
+  if (baked === RUNTIME_ORIGIN) {
+    fail(
+      'the value the Dockerfile bakes at BUILD time is identical to the sentinel this ' +
+        `harness runs the container with (${RUNTIME_ORIGIN}), so the two halves of this ` +
+        'check cannot be told apart and it could never fail. Change the Dockerfile back, ' +
+        'or pick a different runtime sentinel — do NOT weaken the assertion.',
+    );
+  }
+  // An /api/* path, because the gate returns early for anything outside /api/ and so
+  // sets no CORS headers there. Public and rate-limit exempt, so nothing else
+  // interferes. An Origin header is sent to mirror a real browser call; src/proxy.ts
+  // sets the response header unconditionally, so that is realism, not a dependency.
+  const r = await httpReq(app.base, '/api/health');
+  const served = r.headers.get('access-control-allow-origin');
+  if (!served) {
+    fail(
+      'no access-control-allow-origin on GET /api/health. The gate sets it on every ' +
+        '/api/* response, so its absence means the gate did not run here at all.',
+    );
+  }
+  if (served === baked) {
+    fail(
+      'the served CORS origin equals the value baked into the image at BUILD time, not ' +
+        'the one the container was STARTED with:\n' +
+        `  served:                     ${served}\n` +
+        `  runtime CORS_ORIGIN:        ${RUNTIME_ORIGIN}\n` +
+        `  baked (parsed from Dockerfile): ${baked}\n` +
+        'That is the build-freeze this check exists for: next.config.ts records that ' +
+        'Next evaluates `headers()` at BUILD time, which is why src/proxy.ts applies ' +
+        'CORS per request from src/lib/config.ts. If CORS moved into next.config.ts ' +
+        '`headers()`, this is exactly what it would look like. Note the same value is ' +
+        "also src/lib/config.ts's default, so a CORS_ORIGIN that never reached the " +
+        'container is indistinguishable from a frozen one — both are failures.',
+    );
+  }
+  if (served !== RUNTIME_ORIGIN) {
+    fail(
+      'the served CORS origin is neither the runtime value nor the baked one:\n' +
+        `  served:                     ${served}\n` +
+        `  runtime CORS_ORIGIN:        ${RUNTIME_ORIGIN}\n` +
+        `  baked (parsed from Dockerfile): ${baked}\n` +
+        'Something is rewriting the header between src/proxy.ts and the wire.',
+    );
+  }
+  // Present in src/proxy.ts's CORS_HEADERS, and a correctness property of a
+  // per-origin header: without it a shared cache could serve one origin's value to
+  // another. Asserted here because this is the check that owns the CORS headers.
+  const vary = r.headers.get('vary');
+  if (!String(vary).toLowerCase().includes('origin')) {
+    fail(`Vary is ${JSON.stringify(vary)} and does not include Origin`);
+  }
+  return (
+    `served=${served} == runtime CORS_ORIGIN; ` +
+    `!= ${baked} (parsed from the Dockerfile's build stage); Vary: ${vary}`
   );
 }
 
@@ -4816,6 +4988,13 @@ async function main() {
       'the pre-0.5.0 wrapped canonical form'
     );
   });
+
+  // ── the CORS build-freeze ─────────────────────────────────────────────────
+  await runCheck(
+    19,
+    'CORS comes from the RUNTIME environment, not from the value baked at build time',
+    () => assertCorsIsRuntimeNotBuild(app),
+  );
 
   const failures = results.filter((r) => !r.ok).length;
   if (failures) throw new Error(`${failures}/${results.length} image checks FAILED`);

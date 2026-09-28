@@ -53,6 +53,12 @@ signing key, not a config toggle.
   to a single origin, e.g. `https://console.example.com`. Applied per-request at
   runtime by the proxy, so it can be changed via the deploy environment
   without rebuilding the image. Defaults to `http://localhost:3000` if unset.
+  That "without rebuilding the image" claim is not taken on trust: `verify:image`
+  runs the shipped image with a sentinel origin and asserts the served header
+  equals it and **differs** from the value the `Dockerfile` bakes at build time —
+  see [Verifying the shipped image](#verifying-the-shipped-image). Note the value
+  is captured at *container start*, not re-read per request, so changing it means
+  a restart and not just an environment edit.
 
 See [`api.md`](api.md#authentication) for the full auth matrix.
 
@@ -491,6 +497,37 @@ signature anyone can verify under the image's own arch and libc. So:
   flip, a mutated signed body with the signature left as served, and the pre-0.5.0
   *wrapped* canonical form. Without the negative half, a verifier that returned true
   unconditionally would make everything above green forever.
+
+Then the **CORS build-freeze**, which is rule 1 of this harness's contract transplanted
+into the image: the served `access-control-allow-origin` must equal the value the
+**container was started with** and **differ** from the value the Dockerfile bakes at
+**build** time. Asserting mere presence would pass on a build-frozen artifact, which is
+the exact failure being guarded against — and it is a live risk, not a hypothetical one:
+`next.config.ts` records that Next evaluates `headers()` at build time, which is
+precisely why `src/proxy.ts` applies CORS per request instead.
+
+The build-time value is **parsed out of the `Dockerfile`**, never hardcoded in the
+harness. That is the point rather than fastidiousness: a copy-pasted literal would
+silently decay into "a header is present" the moment someone edited the Dockerfile.
+The parser folds backslash continuations into logical lines first (the build stage's
+`ENV` is one multi-line instruction), and it **fails loudly** rather than returning
+nothing — on a missing `CORS_ORIGIN=`, on more than one distinct value, and on the
+legacy space-separated `ENV <name> <value>` form. A parser that quietly returns
+`undefined` turns this check green and useless. The check also refuses to run if the
+baked value ever *equals* the harness's runtime sentinel, since the two halves would
+then be indistinguishable.
+
+Two things worth knowing about it. `CORS_HEADERS` in `src/proxy.ts` is a module-level
+const built once at process start, so the value is **captured at container start** and
+*applied* per request — which is exactly what defeats the build-time freeze, and all this
+check needs, but it means mutating the environment of a *running* container shows no
+change. The only way to vary it is a new container. And `src/lib/config.ts` defaults to
+the same value the Dockerfile bakes, so "`CORS_ORIGIN` never reached the container" and
+"the header was frozen at build time" look identical on the wire — both are failures,
+and the failure message says so.
+
+Verified the hard way rather than argued: with CORS moved into `next.config.ts`
+`headers()` and the image rebuilt, this check goes red and prints all three values.
 
 It asserts the **wire contract, not the status code**: a 401 without
 `code: INVALID_API_KEY` is a different failure wearing the right status. And empty
