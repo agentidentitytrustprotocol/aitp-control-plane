@@ -268,6 +268,10 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   equality rather than a behavioural test — for a reason worth reading before changing
   it.
 
+  (Every "13/13 green" and "all 13 checks" below is a record of a defeat measured against
+  the harness **as it stood at the time**, when it had 13 checks. It has 23 now. The counts
+  are kept verbatim because the count is part of the evidence, not a description of today.)
+
   The version of this check that shipped through eight review rounds probed the gate's
   behaviour across the whole route population: 360 requests, six verbs × thirty pinned
   routes × four id shapes. **It was defeated five times in a row**, each time by a
@@ -446,7 +450,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   `docker-publish` would block behind it. A routine base bump presenting as a security
   event is how a re-pin becomes a reflex, which is the one thing this design cannot
   survive. The exclusion also makes the pin agree with its own scope: out-of-scope item 3
-  below already places the `node` binary, libc and the base OS beyond any check that
+  above already places the `node` binary, libc and the base OS beyond any check that
   *reads* files out of an image. Pinning the base image's version *string* while
   disclaiming base-image *integrity* pinned the label, not the thing. Everything that
   decides what code runs stays pinned — `NODE_OPTIONS` above all, `PATH`, `NODE_ENV`,

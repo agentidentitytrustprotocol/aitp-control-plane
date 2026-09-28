@@ -112,6 +112,9 @@
  *   - `imageConfig`: Env, Entrypoint, Cmd, WorkingDir, User. They decide what code runs
  *     before any assertion here gets a say; `ENV NODE_OPTIONS=--require=/app/lie.js` was
  *     measured to preload its own code into every probe this harness ran from the image.
+ *     Env is pinned MINUS the base image's own `NODE_VERSION` and `YARN_VERSION`, which
+ *     `node:24-slim` sets and this repo does not — see UNPINNED_ENV_KEYS for why dropping
+ *     them is what makes the pin agree with its own scope, and do not re-add them.
  *
  * The parts make the TRIAGE precise, which is what makes the maintenance cost bearable:
  * the gate region red means the gate's own compiled code changed — a security review, and
@@ -170,9 +173,9 @@
  *      the very bytes verified here. Base-image integrity is the Dockerfile `FROM` pin's
  *      job.
  *
- * Against a fully arbitrary in-image rewrite, checks 8-12 are the necessary behavioural
+ * Against a fully arbitrary in-image rewrite, checks 8-10 and 12 are the necessary behavioural
  * complement. This check raises the bar from "a one-line edit to the gate chunk" —
- * invisible to checks 8-12 on an un-probed route — to "tamper with a dependency, a route
+ * invisible to checks 8-10 and 12 on an un-probed route — to "tamper with a dependency, a route
  * chunk or the base image", and names the boundary rather than papering over it. DO NOT
  * upgrade any of the three to a claim of completeness without a measured attack showing
  * the hole is closed: this boundary has already moved outward three times, each time
@@ -302,7 +305,7 @@
  *     --platform <os/arch>   one platform per invocation (default: host)
  *     --tag <tag>            image tag to build/use
  *     --no-build             reuse an existing local tag
- *     --keep                 skip teardown (prints the cleanup commands)
+ *     --keep                 skip Docker teardown (prints the cleanup commands)
  *     --prune                sweep leaked resources from an earlier crashed run
  *     --update-baseline      rewrite scripts/image-artifact-baseline.json
  *     --allow-removals       with --update-baseline: consent to a shrinking set
@@ -663,7 +666,9 @@ shipped standalone Docker image.
   --tag <tag>            image tag to build and probe
                          (default aitp-control-plane:verify-image)
   --no-build             reuse an existing local tag instead of building
-  --keep                 skip teardown and print the cleanup commands
+  --keep                 skip Docker teardown and print the cleanup commands.
+                         Scratch temp dirs are still removed — nothing can be
+                         re-probed from them.
   --prune                remove resources left by an earlier crashed run, then exit
   --update-baseline      rewrite scripts/image-artifact-baseline.json and
                          scripts/image-gate-canonical.txt from the image. Prints the
@@ -2185,11 +2190,11 @@ async function followLoader(readFile, containerPath, label) {
  * Dockerfile's `FROM` and a check that READS files out of the image cannot out-trust
  * the runtime that would EXECUTE them — a tampered `node` could ignore the very bytes
  * this check verified. Base-image integrity is the `FROM` pin's job. And against a
- * fully arbitrary in-image rewrite, checks 8-12 are the necessary behavioural
+ * fully arbitrary in-image rewrite, checks 8-10 and 12 are the necessary behavioural
  * complement: they prove the gate that runs still refuses the probed routes. This
  * check raises the bar from "a one-line edit to the gate chunk" (invisible to
- * checks 8-12 on an un-probed route) to "tamper with the framework tree or the base
- * image", and names the boundary rather than papering over it.
+ * checks 8-10 and 12 on an un-probed route) to "tamper with the framework tree or the
+ * base image", and names the boundary rather than papering over it.
  *
  * The verdict/triage split: bootGraph or nextTreeSha differing while the region
  * matches means framework bytes moved and the gate did not — a housekeeping re-pin.
@@ -4271,13 +4276,17 @@ async function main() {
         'bootGraph is server.js plus every file the middleware and instrumentation ' +
         'loaders pull in, by SHA-256; nextTreeSha is one aggregate digest of ' +
         '/app/node_modules/next; imageConfig pins Env, Entrypoint, Cmd, WorkingDir and ' +
-        'User. Breadth is the point: an equality on the gate chunk alone proves the ' +
+        'User. Env is pinned MINUS NODE_VERSION and YARN_VERSION, which node:24-slim sets ' +
+        'and this repo does not — a floating base tag would otherwise move them on every ' +
+        'Node patch release and fire the security-worded triage for nothing; see ' +
+        'UNPINNED_ENV_KEYS in scripts/verify-image.mjs, and do not helpfully re-add them. ' +
+        'Breadth is the point: an equality on the gate chunk alone proves the ' +
         'reviewed gate is on DISK, not that it RUNS, and a hook in server.js, the ' +
         'instrumentation chunk or the next tree was measured to rewrite the gate in ' +
         'memory while its chunk stayed byte-identical. Out of scope, and it must be ' +
         'stated: the node binary, libc and the base OS — a docker-cp check cannot ' +
         'out-trust the runtime that executes the files it read; that is the Dockerfile ' +
-        'FROM pin\'s job, and checks 8-12 are the behavioural complement. The compiled ' +
+        'FROM pin\'s job, and checks 8-10 and 12 are the behavioural complement. The compiled ' +
         'gate itself is committed VERBATIM in scripts/image-gate-canonical.txt, not in ' +
         'this file, so it can be read and `git log -p`-ed. These replaced a 360-request ' +
         'behavioural probe of the route population that was defeated five times by ' +
@@ -4995,7 +5004,7 @@ async function main() {
       // checks 8-10 and 12 (no 401, no x-request-id), which is why the behavioural
       // half is kept rather than deleted as redundant. Three layers, three jobs:
       // check 11 says the gate is WIRED to the right paths, check 13 says its code is
-      // the REVIEWED code, and checks 8-12 say that code actually RUNS.
+      // the REVIEWED code, and checks 8-10 and 12 say that code actually RUNS.
       //
       // The extraction runs no code from the image: `docker create` + `docker cp`
       // against a container that is never started. That closes, by construction, the
