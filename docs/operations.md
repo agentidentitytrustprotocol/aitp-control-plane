@@ -199,14 +199,18 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
 - `OPTIONS` → **204** with an empty body, answered by the gate without ever
   reaching a handler.
 
-- **The gate's matcher set is exactly the pinned one.** This is what keeps the four
-  above from being vacuous, and it is an *equality against a committed value*
-  (`middlewareMatchers` in `scripts/image-artifact-baseline.json`) rather than a test
-  of what the matcher satisfies. Any matcher key beyond `regexp`/`originalSource`
-  fails closed, and the built-route count is pinned as well.
+- **The gate's matcher set is exactly the pinned one — compiled regexp included.**
+  This is what keeps the four above from being vacuous, and it is an *equality against
+  a committed value* (`middlewareMatchers` in `scripts/image-artifact-baseline.json`)
+  rather than a test of what the matcher satisfies. Each pinned matcher records both
+  the **`regexp`** Next matches requests against and the `originalSource` string that
+  labels it, and the comparison is over the whole object: any matcher key beyond those
+  two fails closed. The built `/api/*` route **identities** are pinned as well, as
+  `apiRoutes`, not merely how many there are — a count cannot see a *substitution*.
 
   That shape was arrived at the hard way. Three earlier versions tested
-  *satisfaction* and each fell to a one-line edit of `src/proxy.ts`:
+  *satisfaction* and each fell to a one-line edit of `src/proxy.ts`; a fourth pinned
+  only the source string and fell to an edit of the built artifact:
 
   | matcher | what it defeated | what leaked |
   |---|---|---|
@@ -214,12 +218,22 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   | `['/api/audit','/api/webhooks','/api/health']` | a three-path probe | 5 routes, incl. the sibling harness's own |
   | `['/api/:path([^0-9]+)']` | testing the built route list | all 10 dynamic routes — the check substitutes a literal `a` per `[param]`, and `a` has no digit, so every route "matched" while every real id did not |
   | `{source:'/api/:path*', missing:[{type:'header',key:'cookie'}]}` | all of the above, *source unchanged* | everything, to any request with a cookie |
+  | `regexp` narrowed to `^/api/[a-z-]+(?:/[a-z-]+)*$`, `originalSource` untouched | a pin on `originalSource` alone | all 10 dynamic routes — measured: anonymous `GET /api/webhooks/1/circuit-breaker` → `200 {"state":"closed"}` with no `x-request-id`, while checks 8, 9, 10 and 12 all stayed green |
 
-  The last is the instructive one: Next enforces `has`/`missing` at **runtime**, so
-  the matcher looked correct in every check while `GET /api/audit` with a cookie —
-  i.e. any browser request — returned the admin audit log. A sampled predicate can
-  always be satisfied by something narrower than it appears to be, which is why the
-  matcher itself is pinned and unknown conditions are rejected rather than ignored.
+  The fourth row is the instructive one: Next enforces `has`/`missing` at **runtime**,
+  so the matcher looked correct in every check while `GET /api/audit` with a cookie —
+  i.e. any browser request — returned the admin audit log. The fifth is the same
+  lesson one level down: `originalSource` enforces nothing, so a projection of the
+  matcher is not the matcher. A sampled predicate can always be satisfied by something
+  narrower than it appears to be, which is why the matcher is pinned **whole** and
+  unknown conditions are rejected rather than ignored.
+
+  The fifth row is not reachable by editing `src/proxy.ts` — Next compiles the regexp
+  from the source — but it is reachable by modifying the artifact between build and
+  verification (`--no-build` against a pre-existing tag is a supported mode), and by a
+  Next upgrade that compiles the same source more narrowly. The second is why the pin
+  is a *security* review rather than housekeeping: a Next bump that moves this line
+  fails the check by design, and the failure text names the re-pin command.
 
   (Read from `functions-config-manifest.json`, not `middleware-manifest.json` — the
   latter is `{"middleware":{},"sortedMiddleware":[]}` in this image *and* in one whose
@@ -227,9 +241,202 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   former is load-bearing at runtime: delete it and the server refuses to boot.)
 
 - **The gate actually runs**, on a second gated route under a different top-level
-  segment and on a public route that must still carry the injected `x-request-id`.
-  This is the behavioural complement: a manifest can show the matcher covers a route
-  but not that the gate does anything when it runs.
+  segment, on a public route that must still carry the injected `x-request-id`, and —
+  with exactly one request — on an **anonymous `POST /api/trust-anchors`**. This is the
+  behavioural complement: a manifest can show the matcher covers a route but not that
+  the gate does anything when it runs, and the compiled-code pin below can show the
+  gate's bytes are right but not that they are *reached*. The POST is there because the
+  gate's decision is `isPublicRequest(pathname, method)` — it takes the method — and
+  every other assertion here is a `GET`; one flipped operator in the compiled gate was
+  measured to leave `GET /api/audit` answering 401 while that exact POST returned 201
+  and created a trust anchor pointing at an attacker-supplied issuer.
+
+- **The shipped image's compiled gate is byte-identical to the reviewed one.** This is
+  the check that establishes the gate is not merely attached but *correct*, and it is an
+  equality rather than a behavioural test — for a reason worth reading before changing
+  it.
+
+  The version of this check that shipped through eight review rounds probed the gate's
+  behaviour across the whole route population: 360 requests, six verbs × thirty pinned
+  routes × four id shapes. **It was defeated five times in a row**, each time by a
+  dimension the probe set held constant:
+
+  | what was patched in the compiled gate | result | what leaked |
+  |---|---|---|
+  | the gate **body** — rewrite `isPublicRequest` | 12/12 green | `/api/tcts`, `/api/delegations`, `/api/sessions`, `/api/trust-anchors`, `/api/pinned-keys` → 200 |
+  | the **verb** — `"GET"===t&&` → `"GET"!==t‖` | 13/13 green | anonymous `POST /api/trust-anchors` → **201, anchor created**; `GET /api/audit` stayed 401 |
+  | the **population** — rename 19 gated manifest keys to `/api/decoy-N` | 13/13 green | six admin routes → 200 |
+  | the **request shape** — append `‖ !e.headers.get("origin")` | 13/13 green | a plain `curl` (no `Origin`, i.e. every non-browser caller) read `/api/audit`, `/api/tcts` and seven more |
+  | the **id length** — exempt `/[^/]{40,}/` | 13/13 green | every dynamic route ungated for real 54-character AIDs |
+
+  One mechanism, five times: **a check that samples what the runtime decides on is
+  satisfiable by something narrower than the check's own prose claims**, and the space
+  of request shapes is not finite. Adding a seventh verb or a ninth id literal closes
+  nothing. Note also that *none of the five touches `src/proxy.ts`* — so `verify:gate`,
+  which builds its own server from source, is structurally blind to all of them, and
+  this harness is the only thing in CI that looks at the image.
+
+  So the check stopped asking what the gate *does* and asserts what the gate *is*. But
+  an equality on the gate's own bytes proves the reviewed gate is present *on disk*, not
+  that it *executes*: anything that runs earlier in the same process can rewrite the gate
+  in memory before it is called. Two such channels were measured — a
+  `Module.prototype._compile` hook in the standalone boot script `/app/server.js`, and
+  code appended to the **instrumentation** chunk, which the middleware entry `await`s in
+  the same module realm at boot — each opening an un-probed route to anonymous callers
+  while the gate chunk stayed byte-identical. So the check pins the gate's whole **load
+  path**, as exact equalities, and none of them sends a request:
+
+  - **`bootGraph`** — `server.js`, plus the **transitive closure** of the chunks
+    `.next/server/middleware.js` and `.next/server/instrumentation.js` load, by SHA-256,
+    each path prefixed by its loader. The file set is *derived from those loaders* rather
+    than hardcoded, so a Next upgrade that splits the code differently is followed rather
+    than missed; the file **names** are pinned too, so a swap to a different chunk is a
+    diff and not a silent redirection. It is a **closure**, not the loaders' direct
+    `R.c(...)` registrations, and that distinction was a measured defeat: a chunk can load
+    further chunks *lazily* at runtime (`e.v`/`e.l`), and
+    `[root-of-the-server]__1up5uol._.js` — reached from `instrumentation.register()`, which
+    the middleware entry awaits in the gate's realm — was in no pinned set at all, so a
+    `Set.prototype.has` shim in it served four un-probed routes anonymously while all 13
+    checks stayed green. Complete over the **compiled chunk graph the gate's loaders
+    reach**, including bytes outside the gate function — `deny()`, `applyCors()`, the config
+    parser, the rate limiter — and including the boot script and instrumentation chunk the
+    in-memory rewrites lived in. It is **not** complete over everything the process
+    executes; see *What is out of scope*. It is also opaque: a digest cannot say *what*
+    moved.
+  - **`nextTreeSha`** — one aggregate SHA-256 over `/app/node_modules/next`, the framework
+    tree that loads and invokes the gate chunk and is where a require-time hook would
+    rewrite the gate before it runs. Measured byte-identical across arches; it moves only
+    on a `next` bump — the same event that already moves the gate region, so it adds no new
+    churn event.
+  - **`scripts/image-gate-canonical.txt`** — the compiled gate itself, extracted as a byte
+    range of the entry module (from the compiled `PUBLIC_PATHS` set literal to the end of
+    the export registration naming `"proxy"`) and committed **verbatim**, one line, ~2.8 KB.
+    This is the **reviewable** half: `git log -p` on that file is the audit trail of every
+    change the gate's compiled form has ever undergone, and a mismatch prints a located,
+    windowed diff rather than two walls of minified JavaScript. It is narrower than the
+    graph on purpose and is *not* relied on for completeness.
+  - **`imageConfig`** — `Env`, `Entrypoint`, `Cmd`, `WorkingDir`, `User`. They decide what
+    code runs before any assertion gets a say: an image carrying
+    `ENV NODE_OPTIONS=--require=/app/lie.js` was measured to preload its own code into
+    every probe this harness ran from it, including the one that reports the matcher the
+    check above pins — the artifact controlling the reporting of the facts it is judged
+    on. An equality makes that a one-line diff.
+
+  **What is out of scope** — stated because a `docker cp` check cannot honestly claim
+  otherwise, and because two of these are **measured holes, not theoretical ones**. The
+  gate's realm is the whole Node process, so its code surface is the transitive `require`
+  closure of everything that runs before the gate decides. This check pins part of that
+  closure, not all of it:
+
+  1. **The dependency tree, apart from `node_modules/next` — a known open hole.** A closure
+     chunk can `require()` a traced external, and that package then runs in the gate's
+     realm. Measured: `[root-of-the-server]__1up5uol._.js` requires `pino`, and appending a
+     `Set.prototype.has` shim to `/app/node_modules/pino/pino.js` flipped four un-probed
+     routes from `401` to a handler-reached `500` **while all 13 checks passed**. Closing it
+     means pinning `/app/node_modules`, which costs either the "one pin serves both arches"
+     property (native packages are arch-specific) or leaves `.node` bytes unpinned. That
+     trade-off is **unresolved and escalated**, not silently chosen.
+  2. **Route-handler chunks** (`.next/server/chunks/_next-internal_server_app_api_*`).
+     Outside the loader closure by construction, but they run in the same *process*, so a
+     shim installed while a public route is handled can poison a later gate decision.
+     Folding all of `.next/server` in would close this **and** would make
+     `--allow-gate-change` mandatory for every ordinary route addition — destroying the
+     "this consent cannot be a reflex" discipline that flag exists for. Judged the worse
+     trade, so it is stated rather than closed.
+  3. **The `node` binary, libc and the base OS.** A check that *reads* files out of the
+     image cannot out-trust the runtime that *executes* them — a tampered `node` could
+     ignore the very bytes verified here. Base-image integrity is the Dockerfile `FROM`
+     pin's job.
+
+  Against a fully arbitrary in-image rewrite, checks 8–12 (which do send requests) are the
+  necessary behavioural complement. This check raises the bar from "a one-line edit to the
+  gate chunk" — invisible to checks 8–12 on an un-probed route — to "tamper with a
+  dependency, a route chunk or the base image". **Do not upgrade any of the three to a claim
+  of completeness without a measured attack showing the hole is closed:** this boundary has
+  already moved outward three times, each time because a fix was described as complete when
+  it covered exactly one hop.
+
+  **The parts exist to make the triage precise**, which is what makes the maintenance
+  cost bearable. The **gate region red** means the gate's own compiled code changed — a
+  security review, and what all five defeats above produce. `bootGraph` or `nextTreeSha`
+  red *while the gate region is green* is the **ambiguous** case and is deliberately **not
+  auto-blessed**: it is *either* the framework recompiling around an unchanged gate (a
+  housekeeping re-pin) *or* code injected into a load-path file — a `_compile` hook, a
+  patched instrumentation chunk — that rewrites the gate in memory while leaving the region
+  bytes untouched (a real defeat, and exactly how the two measured channels above look on
+  disk). The two are indistinguishable to the check, so the **operator** resolves them:
+  re-pin only a load-path change you made and can account for. An unexplained load-path
+  change is the attack, not the framework.
+
+  **The extraction runs no code from the image.** `docker create` plus `docker cp`
+  against a container that is never started: no entrypoint, no `node`, and so no
+  `NODE_OPTIONS` preload. That is a deliberate departure from the other probes, which
+  run `node -e` inside the image; for the one check whose whole claim is that the
+  artifact did not participate in reporting on itself, that participation is exactly
+  what must not happen. (The other probes now also get `NODE_OPTIONS` blanked, as
+  defence in depth.)
+
+  > **The accepted cost, stated plainly so nobody treats it as a bug.** A Next.js or
+  > Turbopack upgrade that recompiles the same source differently **fails this check**
+  > with no behaviour change to show for it, and needs
+  > `--update-baseline --allow-gate-change`. That is the price of an equality and it is
+  > the price this design was chosen for. Do **not** "fix" it by normalising,
+  > AST-diffing or otherwise teaching the comparison to tolerate variation: an equality
+  > that has been fuzzed until it tolerates differences has started sampling again, and
+  > sampling is the thing that lost five times.
+
+  **How often that bill actually comes due — measured, not estimated.** An equality on
+  compiler output is only usable if the output is reproducible, so this was checked on
+  four axes rather than assumed:
+
+  | axis | result |
+  |---|---|
+  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation |
+  | build inside the Debian image (Node 24) vs a local macOS build (Node 26) | byte-identical — the pin can be regenerated and reviewed without Docker |
+  | rebuild of unchanged source | byte-identical |
+  | **adding a new `/api/*` route** | **byte-identical**, filename hash included |
+
+  That last row is the one that decides whether this is livable: the middleware and
+  instrumentation chunks are referenced only by their loaders and contain no route
+  handler code, `server.js` is boot scaffolding, and `node_modules/next` is framework —
+  so every part of the pin stays byte-identical on ordinary feature work and does **not**
+  churn on it. What moves the pin is a Next.js or Turbopack upgrade (which moves
+  `bootGraph`, `nextTreeSha` and typically the region together), or a change to
+  `src/proxy.ts`, `src/lib/config.ts` or `src/lib/rate-limit.ts` — which are precisely the
+  changes that ought to be reviewed as security changes. If the chunking strategy ever
+  changes, re-measure: the claim is cheap to falsify (add a route, rebuild, diff) and
+  expensive to leave stale.
+
+  **What this check does not prove** — the gap is measured, not hypothetical: that the
+  pinned bytes are *invoked*. An image with the `/_middleware` entry deleted from
+  `functions-config-manifest.json` has a byte-identical `bootGraph` **and** a
+  byte-identical gate region; the gate's code is present and simply never called. That
+  image is caught by the matcher check (no matchers) and by the behavioural ones (no
+  401, no `x-request-id`). Hence three layers with three jobs, and none of them is
+  redundant:
+
+  | layer | question | mechanism |
+  |---|---|---|
+  | the matcher/route pin | is the gate **wired** to the right paths? | pinned equality on the manifest |
+  | the compiled-gate pin | is the gate's **code** the reviewed code? | pinned equality on the bytes |
+  | the behavioural probes | does that code actually **run**? | a handful of real requests |
+
+  Measured against every attack image this effort produced, each caught by at least one
+  layer, and the three that only the compiled-gate pin catches are precisely the three
+  that used to pass everything:
+
+  | attack | caught by |
+  |---|---|
+  | gate body rewritten | behavioural + **gate pin** |
+  | verb operator flipped | behavioural + **gate pin** |
+  | decoy route population | matcher pin + behavioural + **gate pin** |
+  | `Origin`-header exemption | **gate pin only** |
+  | id-length exemption | **gate pin only** |
+  | `ENV NODE_OPTIONS` preload | **gate pin only** (`imageConfig`) |
+  | matcher `missing:` condition | matcher pin |
+  | compiled `regexp` narrowed | matcher pin |
+  | `/_middleware` entry deleted | matcher pin + behavioural |
+  | honest gate copy planted as a decoy to satisfy the extractor | **gate pin** — both halves: the duplicate anchor fails the locate *closed*, and the graph digest fails independently |
 
 It asserts the **wire contract, not the status code**: a 401 without
 `code: INVALID_API_KEY` is a different failure wearing the right status. And empty
@@ -268,17 +475,38 @@ After reviewing a legitimate change, regenerate:
 node scripts/verify-image.mjs --update-baseline
 ```
 
-Regeneration is deliberately hard to do by accident, because a baseline written
-from a broken image is worse than no baseline — every later run would compare
-the defect against itself and report green. Two guards:
+Regeneration also rewrites `scripts/image-gate-canonical.txt`, the verbatim compiled
+gate. It is deliberately hard to do by accident, because a baseline written from a
+broken image is worse than no baseline — every later run would compare the defect
+against itself and report green. Three guards:
 
 - It **refuses outright** if any structural check (1–4) failed, so a dangling
-  symlink or a wrong-architecture binary can never be recorded as normal.
+  symlink or a wrong-architecture binary can never be recorded as normal. It also
+  refuses if the compiled gate could not be *located*, since pinning the graph
+  digests without the gate region would leave the check with only its opaque half.
 - It prints the **diff against the existing baseline** and refuses if any entry
   would *disappear*. Additions are the benign direction and are written; a
   removal means something that used to ship no longer does, which is the exact
   regression the baseline exists to catch. If the removal really is intended,
   re-run with `--allow-removals`.
+- It prints the diff of **the whole gate load-path pin** — the located diff of the
+  compiled gate region, plus any changed `bootGraph` file, `nextTreeSha` or `imageConfig`
+  — and refuses to re-pin any of it without `--allow-gate-change`. The removal gate above
+  is the right ceremony for an inventory — things that used to ship and no longer do. It
+  is the wrong ceremony for the gate's compiled code and the files that load it, where the
+  dangerous direction is not removal but **change**: every defeat this harness has
+  measured *added* a few bytes and removed nothing. So the gate has its own consent flag
+  covering the region, `bootGraph`, `nextTreeSha` and `imageConfig` alike, and the diff is
+  shown before the flag is demanded — so a load-path change (which is ambiguous between a
+  framework bump and an in-memory injection) cannot be re-pinned as a reflex.
+
+  This is also what replaced an earlier hole. `--update-baseline --allow-removals`
+  could re-bless a route population that had lost real routes to decoy renames, because
+  the population was load-bearing for *correctness*. It no longer is: the decoy rename
+  was only ever the cover for a compiled-gate edit, and that edit is now a failed
+  equality whatever the route list says. `apiRoutes` and `apiRouteCount` remain as
+  **change detection** for the route surface — a route appearing, vanishing or being
+  renamed is a review point — and consent has moved to where protection now lives.
 
 Other flags: `--no-build` reuses an existing local tag (and fails fast if its
 architecture does not match `--platform`), `--tag` names the image, `--keep`
@@ -293,6 +521,18 @@ Two things to know about what it leaves behind:
   harness). The **image** is deliberately kept, under a deterministic tag, so a
   failure can be re-probed with `--no-build`; remove it with `docker image rm`.
   `--prune` does not touch images.
+
+  Teardown removes by name and then **re-sweeps by label until the daemon's own
+  listing has been empty for a continuous quiet window**, because Ctrl-C can land
+  between the daemon creating a probe container and starting it: the `docker run`
+  client dies, the container appears a moment later in state `created`, and
+  `AutoRemove` never fires for a container that did not run. Measured across 24
+  Ctrl-C runs, that container appeared **284–618 ms** after teardown began in 5 of
+  them, which an earlier ~300 ms grace period missed about once in 24 runs — and
+  missed *silently*, since its leftover check also ran too early. A container
+  arriving later than the whole sweep is still possible in principle; that is what
+  `--prune` is for, and anything the sweep can see but not remove is now reported
+  rather than swallowed.
 - **`--prune` removes resources from every other run of this harness**, not just
   dead ones — it is for orphans left by a crash, so do not run it while another
   `verify:image` run is in flight. And because the default tag is not

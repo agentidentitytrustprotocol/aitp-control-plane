@@ -1,5 +1,5 @@
 {
-  "_comment": "Normalised inventory of the shipped standalone image, derived from a BUILT IMAGE (never from next.config.ts). `tracedExternals` is the set of .next/node_modules leaves with the 16-hex Turbopack suffix stripped — it is NOT serverExternalPackages: pg and pino are traced without being listed, and @grpc/grpc-js is listed without ever being traced. `nativeModules` is every .node under /app with the arch token replaced by <ARCH> and a trailing -<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. `middlewareMatchers` is the request gate's matcher set and `apiRouteCount` the number of built /api/* routes; both are PINNED rather than recomputed, because every attempt to verify the matcher by testing what it satisfies was defeated by a one-line edit (see check 11). Review every line by hand: a new entry means a new external or a new native binary shipped, a missing entry means one stopped shipping, and any change to middlewareMatchers or apiRouteCount is a security review — the first changes what the gate covers, the second means a route appeared or vanished.",
+  "_comment": "Normalised inventory of the shipped standalone image, derived from a BUILT IMAGE (never from next.config.ts). `tracedExternals` is the set of .next/node_modules leaves with the 16-hex Turbopack suffix stripped — it is NOT serverExternalPackages: pg and pino are traced without being listed, and @grpc/grpc-js is listed without ever being traced. `nativeModules` is every .node under /app with the arch token replaced by <ARCH> and a trailing -<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. `middlewareMatchers` is the request gate's matcher set; it is PINNED rather than recomputed, because every attempt to verify the matcher by testing what it satisfies was defeated by a one-line edit (see check 11). Each matcher records BOTH the compiled `regexp` and its `originalSource`, and the regexp is the load-bearing half: it is what Next matches requests against, while originalSource enforces nothing. Narrowing only the regexp, with the source left byte-identical, was measured to pass every other check while leaving all ten dynamic /api/* routes ungated. `apiRoutes` pins the IDENTITIES of the built /api/* routes and `apiRouteCount` their number; identities are pinned because a count cannot see a SUBSTITUTION — renaming 19 gated routes to decoy names, count unchanged at 30, was measured to pass every check while six admin routes answered 200 anonymously. Those two are CHANGE DETECTION for the route surface (a route appearing, vanishing or being renamed is a review point) and are no longer what establishes the gate is CORRECT — check 13 does that by equality. `bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, and they cover the gate's whole LOAD PATH rather than just its own chunk: bootGraph is server.js plus every file the middleware and instrumentation loaders pull in, by SHA-256; nextTreeSha is one aggregate digest of /app/node_modules/next; imageConfig pins Env, Entrypoint, Cmd, WorkingDir and User. Breadth is the point: an equality on the gate chunk alone proves the reviewed gate is on DISK, not that it RUNS, and a hook in server.js, the instrumentation chunk or the next tree was measured to rewrite the gate in memory while its chunk stayed byte-identical. Out of scope, and it must be stated: the node binary, libc and the base OS — a docker-cp check cannot out-trust the runtime that executes the files it read; that is the Dockerfile FROM pin's job, and checks 8-12 are the behavioural complement. The compiled gate itself is committed VERBATIM in scripts/image-gate-canonical.txt, not in this file, so it can be read and `git log -p`-ed. These replaced a 360-request behavioural probe of the route population that was defeated five times by request shapes it held constant (the verb, the population, the id shape, the id length, the Origin header); an equality has no such dimensions. The cost, accepted: a Next.js or Turbopack upgrade that recompiles the same source fails check 13 with no behaviour change to show for it, and needs `--update-baseline --allow-gate-change`. When that happens the harness says whether the GATE REGION moved or only the framework bytes around it, which is the difference between a security review and housekeeping. Review every line by hand: a new entry means a new external or a new native binary shipped, a missing entry means one stopped shipping, and any change to middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes or apiRouteCount is a security review — the first changes what the gate covers, the next three change the code it runs and the environment it runs in, and the last two mean a route appeared, vanished or was renamed.",
   "_regenerate": "node scripts/verify-image.mjs --update-baseline",
   "tracedExternals": [
     "@opentelemetry/auto-instrumentations-node",
@@ -16,7 +16,140 @@
     "node_modules/@img/sharp-linux-<ARCH>/lib/sharp-linux-<ARCH>.node"
   ],
   "middlewareMatchers": [
-    "/api/:path*"
+    {
+      "originalSource": "/api/:path*",
+      "regexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?\\/api(?:\\/((?:[^\\/#\\?]+?)(?:\\/(?:[^\\/#\\?]+?))*))?(\\.json|\\.rsc|\\.segments\\/.+\\.segment\\.rsc)?[\\/#\\?]?$"
+    }
   ],
-  "apiRouteCount": 30
+  "apiRoutes": [
+    "/api/audit",
+    "/api/dashboard/agents",
+    "/api/dashboard/overview",
+    "/api/delegations",
+    "/api/events",
+    "/api/events/history",
+    "/api/events/stream",
+    "/api/health",
+    "/api/metrics",
+    "/api/pinned-keys",
+    "/api/readyz",
+    "/api/registry/agents",
+    "/api/registry/agents/[aid]",
+    "/api/registry/agents/[aid]/export",
+    "/api/registry/agents/[aid]/manifest",
+    "/api/registry/enroll",
+    "/api/revocation/entries",
+    "/api/sessions",
+    "/api/sessions/[sessionId]",
+    "/api/sessions/[sessionId]/export",
+    "/api/sessions/[sessionId]/replay",
+    "/api/tcts",
+    "/api/trust-anchors",
+    "/api/trust-anchors/[id]",
+    "/api/webhooks",
+    "/api/webhooks/[id]",
+    "/api/webhooks/[id]/circuit-breaker",
+    "/api/webhooks/[id]/circuit-breaker/reset",
+    "/api/well-known/aitp-manifest",
+    "/api/well-known/aitp-revocation-list"
+  ],
+  "apiRouteCount": 30,
+  "bootGraph": [
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_auto-instrumentations-node_1zlmz_g._.js",
+      "bytes": 282,
+      "sha256": "c9657ab25a784a61ce78c767b5c0b8ce7c781e00c0d161dc227df022fd4edad2"
+    },
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_exporter-trace-otlp-http_1ud6z9e._.js",
+      "bytes": 276,
+      "sha256": "39414ab19ef21000ef40552972ed68b29b2269fe0bc7427655820c68a07bd358"
+    },
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_resources_1mr2n-u._.js",
+      "bytes": 232,
+      "sha256": "db829e85d6c18030371bc862dc07bf3c84b3cdb755a32ae5a6fb6512c06355b6"
+    },
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_sdk-node_12qoa3y._.js",
+      "bytes": 229,
+      "sha256": "c1da5689f5ed09a616bdef7bea8543e7cf1d3bb42854774821a3ed2bae9a9b04"
+    },
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_semantic-conventions_1cyb5wn._.js",
+      "bytes": 265,
+      "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__1ak-eeo._.js",
+      "bytes": 1687,
+      "sha256": "254f58e95937fda61e59ff6125fc48a7365c8558b56e37ebc9271ac0c5c12bcb"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__1up5uol._.js",
+      "bytes": 1495,
+      "sha256": "8b44a4fd0ae0152567cb0a54ef14c0dfc57036b82be0dd5a472b90a47df80b9d"
+    },
+    {
+      "path": "instrumentation/chunks/[turbopack]_runtime.js",
+      "bytes": 36624,
+      "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
+    },
+    {
+      "path": "instrumentation/instrumentation.js",
+      "bytes": 179,
+      "sha256": "6ad7b9205f9130ff4a37671aa10f4b805ada09d0e820a781217af6fdf13085c4"
+    },
+    {
+      "path": "middleware/chunks/[externals]__1-7rkdt._.js",
+      "bytes": 1209,
+      "sha256": "86588cc61eee312c986c0d9cb72cd11ea5159d002e68d6ecd1b2ef0530af8e50"
+    },
+    {
+      "path": "middleware/chunks/[root-of-the-server]__1e654z8._.js",
+      "bytes": 230482,
+      "sha256": "43aad0608a43ae4b5a85782a0567cfe94437a712ffd381c29dbc066770767ba7"
+    },
+    {
+      "path": "middleware/chunks/[turbopack]_runtime.js",
+      "bytes": 36624,
+      "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
+    },
+    {
+      "path": "middleware/middleware.js",
+      "bytes": 221,
+      "sha256": "c3e19f57ac58f28973d3b3b4a48defe1fb783a65a64762b267b46a24fc94ad31"
+    },
+    {
+      "path": "server.js",
+      "bytes": 7851,
+      "sha256": "457dbe867a7b6eafd5017160529f3154cdeaf9a2fc1533fcf12bc3f9736e7b1b"
+    }
+  ],
+  "nextTreeSha": "614a11fb058d7f563dcc09428f6762bc8fe2dec336ab69c4fdcc9457bffa3fab",
+  "imageConfig": {
+    "Env": [
+      "HOSTNAME=0.0.0.0",
+      "NEXT_TELEMETRY_DISABLED=1",
+      "NODE_ENV=production",
+      "NODE_VERSION=24.21.0",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "PORT=4000",
+      "YARN_VERSION=1.22.22"
+    ],
+    "Entrypoint": [
+      "docker-entrypoint.sh"
+    ],
+    "Cmd": [
+      "node",
+      "server.js"
+    ],
+    "WorkingDir": "/app",
+    "User": "app"
+  },
+  "gateCanonicalFile": "scripts/image-gate-canonical.txt",
+  "gateRegion": {
+    "bytes": 2837,
+    "sha256": "ab45e68e31494029a316679973e4d365365a561f0aa16dbe4167701c1e2c986c"
+  }
 }
