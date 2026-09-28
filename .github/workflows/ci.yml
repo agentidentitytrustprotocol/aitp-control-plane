@@ -232,6 +232,19 @@ jobs:
   # condition, which Next enforces at runtime, so any request with a cookie read
   # /api/audit anonymously. Unknown matcher keys therefore fail closed.
   #
+  # It also pins THE COMPILED GATE ITSELF as an exact equality — the gate's compiled
+  # bytes, the transitive chunk closure its loaders reach plus server.js, an aggregate
+  # digest over node_modules/next, and the image's Env/Entrypoint/Cmd/WorkingDir/User.
+  # That is the layer with no behavioural substitute: five successive attempts to
+  # establish the gate's correctness by SENDING REQUESTS were each defeated by a
+  # dimension the requests held constant (the gate body, the verb, the route population,
+  # the presence of an `Origin` header, the length of a path segment), and the last three
+  # are caught by this equality and by nothing else in this repo. It is also the one
+  # check whose extraction runs no code from the image at all — `docker create` plus
+  # `docker cp` against a container that is never started — because an image carrying
+  # `ENV NODE_OPTIONS=--require=/app/lie.js` was measured preloading its own code into
+  # every probe run from it.
+  #
   # It then verifies the SIGNING PATH — the revocation list's Ed25519 signature
   # checked two independent ways over the raw served bytes, plus the assertion that
   # the container did NOT log `revocation DB read failed`, because the producer
@@ -243,9 +256,12 @@ jobs:
   # and the SDK is proven to have actually started. Span EXPORT is out of scope.
   #
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
-  # wrong architecture, or whose traced externals had stopped resolving, would
-  # build green and ship. docker-build-check only answers "does it build" —
-  # nothing else looks inside the image at all.
+  # wrong architecture, or whose traced externals had stopped resolving, or whose
+  # compiled request gate had been rewritten while `src/proxy.ts` stayed untouched,
+  # would build green and ship. docker-build-check only answers "does it build" —
+  # nothing else looks inside the image at all, and `verify:gate` builds its own
+  # server from source, so it is structurally blind to every one of the five
+  # recorded gate defeats.
   #
   # NO `if:` ON PURPOSE, and this is not cosmetic. docker-publish publishes on
   # workflow_dispatch too (its condition excludes only pull_request), and in

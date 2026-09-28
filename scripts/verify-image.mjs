@@ -93,8 +93,11 @@
  *     load further chunks lazily at runtime (`e.v`/`e.l`), and one such chunk
  *     (`[root-of-the-server]__1up5uol._.js`, reached from `instrumentation.register()`)
  *     was measured to run in the gate's realm while being in NO pinned set — a
- *     `Set.prototype.has` shim in it served four un-probed routes anonymously at 13/13
- *     green. Complete over the COMPILED CHUNK GRAPH the gate's loaders reach, including
+ *     `Set.prototype.has` shim in it served four un-probed routes anonymously with all 13
+ *     checks the harness then had passing. (Every "13/13" and "n of 13" in this file is a
+ *     record of a defeat measured against the harness AS IT STOOD AT THE TIME, not against
+ *     today's 23 checks. They are kept verbatim because the count is part of the evidence.)
+ *     Complete over the COMPILED CHUNK GRAPH the gate's loaders reach, including
  *     bytes outside the gate function (deny(), applyCors(), the config parser). It is NOT
  *     complete over everything that executes — see WHAT IS OUT OF SCOPE.
  *   - `nextTreeSha`: one aggregate SHA-256 over /app/node_modules/next — the framework
@@ -132,8 +135,8 @@
  *      external, and that package runs in the gate's realm. Measured:
  *      `[root-of-the-server]__1up5uol._.js` requires `pino`, and appending a
  *      `Set.prototype.has` shim to `/app/node_modules/pino/pino.js` flipped four un-probed
- *      routes from 401 to a handler-reached 500 while ALL 13 CHECKS PASSED
- *      (`aitp-attack24:pino-external`), with the gate region, the whole bootGraph and
+ *      routes from 401 to a handler-reached 500 while ALL 13 CHECKS THE HARNESS THEN HAD
+ *      PASSED (`aitp-attack24:pino-external`), with the gate region, the whole bootGraph and
  *      nextTreeSha all byte-identical.
  *        WHAT THIS CHECK GUARANTEES is that THIS REPO'S OWN COMPILED OUTPUT — the gate's
  *      compiled logic, the middleware/instrumentation chunk graph, the framework tree that
@@ -485,7 +488,7 @@ const GATE_REGION_START_ANCHOR =
 /**
  * Sanity bound on the extracted region, so a locate that goes wrong in a way nobody
  * predicted reports "the region came out implausible" instead of pinning 70 KB of
- * Next's middleware adapter and calling it the gate. The gate compiles to 2829 bytes
+ * Next's middleware adapter and calling it the gate. The gate compiles to 2837 bytes
  * on this image; the bound is loose enough for real growth and tight enough that
  * swallowing the enclosing module (77 KB) trips it.
  */
@@ -694,6 +697,18 @@ shipped standalone Docker image.
 const containers = new Set();
 /** Networks created this run. */
 const networks = new Set();
+/**
+ * Temp directories created this run, so teardown covers them too.
+ *
+ * Check 13's extraction `docker cp`s the whole Next framework tree (985 files, ~14 MB)
+ * into an `os.tmpdir()` directory. Removal used to live ONLY in that function's
+ * `finally`, and a `finally` does not run when a signal handler calls `process.exit(1)`
+ * — so a Ctrl-C during check 13 stranded the copy, once per interrupt. That is the same
+ * class of silently-unenumerated resource as the anonymous volume this file already
+ * guards with `docker rm -v` and a tmpfs PGDATA: a resource the teardown contract does
+ * not name is one that can leak while the sweep reports clean.
+ */
+const tempDirs = new Set();
 /** Live `docker` CLI children, so no pipe can outlive a signal. */
 const liveChildren = new Set();
 
@@ -948,6 +963,21 @@ let keepPrinted = false;
 
 function cleanupSync() {
   killLiveChildren();
+  // Temp dirs go FIRST and unconditionally, before the `--keep` early return: `--keep`
+  // is a promise about DOCKER resources a reader may want to re-probe, and the printed
+  // cleanup instructions name containers, networks and the image — never a scratch copy
+  // of the framework tree, which nothing can be re-probed from. Synchronous and
+  // `force: true`, so it is safe from the 'exit' handler and idempotent across the
+  // several paths that call this.
+  for (const d of [...tempDirs]) {
+    tempDirs.delete(d);
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      // A temp dir that will not delete is not worth failing teardown over; the OS
+      // reclaims os.tmpdir(). Staying silent here keeps the signal path quiet.
+    }
+  }
   if (opts.keep) {
     if (!keepPrinted) {
       keepPrinted = true;
@@ -1913,6 +1943,9 @@ async function withImageContainer(tag, platform, fn) {
   const name = nameFor('extract');
   containers.add(name);
   const dir = mkdtempSync(path.join(os.tmpdir(), 'aitp-gate-pin-'));
+  // Registered so a signal during check 13 still removes it — see `tempDirs`. The
+  // `finally` below remains the normal path; this is the signal-path backstop.
+  tempDirs.add(dir);
   let seq = 0;
   try {
     await docker(['create', '--name', name, '--platform', platform, ...labelArgs(), tag], {
@@ -1959,10 +1992,45 @@ async function withImageContainer(tag, platform, fn) {
       await docker(['rm', '-f', name], { timeoutMs: DEFAULT_DOCKER_MS, allowFail: true });
     } finally {
       containers.delete(name);
+      tempDirs.delete(dir);
       rmSync(dir, { recursive: true, force: true });
     }
   }
 }
+
+/**
+ * `Env` keys that are the BASE IMAGE's build metadata rather than this repo's
+ * configuration, and are therefore excluded from the pin.
+ *
+ * `NODE_VERSION` and `YARN_VERSION` are set by `node:24-slim`, not by this
+ * Dockerfile, and the `FROM` is a floating tag — so Docker Hub publishing a Node
+ * patch release moves them with no change to this repo at all. Left in, they would
+ * be the pin's MOST FREQUENT mover, and it would fail in the worst possible way:
+ * a non-empty `cfgLines` makes the triage read "the environment that decides what
+ * code runs is not what was reviewed — every defeat this check was built against
+ * looks exactly like this", and `docker-publish` now blocks behind it. A routine
+ * base bump would present as a security event and the response would become a
+ * reflex, which is the one thing this pin cannot survive.
+ *
+ * Excluding them is not softening the equality, it is making the equality agree
+ * with its own stated scope. WHAT IS OUT OF SCOPE item 3 already places the `node`
+ * binary, libc and the base OS beyond any check that READS files out of an image
+ * ("base-image integrity is the Dockerfile `FROM` pin's job"). Pinning the base
+ * image's own version STRING while disclaiming base-image integrity pinned the
+ * label and not the thing.
+ *
+ * Nothing that decides what code runs is dropped. Every remaining `Env` key stays
+ * pinned — `NODE_OPTIONS` above all, which is the one field here with a measured
+ * attack behind it (`ENV NODE_OPTIONS=--require=/app/lie.js`), along with `PATH`,
+ * `NODE_ENV`, `HOSTNAME`, `PORT` and `NEXT_TELEMETRY_DISABLED`. A key is excluded
+ * by NAME, so an attacker cannot smuggle anything in under one: `NODE_VERSION=24.21.0
+ * NODE_OPTIONS=…` is a single Env entry whose key is `NODE_VERSION` and whose value
+ * `node` never reads.
+ *
+ * Do NOT grow this list to quiet a red check. Every addition is a field that stops
+ * being reviewed, and the next one will not be base-image metadata.
+ */
+const UNPINNED_ENV_KEYS = new Set(['NODE_VERSION', 'YARN_VERSION']);
 
 /** The pinned subset of `docker image inspect`'s Config, in a fixed key order. */
 async function readImageConfig(tag) {
@@ -1980,9 +2048,15 @@ async function readImageConfig(tag) {
     const v = cfg?.[k] ?? null;
     // Env is order-insensitive as far as the runtime is concerned, so sort it: a
     // Dockerfile reordering its own ENV lines must not read as a security event.
+    // The base image's own version metadata is dropped here, at the single point
+    // every consumer reads through, so the baseline, the removal diff and check 13
+    // cannot disagree about what is pinned — see UNPINNED_ENV_KEYS.
     // Entrypoint and Cmd are argument VECTORS and their order is meaning, so they
     // are left exactly as they are.
-    out[k] = k === 'Env' && Array.isArray(v) ? [...v].sort() : v;
+    out[k] =
+      k === 'Env' && Array.isArray(v)
+        ? v.filter((e) => !UNPINNED_ENV_KEYS.has(String(e).split('=', 1)[0])).sort()
+        : v;
   }
   return out;
 }
@@ -2799,6 +2873,46 @@ async function containerLogs(name) {
   return `${stdout}${stderr}`.trim() || '(no output)';
 }
 
+/**
+ * The same read, but for the checks that ASSERT ON A STRING BEING ABSENT.
+ *
+ * `containerLogs` is deliberately forgiving because most of its callers are building a
+ * failure message, where "(no output)" is better than a second error on top of the
+ * first. An ABSENCE assertion cannot use it: a `docker logs` that failed, or a
+ * container that logged nothing at all, contains no forbidden string either, so the
+ * forgiving read turns an unanswerable question into a green check. That is the exact
+ * shape of vacuity check 17 exists to prevent in the revocation group — it is, by this
+ * harness's own account, the single assertion standing between checks 14-18 and
+ * complete vacuity, because the producer's fallback publishes an EMPTY BUT VALIDLY
+ * SIGNED list that satisfies every other one of them.
+ *
+ * So this one fails loudly on a non-zero exit and on empty output, and returns the
+ * text only when the scan it feeds is actually meaningful.
+ */
+async function containerLogsForAbsenceScan(name, why) {
+  const { code, stdout, stderr } = await docker(['logs', name], {
+    allowFail: true,
+    timeoutMs: 60_000,
+  });
+  const text = `${stdout}${stderr}`.trim();
+  if (code !== 0) {
+    fail(
+      `\`docker logs ${name}\` exited ${code}, so its output could not be read — and ` +
+        `${why} asserts that a string is ABSENT from it. An unreadable log contains no ` +
+        'forbidden string either, so passing here would be vacuous. stderr: ' +
+        `${JSON.stringify(stderr.trim().slice(0, 500))}`,
+    );
+  }
+  if (!text) {
+    fail(
+      `\`docker logs ${name}\` returned nothing at all, and ${why} asserts that a string ` +
+        'is ABSENT from it — which an empty log satisfies trivially. The container should ' +
+        'have logged its Next.js startup banner by now; that it did not is the finding.',
+    );
+  }
+  return text;
+}
+
 /** A run-unique private bridge network, so the app reaches Postgres by container
  *  name — identical locally and in CI. */
 async function createNetwork() {
@@ -3439,7 +3553,12 @@ function assertEnvelopeIssuerIsSeedDerived(rev, expectedAid) {
 
 /** Check 17, and part of check 20 — the assertion that stops the group being vacuous. */
 async function assertRevocationDbReadHappened(app) {
-  const logs = await containerLogs(app.name);
+  // STRICT read, not the forgiving one: this assertion is an ABSENCE, so an unreadable
+  // or empty log satisfies it trivially and the whole revocation group goes vacuous.
+  const logs = await containerLogsForAbsenceScan(
+    app.name,
+    'check 17 (the signed list came from a real DB read)',
+  );
   const hits = logs
     .split('\n')
     .map((l, i) => [i + 1, l])
@@ -4277,7 +4396,19 @@ async function main() {
 
   await runCheck(5, 'the traced external set matches the committed baseline', async () => {
     requireProbe(sweep, 'sweep');
-    const want = [...(baseline.tracedExternals ?? [])].sort();
+    // FAILS CLOSED on absence, like every other baseline key. `?? []` here used to
+    // turn a missing key into "expected nothing", which passes against an image that
+    // traced nothing at all — the quiet disposition on the security half, which the
+    // `apiRouteCount` comment below already rejects by name.
+    if (!Array.isArray(baseline.tracedExternals) || !baseline.tracedExternals.length) {
+      fail(
+        `${BASELINE_PATH} has no non-empty \`tracedExternals\`. That is the pin on the ` +
+          'set of packages Next externalised into the image, and without it this check has ' +
+          'nothing to compare against — so it fails rather than passing vacuously. ' +
+          `Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const want = [...baseline.tracedExternals].sort();
     const diffs = [];
     for (const spec of new Set([...want, ...tracedExternals])) {
       const inBaseline = want.includes(spec);
@@ -4324,7 +4455,16 @@ async function main() {
           multi.map(([k, raws]) => `  ${k}\n${raws.map((r) => `    <- ${r}`).join('\n')}`).join('\n'),
       );
     }
-    const want = [...(baseline.nativeModules ?? [])].sort();
+    // FAILS CLOSED on absence — see check 5 above for why `?? []` was wrong here.
+    if (!Array.isArray(baseline.nativeModules) || !baseline.nativeModules.length) {
+      fail(
+        `${BASELINE_PATH} has no non-empty \`nativeModules\`. That is the pin on the ` +
+          '`.node` inventory including its arch token, and without it this check passes ' +
+          'against an image carrying no native binary at all — which is the failure #54 ' +
+          `was filed for. Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const want = [...baseline.nativeModules].sort();
     const diffs = [];
     for (const p of new Set([...want, ...nativeModules])) {
       const inBaseline = want.includes(p);
@@ -4358,9 +4498,17 @@ async function main() {
   //
   // It is written even when checks 5 or 6 FAILED, deliberately: a divergence is
   // exactly when the inventory is worth having, and a file that only appears on green
-  // would be missing from every run that needed it. The emitting run's platform and
-  // its check results are recorded in it so a reader cannot mistake a failing run's
-  // inventory for a passing one's.
+  // would be missing from every run that needed it.
+  //
+  // WHAT `structuralChecksFailed` DOES AND DOES NOT COVER. It is written HERE, before
+  // the live substrate is stood up, so it can only ever report on checks 1-6 — the
+  // structural half, which is the half whose findings this file's contents come from. A
+  // run that fails check 13 or check 20 emits `structuralChecksFailed: []`, and that is
+  // correct rather than misleading: the field is scoped by its name. It is NOT a summary
+  // of the run. Do not read an empty array here as "the run passed" — the job's exit
+  // code is the only thing that says that. (Moving the write into a `finally` after all
+  // 23 checks would widen the field, and would also mean no inventory at all from a run
+  // that died in the live phase, which is the one this file is most often wanted for.)
   if (opts.inventoryOut) {
     const doc = {
       _comment:
@@ -4920,6 +5068,43 @@ async function main() {
       // ── 13b: the compiled gate region ─────────────────────────────────────
       const canonical = readFileSync(GATE_CANONICAL_PATH, 'utf8').replace(/\n$/, '');
       const regionLines = [];
+
+      // CROSS-CHECK THE TWO COMMITTED COPIES AGAINST EACH OTHER FIRST.
+      //
+      // The gate is pinned in two tracked files: the readable bytes in
+      // `image-gate-canonical.txt` and a `{bytes, sha256}` record in
+      // `image-artifact-baseline.json`. Until this block existed the digest was WRITTEN
+      // and never READ, which made it decoration — and worse, it made the readable copy
+      // singly-sourced: an edit to the `.txt` to match a tampered image would leave the
+      // digest sitting next to it disagreeing, silently. Two copies that are never
+      // compared are not redundancy. This compares them, before either is compared to
+      // the image, so "the two committed pins disagree" is reported as its own finding
+      // rather than surfacing as a confusing image mismatch.
+      const wantRegion = baseline.gateRegion;
+      if (!wantRegion || typeof wantRegion.sha256 !== 'string' || !wantRegion.sha256) {
+        fail(
+          `${BASELINE_PATH} has no \`gateRegion.sha256\`. It is the second, independent ` +
+            `copy of the compiled gate's identity, cross-checked against ` +
+            `${path.relative(ROOT, GATE_CANONICAL_PATH)} so neither can be edited alone. ` +
+            `Regenerate with \`${REPIN_CMD} --allow-gate-change\`.`,
+        );
+      }
+      const canonicalSha = sha256Hex(Buffer.from(canonical, 'utf8'));
+      if (canonicalSha !== wantRegion.sha256 || canonical.length !== wantRegion.bytes) {
+        fail(
+          'THE TWO COMMITTED GATE PINS DISAGREE WITH EACH OTHER — treat this as a ' +
+            'security review, and note that no image was involved in finding it.\n' +
+            `  ${path.relative(ROOT, GATE_CANONICAL_PATH)}: ${canonical.length} bytes, ` +
+            `sha256 ${canonicalSha}\n` +
+            `  ${path.relative(ROOT, BASELINE_PATH)} gateRegion: ${wantRegion.bytes} bytes, ` +
+            `sha256 ${wantRegion.sha256}\n` +
+            '  These two files are written together by `--update-baseline ' +
+            '--allow-gate-change` and can only diverge if one was edited by hand or a ' +
+            'partial commit landed. Do NOT re-pin to make them agree until you know which ' +
+            'one is the reviewed gate: an attacker who can edit the readable copy would ' +
+            'produce exactly this.',
+        );
+      }
       if (gate.regionError) {
         regionLines.push(
           '  the compiled gate could not be LOCATED in the image:\n' +
@@ -5239,7 +5424,12 @@ async function main() {
 
   await runCheck(
     20,
-    'with OTEL_ENABLED=true, the gate, signing and CORS assertions all still hold',
+    // Says "re-run", and names the three groups rather than claiming "all": of the five
+    // revocation checks it re-runs 14, 16 and 17 — not 15 (the in-image SDK verify, which
+    // runs in its own fresh probe container that `OTEL_ENABLED` never reaches) and not 18
+    // (a purely host-side tamper rejection with no container in it at all). Both
+    // omissions are defensible; "all" was not.
+    'with OTEL_ENABLED=true, the re-run gate, revocation and CORS assertions still hold',
     async () => {
       // THE CONCRETE RISK THIS ANSWERS: loading the OpenTelemetry tree — five traced
       // externals plus the auto-instrumentations, which monkey-patch `pg`, `http` and
@@ -5334,7 +5524,10 @@ async function main() {
   });
 
   await runCheck(22, 'no OTel load failure appears in the enabled container logs', async () => {
-    const logs = await containerLogs(otelApp.name);
+    // STRICT read — this is an absence assertion, and an empty log has no forbidden
+    // string in it either. Check 21 above happens to fail on an empty log for its own
+    // reasons; this check must not depend on that neighbour holding.
+    const logs = await containerLogsForAbsenceScan(otelApp.name, 'check 22 (no OTel load failure)');
     const matches = scanLogs(logs);
     if (matches.length) {
       fail(

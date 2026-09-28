@@ -107,8 +107,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__1e654z8._.js",
-      "bytes": 230482,
-      "sha256": "43aad0608a43ae4b5a85782a0567cfe94437a712ffd381c29dbc066770767ba7"
+      "bytes": 231266,
+      "sha256": "af91e74eebe1714633e4848df2e8dabb6a944d1af86990cee200d24c263e50d8"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -132,10 +132,8 @@
       "HOSTNAME=0.0.0.0",
       "NEXT_TELEMETRY_DISABLED=1",
       "NODE_ENV=production",
-      "NODE_VERSION=24.21.0",
       "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-      "PORT=4000",
-      "YARN_VERSION=1.22.22"
+      "PORT=4000"
     ],
     "Entrypoint": [
       "docker-entrypoint.sh"

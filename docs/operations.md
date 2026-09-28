@@ -146,7 +146,12 @@ It builds the image for one platform, then asserts against the built artifact:
   compiled server chunks load.
 - **Every traced external resolves.** `.next/node_modules` holds one hashed
   entry per traced external (`aitp-<16 hex>`, and the compiled server chunks ask
-  for exactly that hashed specifier). Each must be a **symlink** whose realpath
+  for exactly that hashed specifier) — but **not** in a flat layout: a scoped
+  package's hashed entry sits one level down, inside a plain unhashed scope
+  directory (`@opentelemetry/sdk-node-<16 hex>`, with `@opentelemetry` itself a
+  real directory and not a symlink). Five of the eight traced entries are of that
+  shape, so the check walks the scope level rather than assuming one. Each must be
+  a **symlink** whose realpath
   is under `/app/node_modules` and which resolves from the server chunks. A
   hashed *copy* instead of a symlink would lose the sibling native binary
   (vercel/next.js#88844); a dangling link or a missing external fails loudly.
@@ -335,12 +340,19 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   closure of everything that runs before the gate decides. This check pins part of that
   closure, not all of it:
 
-  1. **The dependency tree, apart from `node_modules/next` — out of scope by deliberate
-     decision, not an oversight.** A closure chunk can `require()` a traced external, and that
+  1. **The dependency tree, apart from `node_modules/next` — out of scope by a deliberate
+     decision taken by the repo owner, not an oversight.** It was escalated as a design
+     decision rather than settled by whoever wrote the check, and it is recorded as such;
+     read it as a considered boundary, because the alternative reading ("they missed
+     `pino`") is the one this paragraph exists to prevent. A closure chunk can `require()`
+     a traced external, and that
      package then runs in the gate's realm. Measured: `[root-of-the-server]__1up5uol._.js`
      requires `pino`, and appending a `Set.prototype.has` shim to
      `/app/node_modules/pino/pino.js` flipped four un-probed routes from `401` to a
-     handler-reached `500` **while all 13 checks passed** — the gate region, the whole
+     handler-reached `500` **while all 13 checks the harness then had passed**
+     (`aitp-attack24:pino-external`, reproducible with
+     `node scripts/verify-image.mjs --no-build --tag aitp-attack24:pino-external`) — the
+     gate region, the whole
      `bootGraph` and `nextTreeSha` all byte-identical.
 
      **What this check guarantees, and what it does not.** It guarantees that *this repo's own
@@ -376,7 +388,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
      ignore the very bytes verified here. Base-image integrity is the Dockerfile `FROM`
      pin's job.
 
-  Against a fully arbitrary in-image rewrite, checks 8–12 (which do send requests) are the
+  Against a fully arbitrary in-image rewrite, checks 8–10 and 12 (which do send requests) are the
   necessary behavioural complement. This check raises the bar from "a one-line edit to the
   gate chunk" — invisible to checks 8–12 on an un-probed route — to "tamper with a
   dependency, a route chunk or the base image". **Do not upgrade any of the three to a claim
@@ -415,14 +427,31 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
 
   **How often that bill actually comes due — measured, not estimated.** An equality on
   compiler output is only usable if the output is reproducible, so this was checked on
-  four axes rather than assumed:
+  five axes rather than assumed:
 
   | axis | result |
   |---|---|
-  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation |
+  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation. Measured for **all four halves** (region, `bootGraph`, `nextTreeSha`, `imageConfig`): a full `--platform linux/amd64` run passes 23/23 against a baseline generated from an arm64 image |
   | build inside the Debian image (Node 24) vs a local macOS build (Node 26) | byte-identical — the pin can be regenerated and reviewed without Docker |
   | rebuild of unchanged source | byte-identical |
   | **adding a new `/api/*` route** | **byte-identical**, filename hash included |
+  | **a `node:24-slim` base-image patch release** | **does not move the pin** — but only because `NODE_VERSION` and `YARN_VERSION` are excluded from the `Env` comparison by name. See below; without that exclusion this was the pin's most frequent mover, and the loudest |
+
+  **Why two `Env` keys are excluded, and why that is not softening the equality.**
+  `NODE_VERSION` and `YARN_VERSION` come from `node:24-slim`, not from this repo's
+  `Dockerfile`, and the `FROM` is a floating tag — so Docker Hub publishing a Node patch
+  would move them with no change here at all. Left in, they would fire the `imageConfig`
+  half, whose triage text reads *"the environment that decides what code runs is not what
+  was reviewed — every defeat this check was built against looks exactly like this"*, and
+  `docker-publish` would block behind it. A routine base bump presenting as a security
+  event is how a re-pin becomes a reflex, which is the one thing this design cannot
+  survive. The exclusion also makes the pin agree with its own scope: out-of-scope item 3
+  below already places the `node` binary, libc and the base OS beyond any check that
+  *reads* files out of an image. Pinning the base image's version *string* while
+  disclaiming base-image *integrity* pinned the label, not the thing. Everything that
+  decides what code runs stays pinned — `NODE_OPTIONS` above all, `PATH`, `NODE_ENV`,
+  `HOSTNAME`, `PORT`, `NEXT_TELEMETRY_DISABLED` — and keys are excluded by **name**, so
+  nothing can be smuggled in under one. Do not grow that list to quiet a red check.
 
   That last row is the one that decides whether this is livable: the middleware and
   instrumentation chunks are referenced only by their loaders and contain no route
@@ -724,6 +753,21 @@ Two things to know about what it leaves behind:
   dead ones — it is for orphans left by a crash, so do not run it while another
   `verify:image` run is in flight. And because the default tag is not
   run-unique, pass `--tag` if you run two platforms concurrently.
+
+- **Anonymous volumes: the harness leaves none, but a local `docker build` may.**
+  Measured, because the distinction is easy to get wrong when auditing a dev
+  machine: a full 23-check run with `--no-build` moves the host's
+  `docker volume ls` count by **zero**. Every container is removed with
+  `docker rm -f -v`, and `PGDATA` is a `--tmpfs` so postgres's declared
+  `VOLUME /var/lib/postgresql/data` never materialises one in the first place;
+  the built app image declares no volume at all. What *does* create anonymous
+  volumes is **Docker Desktop's own build subsystem** — a run that builds was
+  observed adding a dozen dangling volumes that no container references and that
+  no harness teardown should touch, since they are shared build state belonging
+  to other builds too. So do not read them as a harness leak, and do not "fix"
+  `--prune` to remove them. On CI the question does not arise: the runner is
+  discarded with the job. `docker volume prune` is the right tool locally, at a
+  time of your choosing.
 
 The two harnesses are deliberately **not** merged: `verify:gate` owns the
 `next start` path, a real developer workflow, and owns its own build;
