@@ -166,12 +166,18 @@ export async function POST(req: NextRequest) {
     // (UnsafeWebhookUrlError) and events/history/route.ts (InvalidFilterError),
     // which all do this.
     //
-    // "Of that set" is the scoping that matters: other routes in this service
-    // still have undiscriminated catch-alls — agents/route.ts maps any throw to
-    // 401 TOKEN_INVALID with err.message in the body, and
-    // revocation/entries/route.ts maps any throw to 500 INSERT_FAILED with the
-    // raw database message. Both are known and tracked separately; neither is a
-    // precedent this block follows.
+    // "Of that set" is the scoping that matters. agents/route.ts used to be
+    // named here as an undiscriminated catch-all: it mapped any throw — the
+    // EnrollmentService constructor's included — to 401 TOKEN_INVALID with
+    // err.message in the body. That was #91, and it is fixed: that route now
+    // hoists getEnrollmentService() into its own guard exactly as this one
+    // does, and the err.message its 401 still echoes is deliberate
+    // caller-facing text about a token the caller supplied, not an
+    // undiscriminated catch-all.
+    //
+    // revocation/entries/route.ts is the one that remains: it maps any throw to
+    // 500 INSERT_FAILED with the raw database message. That one is not a
+    // precedent this block follows either.
     if (err instanceof ManifestRejectedError) {
       // We rejected it, deliberately, and it is the caller's fault. No
       // verifyCode: the SDK is not what rejected this. The cpCode is

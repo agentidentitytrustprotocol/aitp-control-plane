@@ -210,7 +210,11 @@ describe('withIdempotency — persistence policy on a miss', () => {
     expect(insertValues).toEqual([]); // and must not be cached
   });
 
-  it.each([500, 502, 401, 403, 429])(
+  // 503 is load-bearing for POST /api/registry/agents and
+  // POST /api/registry/enroll: both answer 503 SERVER_MISCONFIGURED when
+  // ENROLLMENT_SECRET is unusable, and pinning that against a key would make a
+  // fixed deployment keep serving the fault for the whole TTL.
+  it.each([500, 502, 503, 401, 403, 429])(
     'does NOT persist transient/auth outcome %i',
     async (status) => {
       selectQueue = [[]];
