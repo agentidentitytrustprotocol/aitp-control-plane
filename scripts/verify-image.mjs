@@ -573,6 +573,7 @@ function parseArgs(argv) {
     allowRemovals: false,
     allowGateChange: false,
     scanFixture: null,
+    inventoryOut: null,
     help: false,
   };
   /** A value-taking flag must actually be followed by a value, not by nothing
@@ -615,6 +616,9 @@ function parseArgs(argv) {
         break;
       case '--scan-fixture':
         opts.scanFixture = value(a, ++i);
+        break;
+      case '--inventory-out':
+        opts.inventoryOut = value(a, ++i);
         break;
       case '--help':
       case '-h':
@@ -678,6 +682,10 @@ shipped standalone Docker image.
                          string makes the scan fail" is something a reviewer can run:
                          there is no test runner wired to a .mjs script in this repo,
                          so a negative path with no hook is not falsifiable.
+  --inventory-out <file> also write the NORMALISED artifact inventory (traced
+                         externals + .node paths) as JSON. Both arches normalise to
+                         the same shape, so CI uploads one per platform and a
+                         cross-arch comparison is a diff of two small files.
   --help                 this text
 `;
 
@@ -4337,6 +4345,41 @@ async function main() {
     }
     return `${nativeModules.length} native module(s): ${nativeModules.join(', ')}`;
   });
+
+  // ── the cross-arch inventory artifact ────────────────────────────────────
+  //
+  // WHAT THIS IS FOR, and why it is a file rather than a check. Both arches
+  // NORMALISE to the same shape — the arch token becomes <ARCH> and a trailing
+  // -<semver> before `.node` is dropped — so the committed baseline already enforces
+  // equality in the common case, and checks 5 and 6 are what enforce it. This file
+  // exists for the case where the two arches LEGITIMATELY diverge: CI uploads it per
+  // platform, and comparing amd64 against arm64 is then a diff of two small JSON files
+  // instead of two 400-line job logs read side by side.
+  //
+  // It is written even when checks 5 or 6 FAILED, deliberately: a divergence is
+  // exactly when the inventory is worth having, and a file that only appears on green
+  // would be missing from every run that needed it. The emitting run's platform and
+  // its check results are recorded in it so a reader cannot mistake a failing run's
+  // inventory for a passing one's.
+  if (opts.inventoryOut) {
+    const doc = {
+      _comment:
+        'Normalised artifact inventory from scripts/verify-image.mjs, for cross-arch ' +
+        'comparison. Normalised means: the arch token is <ARCH> and a trailing -<semver> ' +
+        'before .node is dropped, so amd64 and arm64 should produce IDENTICAL files. A ' +
+        'real difference is a review point. Not a baseline — do not point a check at it.',
+      platform,
+      generatedBy: 'scripts/verify-image.mjs',
+      tag: opts.tag,
+      tracedExternals,
+      nativeModules,
+      apiRouteCount,
+      structuralChecksFailed: results.filter((r) => !r.ok).map((r) => r.id),
+    };
+    const out = path.resolve(ROOT, opts.inventoryOut);
+    writeFileSync(out, `${JSON.stringify(doc, null, 2)}\n`);
+    console.log(`\nwrote the normalised inventory to ${path.relative(ROOT, out)}`);
+  }
 
   // ── live substrate ───────────────────────────────────────────────────────
   //

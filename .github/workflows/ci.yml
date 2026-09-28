@@ -7,6 +7,16 @@ on:
     branches: [main]
   # Allow manual runs from the Actions tab (e.g. to re-publish the image).
   workflow_dispatch:
+    inputs:
+      # Opt-in, and the INPUT is the point rather than a bare `workflow_dispatch`
+      # condition: plain manual dispatch already exists to re-publish the image, and
+      # without an input every such re-publish would pay for a full QEMU-emulated
+      # image verification. Default false keeps existing manual runs identical.
+      verify_image_arm64:
+        description: 'Also verify the shipped image on linux/arm64 (slow, QEMU)'
+        type: boolean
+        required: false
+        default: false
 
 # Cancel in-flight runs on the same ref when a new commit lands.
 concurrency:
@@ -222,8 +232,15 @@ jobs:
   # condition, which Next enforces at runtime, so any request with a cookie read
   # /api/audit anonymously. Unknown matcher keys therefore fail closed.
   #
-  # Still to come in this series: the revocation signing path and the CORS
-  # build-freeze. This comment is updated when they land.
+  # It then verifies the SIGNING PATH — the revocation list's Ed25519 signature
+  # checked two independent ways over the raw served bytes, plus the assertion that
+  # the container did NOT log `revocation DB read failed`, because the producer
+  # publishes an empty-but-validly-signed list on a failed DB read and every other
+  # assertion in that group passes against it — the CORS BUILD-FREEZE (the served
+  # origin must equal the runtime value and differ from the one the Dockerfile bakes,
+  # parsed out of the Dockerfile rather than hardcoded), and the OTEL_ENABLED=true
+  # PATH in a second container, where the gate/signing/CORS assertions are all re-run
+  # and the SDK is proven to have actually started. Span EXPORT is out of scope.
   #
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
   # wrong architecture, or whose traced externals had stopped resolving, would
@@ -247,12 +264,14 @@ jobs:
   verify-image:
     name: Verify shipped image (amd64)
     runs-on: ubuntu-latest
-    # Must EXCEED the harness's own ceilings (25-minute build timeout + 25-minute
-    # post-build watchdog = 50) or GitHub kills the job first and the harness never
+    # Must EXCEED the harness's own ceilings (25-minute build timeout + 40-minute
+    # post-build watchdog = 65) or GitHub kills the job first and the harness never
     # gets to print which of the two it was — losing exactly the distinction those
     # two separate timeouts exist to give. Keep this above their sum, with room for
-    # checkout, setup-node, npm ci and setup-buildx on top.
-    timeout-minutes: 60
+    # checkout, setup-node, npm ci and setup-buildx on top. The watchdog grew from
+    # 25 to 40 when the OTEL_ENABLED=true container added a second app boot; if it
+    # moves again, this number moves with it.
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -274,13 +293,100 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Verify the shipped image
-        run: npm run verify:image -- --platform linux/amd64
+        run: >-
+          npm run verify:image --
+          --platform linux/amd64
+          --inventory-out image-inventory-amd64.json
+
+      # ALWAYS, not only on success. Both arches normalise to the same shape, so the
+      # whole value of this file is the case where they legitimately DIVERGE — and a
+      # divergence is exactly when the job is red. An artifact that only appears on
+      # green would be missing from every run that needed it.
+      - name: Upload the normalised artifact inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-inventory-amd64
+          path: image-inventory-amd64.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The arm64 arm of the same harness, opt-in via the workflow_dispatch input above.
+  # It BOOTS AND EXERCISES the app under QEMU, not just builds it, so it is much
+  # slower than docker-build-check-arm64 and has no business on the PR path.
+  #
+  # INFORMATIONAL BY CONSTRUCTION, and that is a GitHub constraint rather than a
+  # choice: a conditionally-skipped job cannot be a required check, because GitHub
+  # treats a skipped required check as permanently pending. Same status as
+  # docker-build-check-arm64. The amd64 leg above runs unconditionally and *can* be
+  # required.
+  #
+  # DELETE THIS JOB AND: arm64 is first exercised by docker-publish AFTER merge,
+  # which is the wrong side of the merge button for anything arch-specific — native
+  # binary resolution above all (see #54). The published image is multi-arch; without
+  # this, half of what ships is never run before it ships.
+  verify-image-arm64:
+    name: Verify shipped image (arm64, opt-in)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_image_arm64
+    # Higher than the amd64 leg's 75 and than docker-build-check-arm64's 45: this one
+    # pays QEMU emulation for the BUILD (the harness allows 60 minutes for an
+    # emulated build, against 25 native) and then boots two app containers and a
+    # Postgres on top of it.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Note what is NOT emulated: Postgres runs native even here, because only
+      # container-to-container TCP crosses the boundary and emulating the database
+      # would slow the run for no assertion gained. The IMAGE UNDER TEST is arm64,
+      # which is the thing this job is about.
+      - name: Verify the shipped image
+        run: >-
+          npm run verify:image --
+          --platform linux/arm64
+          --inventory-out image-inventory-arm64.json
+
+      - name: Upload the normalised artifact inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-inventory-arm64
+          path: image-inventory-arm64.json
+          retention-days: 14
+          if-no-files-found: warn
 
   docker-publish:
     name: Build & push image to GHCR
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: build-and-test
+    # GATED ON verify-image, and this is the real payoff of that job existing.
+    # Before this line, an image whose request gate had silently DETACHED would
+    # publish to GHCR on a green build-and-test — because build-and-test proves the
+    # gate under `next start`, a configuration the image never runs. Fail-closed is
+    # correct here: it makes the harness's own reliability a release concern, which is
+    # why that harness has a watchdog and unconditional teardown.
+    #
+    # The arm64 leg is deliberately NOT in `needs`: it is conditionally skipped, and a
+    # skipped `needs` dependency skips its dependents, so listing it would block every
+    # publish that did not opt into a QEMU run.
+    needs: [build-and-test, verify-image]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

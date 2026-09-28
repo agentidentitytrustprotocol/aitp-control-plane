@@ -178,8 +178,14 @@ Unit tests (`*.test.ts`) are colocated with the code and mock the database;
 integration tests (`*.integration.test.ts`) run against a real Postgres and
 exercise routes/services end-to-end. CI runs both plus a production
 `next build`, a dependency audit, a Docker image build check on PRs, and
-`npm run verify:image` — which builds the standalone image and asserts the
-native NAPI and traced-external paths really resolve inside it.
+`npm run verify:image` — which builds the standalone image and then, against the
+running artifact, asserts that the native NAPI and traced-external paths resolve
+inside it, that the request gate is really **attached** (the one thing `next start`
+cannot show for a standalone build), that the revocation list's signature verifies
+two independent ways, that CORS comes from the runtime environment rather than the
+value baked at build time, and that the `OTEL_ENABLED=true` path loads and
+instruments. **Publishing to GHCR is gated on it**, so an unverified image cannot
+ship. An arm64 arm of the same harness is opt-in from the Actions tab.
 
 Bring up the test database:
 

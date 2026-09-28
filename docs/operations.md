@@ -113,8 +113,9 @@ It has two halves. The **static** half asserts against the built artifact and
 needs no server and no database. The **live** half stands up a real deployment —
 its own private network, its own Postgres, the repo's own migrations — and runs
 the image against it, which is where **gate attachment is proven in the artifact
-that actually deploys**. The signing path and the CORS build-freeze build on that
-same substrate and are documented here as they land.
+that actually deploys**. The signing path, the CORS build-freeze and the
+`OTEL_ENABLED=true` path all build on that same substrate, and all of them are
+documented below.
 
 The two harnesses are **deliberately not merged**. `verify:gate` owns the
 `next start` path — a real developer workflow — and owns its own build, because it
@@ -637,9 +638,68 @@ against itself and report green. Three guards:
 
 Other flags: `--no-build` reuses an existing local tag (and fails fast if its
 architecture does not match `--platform`), `--tag` names the image, `--keep`
-skips teardown and prints the cleanup commands, and `--prune` sweeps resources
-left behind by an earlier crashed run. `--platform` takes **one** platform per
-invocation — `docker buildx build --load` cannot load a multi-platform manifest.
+skips teardown and prints the cleanup commands, `--prune` sweeps resources
+left behind by an earlier crashed run, `--inventory-out <file>` writes the
+normalised artifact inventory as JSON, and `--scan-fixture <file>` runs *only* the
+OTel forbidden-string scan over a local file and exits (no Docker, no image, no
+container). `--platform` takes **one** platform per invocation —
+`docker buildx build --load` cannot load a multi-platform manifest.
+
+#### Which CI job proves what
+
+| job | proves | gates a merge? |
+|---|---|---|
+| `build-and-test` | typecheck, lint, unit + integration tests, a production `next build`, and `verify:gate` — the request gate under `next start` | yes |
+| `audit` | no new high-severity advisory in production dependencies | yes |
+| `docker-build-check` | the image *builds* for amd64. Nothing more: its own comment scopes it to that | yes |
+| `docker-build-check-arm64` | the image builds for arm64. Opt-in via the `arch:arm64` PR label | no (skippable) |
+| **`verify-image`** | **everything on this page: the shipped amd64 image's native paths, gate attachment, signing path, CORS build-freeze and OTel path** | **yes** |
+| `verify-image-arm64` | the same, for arm64 under QEMU. Opt-in via the `verify_image_arm64` dispatch input | no (skippable) |
+| `docker-publish` | pushes the multi-arch image to GHCR on `main`. **`needs: [build-and-test, verify-image]`** | — |
+
+Three things about that topology are load-bearing and easy to undo by accident:
+
+- **`docker-publish` is gated on `verify-image`.** Before that gate, an image whose
+  request gate had silently detached would publish to GHCR on a green
+  `build-and-test` — because `build-and-test` proves the gate under `next start`, a
+  configuration the image never runs. Fail-closed is the right direction here, and it
+  makes the harness's own reliability a release concern: hence its watchdog, its
+  separate build timeout, and its unconditional teardown.
+- **`verify-image` carries no `if:` at all, deliberately.** `docker-publish`'s own
+  condition excludes only `pull_request`, so a manual `workflow_dispatch` on `main`
+  **does** publish — and in GitHub Actions a *skipped* `needs` dependency skips its
+  dependents. Gating `verify-image` to "PR or push", which is the obvious reading,
+  would silently turn every manual re-publish into a skipped `docker-publish`. The
+  unconditional job keeps both the gate and that escape hatch.
+- **The arm64 legs are informational by construction, not by preference.** GitHub
+  treats a skipped required check as permanently pending, so a conditionally-skipped
+  job cannot be a required check. They are also *not* in `docker-publish`'s `needs`,
+  for the same skip-propagation reason.
+
+**If the harness itself breaks and blocks a release**, the escape hatch is: re-run the
+workflow, or trigger it manually from the Actions tab (`workflow_dispatch` on `main`,
+leaving the arm64 input off) — `docker-publish`'s `if` condition still has to hold, so
+this works on `main` and not on a branch. Do not reach for "remove the gate".
+
+#### Comparing the two architectures
+
+Both legs upload `image-inventory-<arch>.json` (14-day retention, uploaded even when
+the job is red — a divergence is exactly when the job fails and the file is most
+wanted). The inventory is **normalised**: the arch token becomes `<ARCH>` and a
+trailing `-<semver>` before `.node` is dropped, so the two files should be
+**byte-identical**. To compare after a dispatch run that exercised both:
+
+```sh
+gh run download <run-id> -n image-inventory-amd64 -n image-inventory-arm64
+diff image-inventory-amd64.json image-inventory-arm64.json
+```
+
+Expect a difference only in the `platform` field. Anything else — a traced external
+present on one arch and not the other, or an extra `.node` — is a review point, not
+noise: the committed baseline is shared between both arches, so a real divergence means
+one of them is about to fail checks 5 or 6 the next time the baseline is regenerated on
+the other. The inventory is **not** a baseline and nothing asserts against it; it exists
+so that a divergence is a two-file diff instead of two long job logs read side by side.
 
 Two things to know about what it leaves behind:
 
