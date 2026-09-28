@@ -208,8 +208,14 @@
  * Asserting mere presence would pass on a build-frozen artifact, which is the exact
  * failure being guarded against.
  *
- * What is NOT here yet: the OTEL_ENABLED=true pass, which lands in a later commit
- * of this series. Nothing below should be read as already asserting it.
+ *   THE OTEL_ENABLED=true PASS (checks 20-23). src/instrumentation.ts early-returns
+ * unless OTEL_ENABLED === 'true', so every check above runs on a path where
+ * next.config.ts's OpenTelemetry externals are never loaded. A SECOND container re-runs
+ * every gate, signing and CORS assertion above (the same functions, not paraphrases),
+ * proves the SDK actually started and patched a real module, scans for the three
+ * strings that mean the OTel tree failed to load, and confirms the process did not
+ * crash after boot. It does NOT prove a span reached a collector — stated in the
+ * harness's own output so no reader over-claims.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -309,6 +315,10 @@
  * AITP_VERIFY_IMAGE_PAUSE_MS holds the live substrate up once it is ready, so the
  * teardown-on-SIGINT path can be exercised with a network and two containers all
  * live — a window under a second wide otherwise.
+ * AITP_VERIFY_IMAGE_PAUSE_OTEL_MS does the same one container later, after the
+ * OTEL_ENABLED=true container is up: that is the only point in the run where a network
+ * and THREE containers are live, and teardown from THERE is a distinct path worth being
+ * able to aim a signal at.
  * AITP_VERIFY_IMAGE_LEAK_REPRO=<ms>[:<probe-label>] is the regression repro for the
  * container-leak race: it makes a run-labelled container materialise <ms> after a
  * SIGINT raised mid-probe, which is the leak that was measured at 1 run in 24 and
@@ -317,7 +327,11 @@
  * arrival, so "nothing was ever there" and "something appeared late and was swept"
  * stop looking identical.
  * There is no test runner wired to a .mjs script in this repo, so a negative path
- * with no hook is not falsifiable from a diff plus output.
+ * with no hook is not falsifiable from a diff plus output. That is also why the OTel
+ * forbidden-string scan is a PURE function (scanLogs) reachable through
+ * `--scan-fixture <file>`, which runs only that function over a local file and exits:
+ * "injecting a forbidden string makes the scan fail" is then one command, with no
+ * Docker and no container in the way.
  *
  * Check 13 needs no such hook, and that is a property of the design rather than an
  * omission: its whole input is four files copied out of the image and one
@@ -382,11 +396,12 @@ const PROBE_MS = 120_000;
  * first and reports "something hung" in place of the specific, actionable
  * "Postgres never became healthy, here are its logs". Budget, recomputed as the run
  * grew: SIX probes at PROBE_MS (12 min) — and the file notes probe timeouts are
- * realistic under QEMU — plus PG_READY_MS (3 min) plus APP_READY_MS (4 min) plus
- * MIGRATE_MS (3 min) is about 22 minutes, so 25 still leaves headroom. KEEP THIS IN
- * STEP WITH THE RUN: every probe added spends another PROBE_MS and every app container
- * another APP_READY_MS. Keep BUILD_MS_NATIVE + this BELOW the `verify-image` job's
- * `timeout-minutes` in ci.yml.
+ * realistic under QEMU — plus PG_READY_MS (3 min) plus TWO app boots at APP_READY_MS
+ * (8 min: the second is the OTEL_ENABLED=true container, which boots slower) plus
+ * MIGRATE_MS (3 min) is about 26 minutes. So 40, which leaves genuine headroom rather
+ * than sitting under the sum. KEEP THIS IN STEP WITH THE RUN: every probe added spends
+ * another PROBE_MS and every app container another APP_READY_MS. Keep BUILD_MS_NATIVE +
+ * this BELOW the `verify-image` job's `timeout-minutes` in ci.yml.
  *
  * Check 13's extraction is not a meaningful line in that budget and is bounded
  * structurally rather than hopefully: two `docker create`/`cp`/`rm` cycles and one
@@ -394,9 +409,9 @@ const PROBE_MS = 120_000;
  * never started — so there is no boot to wait for and nothing that can wedge. It
  * replaced 360 HTTP requests, which cost seconds but needed their own deadline and
  * non-answer cap to stay bounded; the equality needs neither. A whole `--no-build` run
- * against a local image, substrate included, measures about 45 s.
+ * against a local image, substrate included, measures about 30 s.
  */
-const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 25 * 60_000;
+const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 40 * 60_000;
 /**
  * Build ceilings, deliberately separate from the watchdog so "the build hung"
  * and "a check hung" are distinguishable. Keep BUILD_MS_NATIVE + WATCHDOG_MS
@@ -557,6 +572,7 @@ function parseArgs(argv) {
     updateBaseline: false,
     allowRemovals: false,
     allowGateChange: false,
+    scanFixture: null,
     help: false,
   };
   /** A value-taking flag must actually be followed by a value, not by nothing
@@ -596,6 +612,9 @@ function parseArgs(argv) {
         break;
       case '--allow-gate-change':
         opts.allowGateChange = true;
+        break;
+      case '--scan-fixture':
+        opts.scanFixture = value(a, ++i);
         break;
       case '--help':
       case '-h':
@@ -653,6 +672,12 @@ shipped standalone Docker image.
                          entrypoint differ from what is pinned. The located diff is
                          printed first, and it is a security review: every defeat this
                          harness has ever caught in the gate body would appear there.
+  --scan-fixture <file>  run ONLY the OTel forbidden-string log scan over a local
+                         file and exit (0 = no matches, 1 = matches). No Docker, no
+                         image, no container. This exists so "injecting a forbidden
+                         string makes the scan fail" is something a reviewer can run:
+                         there is no test runner wired to a .mjs script in this repo,
+                         so a negative path with no hook is not falsifiable.
   --help                 this text
 `;
 
@@ -2639,6 +2664,82 @@ function dockerfileEnvValue(name) {
   return distinct[0];
 }
 
+// ── the OTEL_ENABLED=true pass (checks 20-23) ───────────────────────────────
+/**
+ * Strings that must NEVER appear in the logs of an OTel-enabled container.
+ *
+ * Each names a way the OTel tree can fail to load in a STANDALONE build — a missing
+ * native module, the context-key symbol clash that a duplicated `@opentelemetry/api`
+ * produces, and a plain unresolved require. Measured at zero for all three, even with
+ * OTEL_LOG_LEVEL=debug and ~750 log lines.
+ *
+ * IF ONE EVER GOES NOISY, NARROW THE PATTERN — DO NOT DELETE THE CHECK. An OTel
+ * version may legitimately log `Cannot find module` while probing for an optional
+ * instrumentation target. The fix then is to scope the pattern to the module names
+ * this repo actually depends on. "The check got noisy so we removed it" is the
+ * predictable failure here, and it is written down precisely so it is not the one
+ * that happens.
+ */
+const OTEL_FORBIDDEN = ['native module', 'createContextKey', 'Cannot find module'];
+/**
+ * The OTel debug lines that prove the SDK STARTED and the auto-instrumentations
+ * really loaded.
+ *
+ * A scan for ABSENT strings passes just as well when OTel never started at all, which
+ * is why this positive half exists and why the issue's log-scan alone was not enough.
+ * `Patching pg.Client.prototype.query` is the specific one: it can only be emitted if
+ * the SDK started AND the auto-instrumentations package resolved AND `pg` — a traced
+ * external — was reachable from the instrumentation's own realm. One line proves the
+ * whole chain next.config.ts's `serverExternalPackages` exists for.
+ */
+const OTEL_REQUIRED_PATCH = 'Patching pg.Client.prototype.query';
+const OTEL_REQUIRED_ANY_PATCH = 'Applying instrumentation patch';
+/**
+ * HOW THIS ASSERTION WAS FALSIFIED, because the obvious negative does NOT work and
+ * the plan's own acceptance criterion was wrong about it.
+ *
+ * The plan said: remove `@opentelemetry/sdk-node` from `serverExternalPackages` in
+ * next.config.ts, rebuild, and this assertion fails. MEASURED: IT DOES NOT. Next then
+ * BUNDLES the SDK instead of externalising it, and the bundled copy still starts and
+ * still patches `pg` — 4 patch lines including this one. What that image does break is
+ * checks 2, 5 and 13 (the traced set loses `sdk-node` and gains `@grpc/grpc-js` plus
+ * `import-in-the-middle`, and the instrumentation loader registers a different chunk).
+ * So it is caught, loudly, by three other checks — just not by this one.
+ *
+ * Two negatives that DO falsify this assertion, both run:
+ *   1. Start the second container WITHOUT OTEL_ENABLED=true -> 0 patch lines, this
+ *      check FAILS, and check 22 (the forbidden-string scan) stays GREEN. That is the
+ *      exact vacuity this positive half exists for: a scan for ABSENT strings passes
+ *      just as well when OTel never started at all.
+ *   2. Delete `/app/.next/node_modules/@opentelemetry` from an otherwise-correct image
+ *      -> the compiled instrumentation chunk asks for the HASHED specifier and cannot
+ *      resolve it, so checks 2, 20, 21 and 22 all fail (7 `Cannot find module` lines)
+ *      — and the OTel container's `/api/audit` answers 500 instead of 401, which is the
+ *      concrete "loading the OTel tree broke the app" risk check 20 exists for,
+ *      measured rather than argued. Check 13 stays green, so the negative is targeted.
+ */
+
+/**
+ * PURE, and that is the point: it takes text and returns matches, so it is reachable
+ * without a container.
+ *
+ * There is no test runner wired to a `.mjs` script in this repo, so a negative path
+ * with no hook is not falsifiable from a diff plus output. `--scan-fixture <file>`
+ * runs exactly this function over a local file and exits, which is what makes
+ * "injecting a forbidden string makes the scan fail" something a reviewer can run
+ * rather than something this file asserts about itself.
+ */
+function scanLogs(text) {
+  const matches = [];
+  const lines = String(text).split('\n');
+  for (const pattern of OTEL_FORBIDDEN) {
+    for (const [i, line] of lines.entries()) {
+      if (line.includes(pattern)) matches.push({ pattern, lineNo: i + 1, line: line.slice(0, 400) });
+    }
+  }
+  return matches;
+}
+
 /** An HTTP request with its own deadline, so one wedged route cannot eat the
  *  watchdog. Returns the parsed body when it is JSON, the raw text otherwise. */
 async function httpReq(base, pathname, opts2 = {}) {
@@ -3077,6 +3178,181 @@ async function startApp(net, pgName, platform, label, extraEnv = {}) {
   return { name, base };
 }
 
+// ── the live assertions, as functions of a running app ──────────────────────
+//
+// WHY THESE ARE FUNCTIONS AND NOT INLINE CHECK BODIES. The OTEL_ENABLED=true pass
+// (check 20) has to re-assert every one of them against a SECOND container: loading
+// the OpenTelemetry tree is the concrete risk that phase exists for, and "the gate
+// still works with OTel on" is only worth asserting if it is the SAME assertion, not
+// a paraphrase of it. Two copies of an assertion rot at different rates — the same
+// reason this harness is a sibling of verify-request-gate.mjs rather than a merge.
+// Each returns its detail line so the named check reads identically either way.
+
+/** Check 8, and check 20's first half. */
+async function assertAnonAuditRejected(app) {
+  const r = await httpReq(app.base, '/api/audit');
+  // Distinguish this case explicitly: it means API_KEYS never reached the
+  // container, so the run was not exercising the auth path at all. Reported as
+  // "wrong status" it would send a reader looking at the gate instead of the env.
+  if (r.status === 503 && r.body?.code === 'SERVER_MISCONFIGURED') {
+    fail(
+      'got 503 SERVER_MISCONFIGURED rather than 401 — API_KEYS did not reach the ' +
+        'container, so this run never exercised the auth path. Empty API_KEYS under ' +
+        'NODE_ENV=production makes the gate fail closed with this code instead of ' +
+        'checking the key.',
+    );
+  }
+  if (r.status !== 401) {
+    fail(`status ${r.status}, expected 401 (body: ${JSON.stringify(r.body)})`);
+  }
+  if (r.body?.code !== 'INVALID_API_KEY') {
+    fail(
+      `body.code is ${JSON.stringify(r.body?.code)}, expected "INVALID_API_KEY". The ` +
+        'status alone is not the contract — a 401 from somewhere else wears it too.',
+    );
+  }
+  // The gate injects x-request-id, so its presence is evidence the gate RAN,
+  // rather than that some handler happened to answer 401.
+  if (!r.headers.get('x-request-id')) {
+    fail('no x-request-id on the response, so the gate did not run');
+  }
+  return `401 INVALID_API_KEY, x-request-id=${r.headers.get('x-request-id')}`;
+}
+
+/** Check 9, and check 20's second half. */
+async function assertValidKeyReachesHandler(app) {
+  // The non-vacuity half. Without it, a gate that rejected EVERYTHING
+  // unconditionally — or an image serving a stub that always 401s — would satisfy
+  // check 8 completely.
+  const r = await httpReq(app.base, '/api/audit', { key: API_KEY });
+  if (r.status === 401 || r.status === 503) {
+    fail(
+      `status ${r.status} WITH a valid key — the handler was not reached, so check 8's ` +
+        'rejection proves nothing about the key actually being checked.',
+    );
+  }
+  if (r.status === 500) {
+    fail(
+      'status 500 with a valid key. The gate let the request through but the handler ' +
+        'failed — against this substrate that almost always means the migrations did ' +
+        'not apply, so admin_audit_log does not exist.',
+    );
+  }
+  if (r.status !== 200) fail(`status ${r.status} (body: ${JSON.stringify(r.body)})`);
+  if (!r.headers.get('x-request-id')) {
+    fail('no x-request-id on the authenticated response');
+  }
+  return `200 with a valid key, x-request-id present`;
+}
+
+/** Check 10, and part of check 20. */
+async function assertGateAnswersPreflight(app) {
+  // NOTE, and do not "simplify" this away: the 204 and the empty body are NOT
+  // attributable to the gate. Next answers OPTIONS 204/empty by itself — measured
+  // on a gate-less image, where this check failed ONLY on the missing header. The
+  // x-request-id assertion is the entire load-bearing part; the status and body
+  // assertions are there to catch a handler answering the preflight instead.
+  const r = await httpReq(app.base, '/api/audit', { method: 'OPTIONS' });
+  if (r.status !== 204) fail(`status ${r.status}, expected 204`);
+  if (r.text !== '') {
+    fail(`expected an empty body, got ${JSON.stringify(r.text.slice(0, 200))}`);
+  }
+  if (!r.headers.get('x-request-id')) fail('no x-request-id on the preflight response');
+  return '204, empty body, x-request-id present';
+}
+
+/** Check 12, and part of check 20. */
+async function assertGateReallyRuns(app) {
+  // The BEHAVIOURAL half, kept alongside check 11's structural one because they
+  // fail on different things. Check 11 proves the matcher covers the tree as
+  // BUILT; this proves the gate actually executes for more than the one path the
+  // earlier checks probe — catching a gate that is matched but inert, which no
+  // manifest can show.
+  //
+  // Two probes, because they fail on different halves of the problem:
+  //
+  // 1. A SECOND genuinely gated route, under a different top-level segment.
+  //    /api/webhooks is gated and is not probed by scripts/verify-request-gate.mjs
+  //    (which uses /api/sessions), so the two harnesses stay independent.
+  // 2. A PUBLIC route. The gate runs for every /api/* path, injecting
+  //    x-request-id even where it does not reject — so a matcher that no longer
+  //    covers a path loses the header there. This is the broad signal: it fails
+  //    for any narrowing that excludes /api/health, whatever the gated routes do.
+  //
+  // Still ATTACHMENT, not gate logic: no rate-limit buckets, no per-route policy.
+  const gated = await httpReq(app.base, '/api/webhooks');
+  if (gated.status !== 401 || gated.body?.code !== 'INVALID_API_KEY') {
+    fail(
+      `unauthenticated GET /api/webhooks answered ${gated.status} ` +
+        `${JSON.stringify(gated.body?.code)}, expected 401 INVALID_API_KEY. ` +
+        'If check 8 passed, the gate is attached to some paths and not this one — a ' +
+        'narrowed matcher in src/proxy.ts. If check 8 failed too, the gate is not ' +
+        'running at all. Either way every /api/* route it does not cover is served ' +
+        'with no auth, no rate limiting and no CORS.',
+    );
+  }
+  // Public and rate-limit exempt, so this asserts only that the gate ran.
+  const pub = await httpReq(app.base, '/api/health');
+  if (!pub.headers.get('x-request-id')) {
+    fail(
+      'GET /api/health carries no x-request-id. That header is injected by the gate ' +
+        'on its pass-through path, so its absence means the gate does not run for ' +
+        '/api/health at all — the matcher no longer covers the whole /api/* tree.',
+    );
+  }
+  // 3. ONE MUTATING VERB, and exactly one.
+  //
+  // The gate's decision is `isPublicRequest(pathname, method)` — it takes the
+  // METHOD — so a gate can be correct for GET and wrong for everything else, and
+  // every assertion above this line is a GET. That was measured, not supposed: one
+  // operator flipped in the compiled gate (`"GET"===t&&` -> `"GET"!==t||`) left
+  // `GET /api/audit` answering 401 throughout while an anonymous
+  // `POST /api/trust-anchors {"issuerUrl":"https://evil.example.com"}` returned 201
+  // and created a trust anchor pointing at an attacker-controlled issuer.
+  //
+  // ONE request, deliberately. An earlier version of this phase answered the same
+  // finding with a 360-request cross product of six verbs, thirty routes and four id
+  // shapes, and was then defeated by the request shape and the id length — because
+  // the answer to "your sample missed a dimension" is not a bigger sample. That
+  // proof now lives in check 13, which compares the gate's compiled bytes to a
+  // committed copy and so covers every verb at once without sending anything. What
+  // this line adds, and what check 13 structurally cannot, is that the pinned bytes
+  // are REACHED on a verb other than GET: a mutating request really does arrive at
+  // the gate and really is refused. `/api/trust-anchors` because it is the route
+  // whose exposure was actually measured, and POST because that is what created the
+  // anchor.
+  const wrote = await httpReq(app.base, '/api/trust-anchors', {
+    method: 'POST',
+    body: { issuerUrl: 'https://verify-image-harness.invalid' },
+  });
+  if (wrote.status !== 401 || wrote.body?.code !== 'INVALID_API_KEY') {
+    fail(
+      `anonymous POST /api/trust-anchors answered ${wrote.status} ` +
+        `${JSON.stringify(wrote.body?.code)}, expected 401 INVALID_API_KEY.\n` +
+        'The gate refuses GET on this route (check 8 proves it on /api/audit), so a ' +
+        'non-401 here means the gate DECIDES DIFFERENTLY BY METHOD. That is not a ' +
+        'theoretical shape: an image with one operator flipped in the compiled ' +
+        '`isPublicRequest` answered this exact request 201 and created a trust anchor ' +
+        'for an attacker-supplied issuer, while every GET-based check stayed green. ' +
+        'Note a 201 or 400 here both mean the request reached the handler — a 400 is ' +
+        'body validation, i.e. past the gate, not a rejection by it.',
+    );
+  }
+  if (!wrote.headers.get('x-request-id')) {
+    fail(
+      'the 401 for an anonymous POST /api/trust-anchors carries no x-request-id, so it ' +
+        'did not come from the gate. A 401 with the right code from somewhere else is a ' +
+        'different failure wearing the right status.',
+    );
+  }
+  return (
+    '/api/webhooks -> 401 INVALID_API_KEY (a second gated route); ' +
+    '/api/health carries x-request-id (the gate runs on public paths too); ' +
+    'anonymous POST /api/trust-anchors -> 401 INVALID_API_KEY with x-request-id ' +
+    '(the gate is reached on a mutating verb, not only on GET)'
+  );
+}
+
 /**
  * Fetch the signed revocation list as BOTH the exact raw bytes and the parsed shape.
  *
@@ -3303,6 +3579,36 @@ async function prune() {
 async function main() {
   if (opts.help) {
     console.log(HELP);
+    return;
+  }
+
+  // BEFORE the Docker check, on purpose: this path involves no image, no container and
+  // no daemon, so requiring one would make the harness's own falsifiability hook
+  // unavailable on a machine without Docker — including a reviewer's.
+  if (opts.scanFixture) {
+    const file = path.resolve(ROOT, opts.scanFixture);
+    // Show the repo-relative path when the fixture is inside the repo and the absolute
+    // one when it is not: a `../../../private/tmp/...` is less readable than the path
+    // the caller actually typed.
+    const rel = path.relative(ROOT, file);
+    const shown = rel.startsWith('..') ? file : rel;
+    const text = readFileSync(file, 'utf8');
+    const matches = scanLogs(text);
+    const lines = text.split('\n').length;
+    if (matches.length) {
+      console.log(`${matches.length} forbidden string(s) in ${shown} (${lines} line(s)):`);
+      for (const m of matches) {
+        console.log(`  [${m.pattern}] line ${m.lineNo}: ${m.line}`);
+      }
+      // Exit 1 so the hook composes: a fixture that SHOULD trip the scan is a
+      // one-command negative test, and a fixture that should not is a one-command
+      // positive one.
+      process.exit(1);
+    }
+    console.log(
+      `0 matches for ${OTEL_FORBIDDEN.map((q) => JSON.stringify(q)).join(', ')} ` +
+        `in ${shown} (${lines} line(s))`,
+    );
     return;
   }
 
@@ -4118,75 +4424,17 @@ async function main() {
   // per-IP buckets via CLIENT_IP_HEADER and are already covered against a running
   // server by scripts/verify-request-gate.mjs. Duplicated assertions rot at
   // different rates. Do not "complete" this by copying that harness's 15 checks.
-  await runCheck(8, 'the gate rejects an unauthenticated /api/audit', async () => {
-    const r = await httpReq(app.base, '/api/audit');
-    // Distinguish this case explicitly: it means API_KEYS never reached the
-    // container, so the run was not exercising the auth path at all. Reported as
-    // "wrong status" it would send a reader looking at the gate instead of the env.
-    if (r.status === 503 && r.body?.code === 'SERVER_MISCONFIGURED') {
-      fail(
-        'got 503 SERVER_MISCONFIGURED rather than 401 — API_KEYS did not reach the ' +
-          'container, so this run never exercised the auth path. Empty API_KEYS under ' +
-          'NODE_ENV=production makes the gate fail closed with this code instead of ' +
-          'checking the key.',
-      );
-    }
-    if (r.status !== 401) {
-      fail(`status ${r.status}, expected 401 (body: ${JSON.stringify(r.body)})`);
-    }
-    if (r.body?.code !== 'INVALID_API_KEY') {
-      fail(
-        `body.code is ${JSON.stringify(r.body?.code)}, expected "INVALID_API_KEY". The ` +
-          'status alone is not the contract — a 401 from somewhere else wears it too.',
-      );
-    }
-    // The gate injects x-request-id, so its presence is evidence the gate RAN,
-    // rather than that some handler happened to answer 401.
-    if (!r.headers.get('x-request-id')) {
-      fail('no x-request-id on the response, so the gate did not run');
-    }
-    return `401 INVALID_API_KEY, x-request-id=${r.headers.get('x-request-id')}`;
-  });
+  await runCheck(8, 'the gate rejects an unauthenticated /api/audit', () =>
+    assertAnonAuditRejected(app),
+  );
 
-  await runCheck(9, 'a valid API key reaches the handler', async () => {
-    // The non-vacuity half. Without it, a gate that rejected EVERYTHING
-    // unconditionally — or an image serving a stub that always 401s — would satisfy
-    // check 8 completely.
-    const r = await httpReq(app.base, '/api/audit', { key: API_KEY });
-    if (r.status === 401 || r.status === 503) {
-      fail(
-        `status ${r.status} WITH a valid key — the handler was not reached, so check 8's ` +
-          'rejection proves nothing about the key actually being checked.',
-      );
-    }
-    if (r.status === 500) {
-      fail(
-        'status 500 with a valid key. The gate let the request through but the handler ' +
-          'failed — against this substrate that almost always means the migrations did ' +
-          'not apply, so admin_audit_log does not exist.',
-      );
-    }
-    if (r.status !== 200) fail(`status ${r.status} (body: ${JSON.stringify(r.body)})`);
-    if (!r.headers.get('x-request-id')) {
-      fail('no x-request-id on the authenticated response');
-    }
-    return `200 with a valid key, x-request-id present`;
-  });
+  await runCheck(9, 'a valid API key reaches the handler', () =>
+    assertValidKeyReachesHandler(app),
+  );
 
-  await runCheck(10, 'the gate answers the CORS preflight itself', async () => {
-    // NOTE, and do not "simplify" this away: the 204 and the empty body are NOT
-    // attributable to the gate. Next answers OPTIONS 204/empty by itself — measured
-    // on a gate-less image, where this check failed ONLY on the missing header. The
-    // x-request-id assertion is the entire load-bearing part; the status and body
-    // assertions are there to catch a handler answering the preflight instead.
-    const r = await httpReq(app.base, '/api/audit', { method: 'OPTIONS' });
-    if (r.status !== 204) fail(`status ${r.status}, expected 204`);
-    if (r.text !== '') {
-      fail(`expected an empty body, got ${JSON.stringify(r.text.slice(0, 200))}`);
-    }
-    if (!r.headers.get('x-request-id')) fail('no x-request-id on the preflight response');
-    return '204, empty body, x-request-id present';
-  });
+  await runCheck(10, 'the gate answers the CORS preflight itself', () =>
+    assertGateAnswersPreflight(app),
+  );
 
   await runCheck(
     11,
@@ -4483,96 +4731,7 @@ async function main() {
   await runCheck(
     12,
     'the gate really runs — on a second gated route, a public one, and a mutating verb',
-    async () => {
-      // The BEHAVIOURAL half, kept alongside check 11's structural one because they
-      // fail on different things. Check 11 proves the matcher covers the tree as
-      // BUILT; this proves the gate actually executes for more than the one path the
-      // earlier checks probe — catching a gate that is matched but inert, which no
-      // manifest can show.
-      //
-      // Two probes, because they fail on different halves of the problem:
-      //
-      // 1. A SECOND genuinely gated route, under a different top-level segment.
-      //    /api/webhooks is gated and is not probed by scripts/verify-request-gate.mjs
-      //    (which uses /api/sessions), so the two harnesses stay independent.
-      // 2. A PUBLIC route. The gate runs for every /api/* path, injecting
-      //    x-request-id even where it does not reject — so a matcher that no longer
-      //    covers a path loses the header there. This is the broad signal: it fails
-      //    for any narrowing that excludes /api/health, whatever the gated routes do.
-      //
-      // Still ATTACHMENT, not gate logic: no rate-limit buckets, no per-route policy.
-      const gated = await httpReq(app.base, '/api/webhooks');
-      if (gated.status !== 401 || gated.body?.code !== 'INVALID_API_KEY') {
-        fail(
-          `unauthenticated GET /api/webhooks answered ${gated.status} ` +
-            `${JSON.stringify(gated.body?.code)}, expected 401 INVALID_API_KEY. ` +
-            'If check 8 passed, the gate is attached to some paths and not this one — a ' +
-            'narrowed matcher in src/proxy.ts. If check 8 failed too, the gate is not ' +
-            'running at all. Either way every /api/* route it does not cover is served ' +
-            'with no auth, no rate limiting and no CORS.',
-        );
-      }
-      // Public and rate-limit exempt, so this asserts only that the gate ran.
-      const pub = await httpReq(app.base, '/api/health');
-      if (!pub.headers.get('x-request-id')) {
-        fail(
-          'GET /api/health carries no x-request-id. That header is injected by the gate ' +
-            'on its pass-through path, so its absence means the gate does not run for ' +
-            '/api/health at all — the matcher no longer covers the whole /api/* tree.',
-        );
-      }
-      // 3. ONE MUTATING VERB, and exactly one.
-      //
-      // The gate's decision is `isPublicRequest(pathname, method)` — it takes the
-      // METHOD — so a gate can be correct for GET and wrong for everything else, and
-      // every assertion above this line is a GET. That was measured, not supposed: one
-      // operator flipped in the compiled gate (`"GET"===t&&` -> `"GET"!==t||`) left
-      // `GET /api/audit` answering 401 throughout while an anonymous
-      // `POST /api/trust-anchors {"issuerUrl":"https://evil.example.com"}` returned 201
-      // and created a trust anchor pointing at an attacker-controlled issuer.
-      //
-      // ONE request, deliberately. An earlier version of this phase answered the same
-      // finding with a 360-request cross product of six verbs, thirty routes and four id
-      // shapes, and was then defeated by the request shape and the id length — because
-      // the answer to "your sample missed a dimension" is not a bigger sample. That
-      // proof now lives in check 13, which compares the gate's compiled bytes to a
-      // committed copy and so covers every verb at once without sending anything. What
-      // this line adds, and what check 13 structurally cannot, is that the pinned bytes
-      // are REACHED on a verb other than GET: a mutating request really does arrive at
-      // the gate and really is refused. `/api/trust-anchors` because it is the route
-      // whose exposure was actually measured, and POST because that is what created the
-      // anchor.
-      const wrote = await httpReq(app.base, '/api/trust-anchors', {
-        method: 'POST',
-        body: { issuerUrl: 'https://verify-image-harness.invalid' },
-      });
-      if (wrote.status !== 401 || wrote.body?.code !== 'INVALID_API_KEY') {
-        fail(
-          `anonymous POST /api/trust-anchors answered ${wrote.status} ` +
-            `${JSON.stringify(wrote.body?.code)}, expected 401 INVALID_API_KEY.\n` +
-            'The gate refuses GET on this route (check 8 proves it on /api/audit), so a ' +
-            'non-401 here means the gate DECIDES DIFFERENTLY BY METHOD. That is not a ' +
-            'theoretical shape: an image with one operator flipped in the compiled ' +
-            '`isPublicRequest` answered this exact request 201 and created a trust anchor ' +
-            'for an attacker-supplied issuer, while every GET-based check stayed green. ' +
-            'Note a 201 or 400 here both mean the request reached the handler — a 400 is ' +
-            'body validation, i.e. past the gate, not a rejection by it.',
-        );
-      }
-      if (!wrote.headers.get('x-request-id')) {
-        fail(
-          'the 401 for an anonymous POST /api/trust-anchors carries no x-request-id, so it ' +
-            'did not come from the gate. A 401 with the right code from somewhere else is a ' +
-            'different failure wearing the right status.',
-        );
-      }
-      return (
-        '/api/webhooks -> 401 INVALID_API_KEY (a second gated route); ' +
-        '/api/health carries x-request-id (the gate runs on public paths too); ' +
-        'anonymous POST /api/trust-anchors -> 401 INVALID_API_KEY with x-request-id ' +
-        '(the gate is reached on a mutating verb, not only on GET)'
-      );
-    },
+    () => assertGateReallyRuns(app),
   );
 
   await runCheck(
@@ -4995,6 +5154,181 @@ async function main() {
     'CORS comes from the RUNTIME environment, not from the value baked at build time',
     () => assertCorsIsRuntimeNotBuild(app),
   );
+
+  // ── the OTEL_ENABLED=true pass ────────────────────────────────────────────
+  //
+  // WHY A SECOND CONTAINER EXISTS AT ALL. src/instrumentation.ts early-returns unless
+  // OTEL_ENABLED === 'true', so every check above runs on a path where
+  // next.config.ts's OpenTelemetry externals are NEVER LOADED. That config exists for
+  // the enabled path, and until this point nothing exercised it — a default smoke test
+  // proves nothing about it. `register()` runs once per boot, so the variable has to be
+  // set at container start; the first container cannot be re-used.
+  //
+  // Sequential, not parallel: the first container's checks are all done by here, so
+  // the memory footprint of two app containers overlaps only for this section.
+  console.log('\nstarting a second app container with OTEL_ENABLED=true');
+  console.log(
+    '  NOTE, so nobody over-reads what follows: this proves the OTel SDK STARTS and ' +
+      'INSTRUMENTS in the shipped image. It does NOT prove a span reached a collector — ' +
+      'there is no OTLP sink here, and the exporter fails silently against its default ' +
+      'endpoint. Span export is out of scope for this harness.',
+  );
+  const otelApp = await startApp(net, pg.name, platform, 'app-otel', {
+    OTEL_ENABLED: 'true',
+    // Without this the SDK is silent: OTel's diagnostic logger is off unless
+    // OTEL_LOG_LEVEL is set, which is also why "point the exporter at an unroutable
+    // endpoint and assert an error appears" does not work and was rejected.
+    OTEL_LOG_LEVEL: 'debug',
+  });
+
+  // Same rationale as AITP_VERIFY_IMAGE_PAUSE_MS, aimed one container later: this is
+  // the only point in the run where a network and THREE containers are live, and
+  // teardown on a signal in that state is what Phase 7's acceptance criterion 4 asks
+  // for. Unset in normal runs, including CI.
+  const pauseOtelMs = Number(process.env.AITP_VERIFY_IMAGE_PAUSE_OTEL_MS) || 0;
+  if (pauseOtelMs) {
+    console.log(
+      `AITP_VERIFY_IMAGE_PAUSE_OTEL_MS=${pauseOtelMs}: holding 1 network and 3 ` +
+        'containers up. Ctrl-C now to exercise teardown with both app containers live.',
+    );
+    await new Promise((r) => setTimeout(r, pauseOtelMs));
+  }
+
+  await runCheck(
+    20,
+    'with OTEL_ENABLED=true, the gate, signing and CORS assertions all still hold',
+    async () => {
+      // THE CONCRETE RISK THIS ANSWERS: loading the OpenTelemetry tree — five traced
+      // externals plus the auto-instrumentations, which monkey-patch `pg`, `http` and
+      // more — breaks something that worked with OTel off. That is not hypothetical
+      // for a standalone build, where the externals config is the only reason those
+      // packages resolve at all.
+      //
+      // The SAME functions checks 8-19 use, not paraphrases of them, so this cannot
+      // drift into asserting something weaker. Failures are prefixed, because an
+      // unprefixed "status 200, expected 401" here would send a reader to the wrong
+      // container.
+      const lines = [];
+      const steps = [
+        ['unauthenticated /api/audit', () => assertAnonAuditRejected(otelApp)],
+        ['a valid API key reaches the handler', () => assertValidKeyReachesHandler(otelApp)],
+        ['the gate answers the preflight', () => assertGateAnswersPreflight(otelApp)],
+        ['the gate really runs', () => assertGateReallyRuns(otelApp)],
+        [
+          'the revocation signature verifies',
+          async () => {
+            const r = await fetchRevocationEnvelope(otelApp);
+            const a = assertEnvelopeVerifiesOnHost(r);
+            const b = assertEnvelopeIssuerIsSeedDerived(r, expectedAid);
+            const c = await assertRevocationDbReadHappened(otelApp);
+            return `${a}; ${b}; ${c}`;
+          },
+        ],
+        ['CORS comes from the runtime', () => assertCorsIsRuntimeNotBuild(otelApp)],
+      ];
+      for (const [label, fn] of steps) {
+        try {
+          lines.push(`${label}: ${await fn()}`);
+        } catch (err) {
+          // NO CAUSAL CLAIM IN THE MESSAGE, and this was a real wording bug caught by
+          // running a negative: an earlier version said "it passes with OTel off, so
+          // loading the OpenTelemetry tree broke it" unconditionally, which is a
+          // confident and WRONG diagnosis whenever the plain container's own check
+          // failed too (a broken Dockerfile CORS line reproduces it exactly). Say
+          // which reading applies and let the reader look one screen up.
+          fail(
+            `with OTEL_ENABLED=true, "${label}" FAILED:\n${err.message}\n\n` +
+              'HOW TO READ THIS: if the same assertion PASSED against the plain container ' +
+              'above, then loading the OpenTelemetry tree broke it — which is the concrete ' +
+              'risk this check exists for. If it FAILED there too, this is the same ' +
+              'underlying problem seen twice and has nothing to do with OTel.\n\n' +
+              "The OTel container's logs end with:\n" +
+              (await containerLogs(otelApp.name)).split('\n').slice(-30).join('\n'),
+          );
+        }
+      }
+      return lines.join('\n');
+    },
+  );
+
+  await runCheck(21, 'the OTel SDK started and patched a real module', async () => {
+    // THE POSITIVE ASSERTION THE ISSUE DID NOT ASK FOR, and the reason it matters: a
+    // scan for ABSENT error strings passes just as well when OTel never started. This
+    // is the half that can tell those apart.
+    //
+    // `Patching pg.Client.prototype.query` proves the whole chain at once — the SDK
+    // started, the auto-instrumentations package resolved, and `pg` (a traced external,
+    // present in .next/node_modules but absent from serverExternalPackages) was
+    // reachable from the instrumentation's realm. `pg` is required during boot, so this
+    // needs no request of its own; check 20's requests have happened regardless.
+    const logs = await containerLogs(otelApp.name);
+    const lines = logs.split('\n');
+    const anyPatch = lines.filter((l) => l.includes(OTEL_REQUIRED_ANY_PATCH));
+    const pgPatch = lines.filter((l) => l.includes(OTEL_REQUIRED_PATCH));
+    if (!anyPatch.length) {
+      fail(
+        `the OTel container logged no ${JSON.stringify(OTEL_REQUIRED_ANY_PATCH)} line in ` +
+          `${lines.length} lines of output, so the SDK did not apply a single ` +
+          'instrumentation. Either it never started (check OTEL_ENABLED reached the ' +
+          'container and OTEL_LOG_LEVEL=debug is set, since OTel is silent without it) ' +
+          'or the auto-instrumentations package did not load.',
+      );
+    }
+    if (!pgPatch.length) {
+      fail(
+        `the OTel container applied ${anyPatch.length} instrumentation patch(es) but none ` +
+          `of them was ${JSON.stringify(OTEL_REQUIRED_PATCH)}. The pg instrumentation is ` +
+          'the one that reaches a traced external from the instrumentation realm, so losing ' +
+          'it while other patches still apply means the OTel tree loaded but `pg` did not.\n' +
+          `patches seen:\n${anyPatch.slice(0, 10).map((l) => `  ${l.slice(0, 200)}`).join('\n')}`,
+      );
+    }
+    return (
+      `${anyPatch.length} instrumentation patch line(s) including ` +
+      `${JSON.stringify(OTEL_REQUIRED_PATCH)}, in ${lines.length} log lines. ` +
+      'Span EXPORT is not verified — no collector is involved.'
+    );
+  });
+
+  await runCheck(22, 'no OTel load failure appears in the enabled container logs', async () => {
+    const logs = await containerLogs(otelApp.name);
+    const matches = scanLogs(logs);
+    if (matches.length) {
+      fail(
+        `${matches.length} forbidden string(s) in the OTel container's logs — each names a ` +
+          'way the OTel tree can fail to load in a standalone build:\n' +
+          matches
+            .map((m) => `  [${m.pattern}] line ${m.lineNo}: ${m.line}`)
+            .join('\n') +
+          '\n\nIf this is a false positive from a new OTel version probing for an optional ' +
+          'target, NARROW the pattern to the modules this repo depends on. Do not delete ' +
+          'the check — see OTEL_FORBIDDEN.',
+      );
+    }
+    // Never print the whole log on success: OTEL_LOG_LEVEL=debug produces ~750 lines
+    // and it will grow with every OTel bump.
+    return `0 matches for ${OTEL_FORBIDDEN.map((p) => JSON.stringify(p)).join(', ')} in ${logs.split('\n').length} log line(s)`;
+  });
+
+  await runCheck(23, 'the OTel-enabled container is still running at the end', async () => {
+    // The SDK must not crash the process AFTER boot. A container that answered
+    // readiness and then died would leave every check above green on a dead artifact,
+    // because each one read what it needed and moved on.
+    const { stdout } = await docker(['inspect', '-f', '{{.State.Running}}', otelApp.name], {
+      allowFail: true,
+      timeoutMs: 20_000,
+    });
+    const state = stdout.trim();
+    if (state !== 'true') {
+      fail(
+        `docker inspect reports Running=${JSON.stringify(state)} for the OTel container. ` +
+          'It booted and answered requests, then stopped — the SDK crashed the process ' +
+          'after boot.\nIts logs end with:\n' +
+          (await containerLogs(otelApp.name)).split('\n').slice(-40).join('\n'),
+      );
+    }
+    return 'Running=true after every OTel assertion';
+  });
 
   const failures = results.filter((r) => !r.ok).length;
   if (failures) throw new Error(`${failures}/${results.length} image checks FAILED`);

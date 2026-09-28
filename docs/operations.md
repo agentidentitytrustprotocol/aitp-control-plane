@@ -529,6 +529,42 @@ and the failure message says so.
 Verified the hard way rather than argued: with CORS moved into `next.config.ts`
 `headers()` and the image rebuilt, this check goes red and prints all three values.
 
+Finally the **`OTEL_ENABLED=true` pass**. `src/instrumentation.ts` early-returns unless
+`OTEL_ENABLED === 'true'`, so every check above runs on a path where `next.config.ts`'s
+OpenTelemetry externals are **never loaded** — a default smoke test proves nothing about
+the path that config exists for. `register()` runs once per boot, so a **second
+container** is started (sequentially, after the first's checks, so memory is bounded)
+with `OTEL_ENABLED=true` and `OTEL_LOG_LEVEL=debug`:
+
+- **Every gate, signing and CORS assertion above is re-run against it** — the same
+  functions, not paraphrases, so this cannot drift into asserting something weaker. The
+  concrete risk is that loading the OTel tree breaks the app, and it is not
+  hypothetical: in an image with the traced `@opentelemetry` tree removed, the OTel
+  container's `GET /api/audit` answered **500** where a 401 belongs.
+- **The SDK actually started and patched a real module** — at least one
+  `Applying instrumentation patch` line, and specifically
+  `Patching pg.Client.prototype.query`. This positive half exists because a scan for
+  *absent* error strings passes just as well when OTel never started at all. Measured:
+  with `OTEL_ENABLED` not set to `true`, the forbidden-string scan below stays green and
+  only this assertion fails.
+- **Zero matches for `native module`, `createContextKey` and `Cannot find module`** in
+  the container's logs — each names a way the OTel tree can fail to load in a standalone
+  build. If one ever goes noisy (an OTel version probing for an optional target), the fix
+  is to **narrow the pattern**, not to delete the check. The scan is a pure function and
+  `node scripts/verify-image.mjs --scan-fixture <file>` runs only it, over a local file,
+  with no Docker involved — so "injecting a forbidden string makes the scan fail" is one
+  command rather than a claim.
+- **The container is still running at the end**, so the SDK cannot crash the process
+  after boot and leave every earlier assertion green on a dead artifact.
+
+> **Span export is NOT verified, and the harness says so in its own output.** There is no
+> OTLP collector in this substrate, and with no endpoint configured the exporter retries
+> against its default and fails silently. This proves the OTel path *loads and
+> instruments* in the shipped image; it does not prove a span reached anything. Pointing
+> the exporter at an unroutable endpoint and asserting an error appears does **not** work
+> — tested: OTel's diagnostic logger is off unless `OTEL_LOG_LEVEL` is set, which is why
+> the enabled container sets it.
+
 It asserts the **wire contract, not the status code**: a 401 without
 `code: INVALID_API_KEY` is a different failure wearing the right status. And empty
 `API_KEYS` under `NODE_ENV=production` makes the gate answer `503
@@ -819,7 +855,13 @@ What is swept (set any TTL to `0` to keep that table indefinitely):
   spans to the OTLP HTTP endpoint at `OTEL_EXPORTER_OTLP_ENDPOINT` (path
   `/v1/traces` is appended unless `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set).
   `OTEL_SERVICE_NAME` defaults to `aitp-control-plane`. HTTP, `pg`, and `fetch`
-  are auto-instrumented.
+  are auto-instrumented. Because the flag is off by default, the enabled path has
+  its own arm in `verify:image`: a second container is run with
+  `OTEL_ENABLED=true`, every gate, signing and CORS assertion is re-run against
+  it, and the SDK is proven to have actually started by asserting the debug log
+  contains `Patching pg.Client.prototype.query`. **Span *export* is explicitly out
+  of scope there** — no collector is involved — so a green run means "the OTel path
+  loads and instruments in the shipped image", not "spans arrive".
 
 ### Metrics
 
