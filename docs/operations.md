@@ -459,6 +459,39 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   | `/_middleware` entry deleted | matcher pin + behavioural |
   | honest gate copy planted as a decoy to satisfy the extractor | **gate pin** — both halves: the duplicate anchor fails the locate *closed*, and the graph digest fails independently |
 
+Then **the signing path, end to end in the real artifact**. The revocation list is
+the one response this service *signs*, and it signs it with the NAPI binary inside the
+image. Proving that binary *loads* (the static half above) is not proving it produces a
+signature anyone can verify under the image's own arch and libc. So:
+
+- **The signature is verified two independent ways, over the raw served bytes.**
+  Host-side, hand-rolled from `node:crypto` — Ed25519 over `sha256(JCS(revocation_list))`
+  under the public key embedded in the envelope's own `issuer` AID, sharing no code with
+  the signer. And container-side, with the image's own SDK
+  (`verifyRevocationList(raw, issuer)`), which is the shipped binary verifying its own
+  output in the place it will actually run. Neither subsumes the other: the first crosses
+  implementations, the second crosses nothing but exercises the artifact. The **raw
+  bytes** are used throughout, never a re-serialisation — re-serialising would probably
+  round-trip, and relying on that reintroduces the tautology the check exists to remove.
+- **The `issuer` equals the AID derived independently on the host** from
+  `CP_AID_SEED_HEX`. Without this, the signature check only proves the container signed
+  with *some* key it holds. Measured: with a wrong seed, both verifications above stay
+  green and only this equality fails.
+- **The container did NOT log `revocation DB read failed`.** This is the load-bearing
+  one, and it is the reason the group is not vacuous.
+  `src/lib/revocation/producer.ts` catches a failed database read and publishes an
+  **empty but validly signed** list — a deliberate feature, not a bug that might get
+  fixed. Measured against a database with `revocation_entries` dropped: the endpoint
+  answered 200, the signature verified both ways, the issuer was right, and the tamper
+  negatives still passed. **Only this assertion caught it.** Do not "simplify" it away;
+  the fallback is named here so nobody can remove the check without reading why it
+  exists. (The producer caches for 60s, so the warning appears on the *first* request
+  only: the list is fetched before the scan, and the whole log is scanned, never a tail.)
+- **A tampered envelope is rejected** by the host-side verifier — a one-bit signature
+  flip, a mutated signed body with the signature left as served, and the pre-0.5.0
+  *wrapped* canonical form. Without the negative half, a verifier that returned true
+  unconditionally would make everything above green forever.
+
 It asserts the **wire contract, not the status code**: a 401 without
 `code: INVALID_API_KEY` is a different failure wearing the right status. And empty
 `API_KEYS` under `NODE_ENV=production` makes the gate answer `503

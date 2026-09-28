@@ -193,9 +193,17 @@
  * second gated route, a public route, and — with exactly one request — an anonymous POST,
  * because the gate's decision takes the METHOD and every other assertion here is a GET.
  *
- * What is NOT here yet: the revocation signing path and the CORS build-freeze,
- * which land in later commits of this series. Nothing below should be read as
- * already asserting those two.
+ *   THE SIGNING PATH (checks 14-18). The revocation list is the one response this
+ * service SIGNS, and it signs it with the NAPI binary inside the image. The signature
+ * is verified TWO independent ways over the RAW SERVED BYTES — never a
+ * re-serialisation — hand-rolled from node:crypto on the host, and by the image's own
+ * SDK inside the image. Plus the assertion that stops the group being vacuous: the
+ * producer catches a failed DB read and publishes an EMPTY BUT VALIDLY SIGNED list, so
+ * the absence of its warning in the logs is asserted. Measured: against an unmigrated
+ * database every other assertion in the group still passes.
+ *
+ * What is NOT here yet: the CORS build-freeze, which lands in a later commit of
+ * this series. Nothing below should be read as already asserting it.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -322,7 +330,12 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  verify as edVerify,
+} from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -361,13 +374,13 @@ const PROBE_MS = 120_000;
  *
  * It must comfortably exceed the worst realistic post-build case, or it fires
  * first and reports "something hung" in place of the specific, actionable
- * "Postgres never became healthy, here are its logs". Budget: FIVE probes at
- * PROBE_MS (10 min) — and the file notes probe timeouts are realistic under QEMU —
- * plus PG_READY_MS (3 min) plus APP_READY_MS (4 min) plus MIGRATE_MS (3 min) is
- * about 20 minutes, so 25 leaves genuine headroom. KEEP THIS COUNT IN STEP WITH THE
- * PROBES: every probe added spends another PROBE_MS of the budget, and at seven
- * probes the worst case reaches the ceiling itself. Keep BUILD_MS_NATIVE + this
- * BELOW the `verify-image` job's `timeout-minutes` in ci.yml.
+ * "Postgres never became healthy, here are its logs". Budget, recomputed as the run
+ * grew: SIX probes at PROBE_MS (12 min) — and the file notes probe timeouts are
+ * realistic under QEMU — plus PG_READY_MS (3 min) plus APP_READY_MS (4 min) plus
+ * MIGRATE_MS (3 min) is about 22 minutes, so 25 still leaves headroom. KEEP THIS IN
+ * STEP WITH THE RUN: every probe added spends another PROBE_MS and every app container
+ * another APP_READY_MS. Keep BUILD_MS_NATIVE + this BELOW the `verify-image` job's
+ * `timeout-minutes` in ci.yml.
  *
  * Check 13's extraction is not a meaningful line in that budget and is bounded
  * structurally rather than hopefully: two `docker create`/`cp`/`rm` cycles and one
@@ -375,7 +388,7 @@ const PROBE_MS = 120_000;
  * never started — so there is no boot to wait for and nothing that can wedge. It
  * replaced 360 HTTP requests, which cost seconds but needed their own deadline and
  * non-answer cap to stay bounded; the equality needs neither. A whole `--no-build` run
- * against a local image, substrate included, measures about 30 s.
+ * against a local image, substrate included, measures about 45 s.
  */
 const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 25 * 60_000;
 /**
@@ -2394,6 +2407,126 @@ function deriveAid(seedHex) {
   return `aid:pubkey:${spki.subarray(spki.length - 32).toString('base64url')}`;
 }
 
+// ── the revocation signing path (checks 14-18) ──────────────────────────────
+//
+// WHAT THESE CHECKS ARE FOR. The revocation list is the one response this service
+// SIGNS, and it signs it with the NAPI binary inside the image
+// (src/lib/revocation/producer.ts -> src/lib/identity/cp-agent.ts). Check 1 proves
+// that binary LOADS; nothing proved it produces a signature anyone can verify, under
+// the image's own arch and libc.
+//
+// AND WHY THE LOG ASSERTION (check 17) IS THE LOAD-BEARING ONE.
+// src/lib/revocation/producer.ts catches a failed database read and publishes an
+// EMPTY BUT VALIDLY SIGNED list. Measured against an unmigrated database: the
+// endpoint answered 200, the signature verified, the issuer was right — and the
+// container logged `revocation DB read failed, publishing empty list` because
+// `relation "revocation_entries" does not exist`. So a check asserting only "200 and
+// the signature verifies" PASSES ON AN IMAGE WHOSE DATABASE ACCESS IS ENTIRELY
+// BROKEN. Do not "simplify" check 17 away: it is the only thing standing between
+// this group and that vacuity, and the fallback it watches for is a deliberate
+// feature of the producer, not a bug that might get fixed.
+const REVOCATION_PATH = '/.well-known/aitp-revocation-list';
+/**
+ * The producer's fallback warning, as src/lib/revocation/producer.ts emits it.
+ *
+ * Matched as a SUBSTRING of the whole log, not of a tail: src/lib/logger.ts writes
+ * structured JSON under NODE_ENV=production, so the text appears inside a `"msg"`
+ * field, and the producer caches for 60s — which means the warning is emitted on the
+ * FIRST request only. Fetch the list before scanning, and scan everything.
+ */
+const REVOCATION_DB_FALLBACK = 'revocation DB read failed';
+
+/**
+ * RFC 8785 (JCS) canonicalisation, sufficient for this envelope: every value in it
+ * is an ASCII string, an integer, an array or an object.
+ *
+ * Deliberately a re-implementation rather than an import. The whole point of the
+ * host-side verification is that it shares no code with the thing that produced the
+ * signature — a verifier built from the SDK would be comparing the SDK to itself.
+ */
+function jcs(v) {
+  if (Array.isArray(v)) return `[${v.map(jcs).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${jcs(v[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
+/**
+ * The two candidate signing inputs for a revocation envelope.
+ *
+ * `signature` is a SIBLING of `revocation_list` in the envelope, not a member of it,
+ * so nothing is stripped before canonicalising. (The session bundle and the manifest
+ * put `signature` INSIDE the signed body and exclude it — do not generalise from
+ * here.) `wrapped` is the pre-0.5.0 convention and exists only to be asserted
+ * against: a positive-only test is what let the wrapped form survive a full release,
+ * and the same reasoning is written down at
+ * src/e2e/revocation-flow.integration.test.ts.
+ */
+const SIGNING_INPUTS = {
+  innerBody: (env) => jcs(env.revocation_list),
+  wrapped: (env) => jcs({ revocation_list: env.revocation_list }),
+};
+
+/**
+ * Verify an envelope: Ed25519 over sha256(canonical bytes), under the public key
+ * taken from the base64url segment of the `aid:pubkey:<b64url>` issuer AID.
+ *
+ * Returns false rather than throwing for ANY rejection, malformed input included. A
+ * verifier that distinguished "bad signature" from "unparseable key" would make the
+ * negative checks below depend on which of the two a tamper happened to produce; what
+ * they assert is the only thing that matters — that the envelope was NOT accepted.
+ */
+function verifyEnvelopeSignature(env, canonicalize = SIGNING_INPUTS.innerBody) {
+  try {
+    const seg = String(env?.revocation_list?.issuer ?? '').split(':').pop();
+    const rawKey = Buffer.from(seg, 'base64url');
+    if (rawKey.length !== 32) return false;
+    // Ed25519 SubjectPublicKeyInfo DER prefix + the 32 raw key bytes.
+    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), rawKey]);
+    const key = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    const digest = createHash('sha256').update(Buffer.from(canonicalize(env))).digest();
+    return edVerify(null, digest, key, Buffer.from(String(env?.signature ?? ''), 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the image's OWN SDK to verify the envelope, inside the image.
+ *
+ * The raw bytes are embedded as a JS string literal, so what the SDK sees is
+ * byte-for-byte what the server served. Re-serialising the parsed object would
+ * PROBABLY round-trip, and relying on that reintroduces exactly the tautology these
+ * checks exist to remove — the same reasoning as
+ * src/e2e/revocation-flow.integration.test.ts. `docker run` passes argv straight to
+ * the daemon with no shell, so there is nothing to quote around.
+ *
+ * It also runs the negative INSIDE the container: `verifyRevocationList` returns
+ * `void` and signals failure by throwing, so "it did not throw" on its own is
+ * satisfied by a verifier that never throws at all.
+ */
+function probeSdkVerifyScript(raw, issuer) {
+  return `
+const { verifyRevocationList } = require('aitp');
+const RAW = ${JSON.stringify(raw)};
+const ISSUER = ${JSON.stringify(issuer)};
+let ok = false, err = null;
+try { verifyRevocationList(RAW, ISSUER); ok = true; }
+catch (e) { err = String((e && (e.code || e.message)) || e); }
+let tamperedRejected = false, tamperedErr = null;
+try {
+  const env = JSON.parse(RAW);
+  env.revocation_list.published_at = (env.revocation_list.published_at || 0) + 1;
+  verifyRevocationList(JSON.stringify(env), ISSUER);
+} catch (e) { tamperedRejected = true; tamperedErr = String((e && (e.code || e.message)) || e); }
+process.stdout.write(JSON.stringify({ ok, err, tamperedRejected, tamperedErr }));
+`;
+}
+
 /** An HTTP request with its own deadline, so one wedged route cannot eat the
  *  watchdog. Returns the parsed body when it is JSON, the raw text otherwise. */
 async function httpReq(base, pathname, opts2 = {}) {
@@ -2830,6 +2963,106 @@ async function startApp(net, pgName, platform, label, extraEnv = {}) {
     `app "${label}" answered in ${((Date.now() - started) / 1000).toFixed(1)}s (${base})`,
   );
   return { name, base };
+}
+
+/**
+ * Fetch the signed revocation list as BOTH the exact raw bytes and the parsed shape.
+ *
+ * The raw text is what every verification below is handed. Re-serialising the parsed
+ * object would probably round-trip, and relying on that reintroduces the tautology
+ * these checks exist to remove.
+ */
+async function fetchRevocationEnvelope(app) {
+  const r = await httpReq(app.base, REVOCATION_PATH);
+  if (r.status === 404) {
+    fail(
+      `GET ${REVOCATION_PATH} answered 404. That path is served through a REWRITE in ` +
+        'next.config.ts onto /api/well-known/aitp-revocation-list, so a 404 means the ' +
+        'rewrite is missing from the built artifact — not that the signature is bad. ' +
+        'Check next.config.ts `rewrites()` and that it survived the build.',
+    );
+  }
+  if (r.status !== 200) {
+    fail(`GET ${REVOCATION_PATH} answered ${r.status} (body: ${JSON.stringify(r.body)})`);
+  }
+  const ct = r.headers.get('content-type');
+  if (!String(ct).includes('application/json')) {
+    fail(`content-type is ${JSON.stringify(ct)}, expected application/json`);
+  }
+  let env;
+  try {
+    env = JSON.parse(r.text);
+  } catch (err) {
+    fail(`the served envelope is not JSON: ${err.message}`);
+  }
+  if (!env?.revocation_list || typeof env.signature !== 'string') {
+    fail(
+      'the served envelope has no `revocation_list` body or no string `signature`, so ' +
+        `there is nothing to verify: ${r.text.slice(0, 400)}`,
+    );
+  }
+  return { raw: r.text, env };
+}
+
+/** Check 14, and part of check 20: the host-side, zero-dependency verification. */
+function assertEnvelopeVerifiesOnHost(rev) {
+  if (!verifyEnvelopeSignature(rev.env, SIGNING_INPUTS.innerBody)) {
+    fail(
+      'the served signature does NOT verify under the public key embedded in its own ' +
+        '`issuer` AID, over sha256(JCS(revocation_list)).\n' +
+        `  issuer:    ${rev.env.revocation_list?.issuer}\n` +
+        `  signature: ${String(rev.env.signature).slice(0, 44)}...\n` +
+        'This verifier is hand-rolled from node:crypto on the HOST and shares no code ' +
+        'with the signer, so a failure here is a genuine cross-implementation ' +
+        'disagreement: either the NAPI binary in the image signed something else, or it ' +
+        'signed the wrong canonical bytes.',
+    );
+  }
+  const entries = rev.env.revocation_list?.entries;
+  return (
+    `signature verifies (host, node:crypto, over sha256(JCS(revocation_list))); ` +
+    `${Array.isArray(entries) ? entries.length : '?'} entr(ies), ` +
+    `expires_at=${rev.env.revocation_list?.expires_at}`
+  );
+}
+
+/** Check 16, and part of check 20. */
+function assertEnvelopeIssuerIsSeedDerived(rev, expectedAid) {
+  const issuer = rev.env.revocation_list?.issuer;
+  if (issuer !== expectedAid) {
+    fail(
+      'the envelope is signed by an identity other than the configured seed:\n' +
+        `  expected (host, node:crypto from CP_AID_SEED_HEX): ${expectedAid}\n` +
+        `  served   (image, aitp NAPI signer):               ${issuer}\n` +
+        'Without this equality the signature check above only proves the container ' +
+        'signed with SOME key it holds, not with the one it was configured with.',
+    );
+  }
+  return `issuer = ${expectedAid} (derived independently on the host)`;
+}
+
+/** Check 17, and part of check 20 — the assertion that stops the group being vacuous. */
+async function assertRevocationDbReadHappened(app) {
+  const logs = await containerLogs(app.name);
+  const hits = logs
+    .split('\n')
+    .map((l, i) => [i + 1, l])
+    .filter(([, l]) => l.includes(REVOCATION_DB_FALLBACK));
+  if (hits.length) {
+    fail(
+      `the container logged ${JSON.stringify(REVOCATION_DB_FALLBACK)}, so the list above ` +
+        'was signed WITHOUT reading the database.\n' +
+        hits.map(([n, l]) => `  line ${n}: ${l.slice(0, 400)}`).join('\n') +
+        '\n\nsrc/lib/revocation/producer.ts catches a failed DB read and publishes an ' +
+        'EMPTY BUT VALIDLY SIGNED list, so every other assertion in this group still ' +
+        'passes — measured. Against this substrate it almost always means the ' +
+        'migrations did not apply and `revocation_entries` does not exist.',
+    );
+  }
+  return (
+    `no ${JSON.stringify(REVOCATION_DB_FALLBACK)} in ${logs.split('\n').length} log line(s) ` +
+    '— the signed list came from a real DB read, not from the empty-list fallback'
+  );
 }
 
 const results = [];
@@ -4444,6 +4677,145 @@ async function main() {
       );
     },
   );
+
+  // ── the NAPI signing path, end to end, in the real artifact ───────────────
+  //
+  // Fetched ONCE, before any log scan, and held: the producer caches for 60s, so the
+  // DB-read warning check 17 looks for is emitted on the FIRST request only.
+  let rev = null;
+
+  await runCheck(
+    14,
+    'the revocation list is served and its signature verifies (host-side, no SDK)',
+    async () => {
+      rev = await fetchRevocationEnvelope(app);
+      return assertEnvelopeVerifiesOnHost(rev);
+    },
+  );
+
+  await runCheck(15, "the image's own SDK verifies the signature it produced", async () => {
+    // The SECOND, independent verification, and the one that runs INSIDE the
+    // artifact: it proves the shipped NAPI binary can verify its own signature under
+    // the image's arch and libc. Check 14 crosses implementations (hand-rolled
+    // node:crypto on the host); this crosses nothing but proves the SDK's own
+    // verifier works in the place it will actually be used. Neither subsumes the
+    // other, which is why both are here — and why host-side SDK verification was
+    // rejected as the primary check: it compares the SDK to itself on a machine that
+    // is not the deployment target.
+    if (!rev) {
+      fail('check 14 did not obtain an envelope, so there is nothing to verify here');
+    }
+    const issuer = rev.env.revocation_list?.issuer;
+    const r = requireProbe(
+      await probe(opts.tag, platform, 'sdk-verify', probeSdkVerifyScript(rev.raw, issuer)),
+      'sdk-verify',
+    );
+    if (!r.ok) {
+      // NO CLAIM ABOUT CHECK 14'S RESULT. An earlier version asserted "check 14
+      // accepted the same bytes, so the two implementations disagree", which is a
+      // confident and wrong diagnosis whenever 14 failed too — measured, by flipping a
+      // byte of the served signature, which fails BOTH. Name the two readings instead.
+      fail(
+        "the image's own `verifyRevocationList` REJECTED the envelope the image served:\n" +
+          `  ${r.err}\n` +
+          'HOW TO READ THIS: if check 14 PASSED, the shipped SDK and an independent ' +
+          'node:crypto implementation disagree about the same bytes — a real finding about ' +
+          'the shipped binary, not a harness bug. If check 14 FAILED too, the served ' +
+          'signature is simply wrong and both verifiers are agreeing about that.',
+      );
+    }
+    if (!r.tamperedRejected) {
+      fail(
+        "the image's `verifyRevocationList` ACCEPTED an envelope whose signed body had " +
+          'been mutated (published_at incremented by 1). A verifier that never rejects ' +
+          'makes the positive half above worthless.',
+      );
+    }
+    return (
+      `verifyRevocationList(raw, issuer) inside the image: accepted the served bytes, ` +
+      `rejected a mutated body (${r.tamperedErr})`
+    );
+  });
+
+  await runCheck(16, 'the envelope is signed by the seed-derived identity', () => {
+    if (!rev) fail('check 14 did not obtain an envelope');
+    return assertEnvelopeIssuerIsSeedDerived(rev, expectedAid);
+  });
+
+  await runCheck(
+    17,
+    'the signed list came from a real DB read, not the empty-list fallback',
+    () => {
+      if (!rev) {
+        fail(
+          'check 14 never fetched the list, so this scan would be looking at logs from ' +
+            'before the producer ever ran — which would pass for the wrong reason',
+        );
+      }
+      return assertRevocationDbReadHappened(app);
+    },
+  );
+
+  await runCheck(18, 'a tampered envelope is rejected by the host-side verifier', () => {
+    // THE NEGATIVE HALF. Without it, `verifyEnvelopeSignature` returning true
+    // unconditionally — a one-character mistake in it, or a `catch` that swallowed the
+    // wrong thing — would make check 14 green forever. Two tampers, because they break
+    // different halves of the signature relation, and neither sends a request: both
+    // are local mutations of bytes already in hand.
+    if (!rev) fail('check 14 did not obtain an envelope');
+
+    // 1. Flip one byte of the signature, keeping its length.
+    const sigBuf = Buffer.from(String(rev.env.signature), 'base64url');
+    const flipped = Buffer.from(sigBuf);
+    flipped[0] ^= 0x01;
+    const badSig = {
+      ...rev.env,
+      signature: flipped.toString('base64url'),
+    };
+    if (verifyEnvelopeSignature(badSig)) {
+      fail(
+        'the host-side verifier ACCEPTED an envelope with one bit flipped in its ' +
+          'signature. It is therefore not verifying anything, and check 14 proves ' +
+          'nothing.',
+      );
+    }
+
+    // 2. Mutate the SIGNED BODY, leaving the signature alone. This is the tamper that
+    //    matters operationally: an attacker edits the entries list, not the signature.
+    const badBody = {
+      ...rev.env,
+      revocation_list: {
+        ...rev.env.revocation_list,
+        expires_at: Number(rev.env.revocation_list?.expires_at ?? 0) + 1,
+      },
+    };
+    if (verifyEnvelopeSignature(badBody)) {
+      fail(
+        'the host-side verifier ACCEPTED an envelope whose SIGNED BODY was mutated ' +
+          '(expires_at incremented) while the signature stayed as served. Either the ' +
+          'canonicalisation is not covering the field, or the verifier is not checking ' +
+          'the body at all.',
+      );
+    }
+
+    // 3. The pre-0.5.0 WRAPPED signing input must NOT verify. Kept for the same reason
+    //    src/e2e/revocation-flow.integration.test.ts keeps it: a positive-only test is
+    //    what let the wrapped form survive a full release, and an exclusion that is not
+    //    written down is an exclusion that silently stops being tested.
+    if (verifyEnvelopeSignature(rev.env, SIGNING_INPUTS.wrapped)) {
+      fail(
+        'the served signature verifies over the PRE-0.5.0 WRAPPED canonical form ' +
+          '(`{"revocation_list":{...}}`) rather than over the inner body. The signing ' +
+          'convention has changed under this harness; RFC-AITP-0008 signs the inner ' +
+          '`revocation_list` body.',
+      );
+    }
+
+    return (
+      'rejected: a one-bit signature flip; a mutated signed body (expires_at+1); and ' +
+      'the pre-0.5.0 wrapped canonical form'
+    );
+  });
 
   const failures = results.filter((r) => !r.ok).length;
   if (failures) throw new Error(`${failures}/${results.length} image checks FAILED`);
