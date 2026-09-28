@@ -12,6 +12,17 @@ Dockerfile
 !.env.example
 temp
 plans
+# Agent session state, and in particular `.claude/worktrees/` — a full second
+# checkout of this repo. It MUST be excluded, and not for build speed: every
+# entry above is anchored at the context root (Docker matches these with
+# `filepath.Match`, so `node_modules` means `./node_modules` and NOT
+# `.claude/worktrees/*/node_modules`), so a nested checkout's own sources sail
+# straight past them into `COPY . .`. Measured: 4.13 MB of a second checkout's
+# source was entering the build context, against 7.88 kB with this line — and
+# `scripts/verify-image.mjs` check 13 is a byte-equality on what this build
+# produces, so a build context that differs from a fresh CI checkout's is a build
+# whose artifact is not the artifact CI pins.
+.claude
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
