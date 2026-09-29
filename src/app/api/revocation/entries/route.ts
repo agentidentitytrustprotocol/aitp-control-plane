@@ -148,6 +148,46 @@ export async function POST(req: NextRequest) {
       revokedAt = new Date().toISOString();
     }
 
+    // This catch OBSERVES and re-throws; it does not answer. It used to map any
+    // throw to `500 INSERT_FAILED` with `err.message` in the body, which for a
+    // `pg` DatabaseError is whatever Postgres said — and Postgres names tables,
+    // columns, constraints and types. That was issue #98, and it was the last of
+    // the three undiscriminated catch-alls tracked in
+    // src/app/api/registry/enroll/route.ts.
+    //
+    // Three things could reach here, and only one of them still can:
+    //
+    //   1. `revokedAt` outside what `timestamptz` can parse from an ISO string.
+    //   2. `reason` containing U+0000, which neither `text` nor `jsonb` accepts.
+    //   3. A genuine server fault — connection refused, pool timeout, migrations
+    //      not applied (42P01, whose message names the table), permissions, disk.
+    //
+    // (1) and (2) are the CALLER's fault, and both are properties of the request
+    // body, so they are now decided before any SQL runs, by MIN/MAX_REVOKED_AT_MS
+    // and the NUL check above. That is the whole reason this catch can be this
+    // blunt: it is not that a database error is safe to expose, it is that no
+    // database error reachable here is the caller's to see. If a future unique
+    // constraint, CHECK, or trigger makes a caller-caused SQLSTATE reachable
+    // again, it gets a guard above or an explicitly discriminated branch (as
+    // trust-anchors/route.ts does for 23505, the one case that genuinely cannot
+    // be hoisted without a race) — never a resurrected catch-all.
+    //
+    // So (3) is all that is left, and re-throwing is the repo's idiom for it
+    // (enroll/route.ts, webhooks/route.ts, events/route.ts,
+    // events/history/route.ts all do this). The re-throw is what keeps internal
+    // detail out of the body BY CONSTRUCTION rather than by remembering to
+    // redact: a function that throws has no response body to leak into.
+    //
+    // The log is the one thing that must not be dropped along with the old body.
+    // Nothing else records this failure — src/instrumentation.ts registers no
+    // `onRequestError`, so without this line a database outage on the revocation
+    // path reaches operators only as Next's default `console.error`, outside pino
+    // and without the request-id correlation docs/api.md promises. Binding `err`
+    // here is safe in a way it was not before, because the next statement throws
+    // instead of returning. Field set matches the `logger.warn` twenty lines
+    // below. Not try-guarded, unlike enroll's `recordFailure`: that guards
+    // instrumentation because a fault there would turn a clean 400 into a 500,
+    // whereas this path is already a 500 and a logger fault cannot change that.
     try {
       await db
         .insert(revocationEntries)
@@ -158,13 +198,8 @@ export async function POST(req: NextRequest) {
         })
         .onConflictDoNothing();
     } catch (err) {
-      return {
-        status: 500,
-        body: {
-          error: err instanceof Error ? err.message : String(err),
-          code: 'INSERT_FAILED',
-        },
-      };
+      logger.error({ err, jti: body.jti }, 'revocation entry insert failed');
+      throw err;
     }
 
     revocationProducer.invalidate();
