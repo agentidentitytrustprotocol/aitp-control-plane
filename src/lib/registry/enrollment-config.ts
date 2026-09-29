@@ -156,11 +156,20 @@ export function enrollmentSecretBootFailure(): {
     'POST /api/registry/agents cannot verify them: both answer ' +
     '503 SERVER_MISCONFIGURED for every request.';
 
+  // ` — ` and not a space: `problem` carries no terminating punctuation (the
+  // too-short case ends mid-shell-command, with a quote), so a bare space
+  // produced the run-on "ENROLLMENT_SECRET is required POST /api/registry/enroll
+  // cannot mint…" — read off a real container's logs, not imagined. A period
+  // would have to be invented after that trailing quote; a dash needs nothing.
+  // Non-ASCII survives the path this line actually travels: Next's own banner
+  // prints `▲` and `✓` to the same stream one line above it.
+  const head = `${problem} — ${consequence}`;
+
   if (config.isProduction) {
     return {
       fatal: true,
       message:
-        `[aitp-cp] FATAL: ${problem} ${consequence} ` +
+        `[aitp-cp] FATAL: ${head} ` +
         'Refusing to start rather than serving a deployment that reports ready ' +
         'and then fails every enrollment. Set ENROLLMENT_SECRET and redeploy.',
     };
@@ -168,7 +177,7 @@ export function enrollmentSecretBootFailure(): {
   return {
     fatal: false,
     message:
-      `[aitp-cp] ${problem} ${consequence} ` +
+      `[aitp-cp] ${head} ` +
       'Starting anyway because NODE_ENV is not production; a production boot ' +
       'with this configuration exits non-zero instead.',
   };

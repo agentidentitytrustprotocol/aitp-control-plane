@@ -187,13 +187,40 @@ describe('enrollmentSecretBootFailure', () => {
     // the process, because the alternative — the behaviour issue #99 reports —
     // is a replica that reports ready and 503s every enrollment for as long as
     // it runs.
+    //
+    // Pinned as the WHOLE line, once, rather than only by substring: this is the
+    // one artefact of this change an operator actually reads, at the moment a
+    // deploy is failing and nobody is in a mood to interpret it. Assembling it
+    // from three fragments is exactly how it ends up ungrammatical — the earlier
+    // version joined with a bare space and read "ENROLLMENT_SECRET is required
+    // POST /api/registry/enroll cannot mint…", which was only noticed by reading
+    // a real container's logs. A full-string assertion makes the rendered line
+    // reviewable here, in the test, instead of only in an incident.
     withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: undefined }, (mod) => {
       const failure = mod.enrollmentSecretBootFailure();
       expect(failure).not.toBeNull();
       expect(failure?.fatal).toBe(true);
-      expect(failure?.message).toContain('FATAL');
-      expect(failure?.message).toContain('ENROLLMENT_SECRET is required');
-      expect(failure?.message).toContain('Refusing to start');
+      expect(failure?.message).toBe(
+        '[aitp-cp] FATAL: ENROLLMENT_SECRET is required — ' +
+          'POST /api/registry/enroll cannot mint enrollment tokens and ' +
+          'POST /api/registry/agents cannot verify them: both answer ' +
+          '503 SERVER_MISCONFIGURED for every request. ' +
+          'Refusing to start rather than serving a deployment that reports ready ' +
+          'and then fails every enrollment. Set ENROLLMENT_SECRET and redeploy.',
+      );
+    });
+  });
+
+  it('keeps the too-short line grammatical, where the reason ends in a quote', () => {
+    // The other rendering, and the reason the separator is a dash rather than an
+    // added period: this `problem` ends mid-shell-command with a closing quote,
+    // so there is no punctuation to append that would not look like a typo.
+    withEnv({ NODE_ENV: 'development', ENROLLMENT_SECRET: 'too-short' }, (mod) => {
+      const message = mod.enrollmentSecretBootFailure()?.message ?? '';
+      expect(message).toContain('.toString(\'hex\'))" — POST /api/registry/enroll');
+      // No double space and no stranded separator anywhere in the line.
+      expect(message).not.toMatch(/ {2}/);
+      expect(message).not.toMatch(/—\s*$/);
     });
   });
 
