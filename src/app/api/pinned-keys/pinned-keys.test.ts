@@ -204,6 +204,75 @@ describe('POST /api/pinned-keys', () => {
     });
   });
 
+  // `label` is varchar(128), not unbounded text, so both a 129th character
+  // (22001) and a U+0000 (22021) are values the column cannot hold. Same
+  // unguarded insert, same misclassified 500.
+  describe('label', () => {
+    it('accepts exactly 128 characters', async () => {
+      selectResults = [[keyRow()]];
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'x'.repeat(128),
+      });
+      expect(res.status).toBe(201);
+      expect(insertedValues).toHaveLength(1);
+    });
+
+    it('rejects 129 characters with 400 BODY_INVALID and no insert', async () => {
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'x'.repeat(129),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/label exceeds 128/);
+      expect(insertedValues).toHaveLength(0);
+    });
+
+    // Postgres counts varchar(n) in code points, so these 65 astral
+    // characters — 130 UTF-16 units, 260 bytes — fit in varchar(128). A
+    // `.length` check would reject them; that would be a fabricated 400.
+    it('counts code points, not UTF-16 units: 65 astral characters fit', async () => {
+      selectResults = [[keyRow()]];
+      const label = '\u{1F600}'.repeat(65);
+      expect(label.length).toBe(130); // the trap this guards against
+      const res = await post({ aid: 'aid:pubkey:abc', pubkey: GOOD_PUBKEY, label });
+      expect(res.status).toBe(201);
+      expect(insertedValues).toHaveLength(1);
+    });
+
+    it('rejects a NUL character, reachable through the \\u0000 JSON escape', async () => {
+      // Built by parsing the escape, which is how a real caller sends it —
+      // a raw NUL byte is invalid JSON and dies at req.json() instead.
+      const parsed = JSON.parse('{"label":"ops\\u0000team"}') as { label: string };
+      expect(parsed.label).toContain(' ');
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: parsed.label,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/NUL/);
+      expect(insertedValues).toHaveLength(0);
+    });
+
+    it('allows other control characters — a newline in operator prose stores fine', async () => {
+      selectResults = [[keyRow()]];
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'ops\n\tteam',
+      });
+      expect(res.status).toBe(201);
+      expect((insertedValues[0] as { label: string }).label).toBe('ops\n\tteam');
+    });
+  });
+
   it('upserts and returns 201 with the stored row (namespace defaults, expiresAt normalized to ISO)', async () => {
     selectResults = [[keyRow({ label: 'ops' })]]; // re-read after upsert
     const res = await post({
