@@ -1019,16 +1019,17 @@ paths:
   /api/webhooks/{id}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-    get:
-      tags: [webhooks]
-      summary: Fetch one subscription
-      responses:
-        "200": { description: OK }
-        "404":
-          description: No webhook subscription with this id. `code` is `NOT_FOUND`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+    # There is deliberately no `get` here. `src/app/api/webhooks/[id]/route.ts`
+    # exports only PATCH and DELETE, so a read-one answers 405. This file declared
+    # one anyway — a `200` with no schema at all, plus a `404` — until #107. No
+    # handler was ever removed: that route file has exported exactly PATCH and
+    # DELETE in every commit of its history, while `docs/api.md`'s webhook table
+    # listed only the routes that exist.
+    #
+    # Adding one is a feature, not a doc fix, so it does not belong here until the
+    # route exists: `GET /api/webhooks` is the read surface today, and the row
+    # carries a `secret` that the collection response deliberately does not
+    # project, so a single-row read has to decide what it exposes first.
     patch:
       tags: [webhooks]
       summary: Update a subscription
