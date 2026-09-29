@@ -46,27 +46,37 @@ const AT_MINIMUM = 'a'.repeat(ENROLLMENT_SECRET_MIN_LENGTH);
 const BELOW_MINIMUM = 'a'.repeat(ENROLLMENT_SECRET_MIN_LENGTH - 1);
 const USABLE = 'enrollment-config-test-secret-padded-past-the-minimum';
 
-/** Re-import the module — and with it `config` — under a given environment. */
+/**
+ * Re-import the module — and with it `config` — under a given environment.
+ *
+ * `process.env` is written through a widened alias: Next generates a
+ * `next-env.d.ts` that types `NODE_ENV` as READ-ONLY, and `next build` type-checks
+ * this file, so a direct assignment builds fine under `npm run typecheck` (which
+ * runs before that file exists in CI) and then fails the build step. Measured,
+ * not guessed. The alias is confined to this helper.
+ */
+const mutableEnv = process.env as Record<string, string | undefined>;
+
 function withEnv(
   env: { NODE_ENV?: string; ENROLLMENT_SECRET?: string },
   fn: (mod: typeof import('./enrollment-config')) => void,
 ): void {
-  const savedNodeEnv = process.env.NODE_ENV;
-  const savedSecret = process.env.ENROLLMENT_SECRET;
-  if (env.NODE_ENV === undefined) delete process.env.NODE_ENV;
-  else process.env.NODE_ENV = env.NODE_ENV;
-  if (env.ENROLLMENT_SECRET === undefined) delete process.env.ENROLLMENT_SECRET;
-  else process.env.ENROLLMENT_SECRET = env.ENROLLMENT_SECRET;
+  const savedNodeEnv = mutableEnv.NODE_ENV;
+  const savedSecret = mutableEnv.ENROLLMENT_SECRET;
+  if (env.NODE_ENV === undefined) delete mutableEnv.NODE_ENV;
+  else mutableEnv.NODE_ENV = env.NODE_ENV;
+  if (env.ENROLLMENT_SECRET === undefined) delete mutableEnv.ENROLLMENT_SECRET;
+  else mutableEnv.ENROLLMENT_SECRET = env.ENROLLMENT_SECRET;
   try {
     jest.isolateModules(() => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       fn(require('./enrollment-config') as typeof import('./enrollment-config'));
     });
   } finally {
-    if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = savedNodeEnv;
-    if (savedSecret === undefined) delete process.env.ENROLLMENT_SECRET;
-    else process.env.ENROLLMENT_SECRET = savedSecret;
+    if (savedNodeEnv === undefined) delete mutableEnv.NODE_ENV;
+    else mutableEnv.NODE_ENV = savedNodeEnv;
+    if (savedSecret === undefined) delete mutableEnv.ENROLLMENT_SECRET;
+    else mutableEnv.ENROLLMENT_SECRET = savedSecret;
   }
 }
 
@@ -238,5 +248,79 @@ describe('enrollmentSecretBootFailure', () => {
       expect(message).not.toContain(secret);
       expect(message).not.toContain('sh0rt');
     });
+  });
+});
+
+describe('enforceEnrollmentSecretAtBoot', () => {
+  // What src/instrumentation.ts actually calls, once per server boot. That file
+  // is excluded from coverage (jest.config.js), which is exactly why the
+  // console.error and the process.exit live here and are asserted here rather
+  // than being taken on trust at the call site.
+  //
+  // `process.exit` is ALWAYS mocked in this block. Unmocked, the fatal case
+  // would take the Jest worker down with it and report as a crashed suite.
+  let exitSpy: jest.SpiedFunction<typeof process.exit>;
+  let errorSpy: jest.SpiedFunction<typeof console.error>;
+
+  beforeEach(() => {
+    exitSpy = jest
+      .spyOn(process, 'exit')
+      .mockImplementation(((_code?: number) => undefined) as never);
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it('is completely silent when the secret is usable', () => {
+    // The positive control. Without it every assertion below would also pass
+    // against a function that printed and exited unconditionally.
+    withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: USABLE }, (mod) => {
+      mod.enforceEnrollmentSecretAtBoot();
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('prints and exits non-zero on a production boot with no secret', () => {
+    // The whole point of issue #99: the deploy fails here, loudly, before any
+    // traffic — rather than reporting ready and 503ing every enrollment.
+    withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: undefined }, (mod) => {
+      mod.enforceEnrollmentSecretAtBoot();
+    });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('FATAL');
+    // 1, not 0: a zero exit reads as a clean shutdown to an orchestrator, and
+    // railway.json's restartPolicyType is ON_FAILURE.
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('prints but does NOT exit outside production', () => {
+    withEnv({ NODE_ENV: 'development', ENROLLMENT_SECRET: 'too-short' }, (mod) => {
+      mod.enforceEnrollmentSecretAtBoot();
+    });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('Starting anyway');
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('prints before exiting, not after', () => {
+    // Ordering is the whole value of the fatal path: an exit that beat its own
+    // log line would leave an operator with a crash-looping container and no
+    // reason for it, which is a worse incident than the one being fixed.
+    const order: string[] = [];
+    errorSpy.mockImplementation(() => {
+      order.push('error');
+    });
+    exitSpy.mockImplementation(((_code?: number) => {
+      order.push('exit');
+      return undefined;
+    }) as never);
+    withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: '' }, (mod) => {
+      mod.enforceEnrollmentSecretAtBoot();
+    });
+    expect(order).toEqual(['error', 'exit']);
   });
 });

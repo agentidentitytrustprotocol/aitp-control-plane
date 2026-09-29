@@ -173,3 +173,42 @@ export function enrollmentSecretBootFailure(): {
       'with this configuration exits non-zero instead.',
   };
 }
+
+/**
+ * Apply `enrollmentSecretBootFailure()`: print it, and die if it is fatal.
+ *
+ * Called once per server boot from `src/instrumentation.ts`'s `register()`,
+ * before anything else is started. Nothing else may call it — it can end the
+ * process.
+ *
+ * IT LIVES HERE RATHER THAN AT THE CALL SITE for a specific, measured reason.
+ * Next compiles `instrumentation.ts` for both runtimes, and a literal
+ * `process.exit` in that file makes the build emit "A Node.js API is used
+ * (process.exit) which is not supported in the Edge Runtime" — a permanent new
+ * build warning about a line that is already unreachable off the Node runtime
+ * (`register()` returns early unless `NEXT_RUNTIME === 'nodejs'`). Reached
+ * through the dynamic import that already loads this module, it is not in the
+ * Edge bundle's static graph and the warning does not appear. The side benefit
+ * is coverage: `jest.config.js` excludes `instrumentation.ts`, so a decision
+ * made there is measured by nothing, while this function is tested — including
+ * the exit, with `process.exit` spied.
+ *
+ * `console.error` rather than the pino logger, matching `config.ts`'s precedent
+ * for boot-time configuration messages and keeping the fatal path free of a
+ * dependency that could itself fail to load.
+ *
+ * `process.exit(1)` rather than throwing: Next wraps a throw from `register()`
+ * and rethrows it into its own bootstrap, and what the standalone server does
+ * with a rejected `prepare()` is a framework internal this repo should not
+ * depend on for its crash semantics. A non-zero exit is what
+ * `railway.json`'s `restartPolicyType: "ON_FAILURE"` and every orchestrator's
+ * crash-loop detector read, and it guarantees the deploy's healthcheck never
+ * passes — so the release fails and the previous one keeps serving.
+ */
+export function enforceEnrollmentSecretAtBoot(): void {
+  const failure = enrollmentSecretBootFailure();
+  if (failure === null) return;
+  // eslint-disable-next-line no-console
+  console.error(failure.message);
+  if (failure.fatal) process.exit(1);
+}
