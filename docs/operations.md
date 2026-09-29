@@ -42,13 +42,15 @@ signing key, not a config toggle.
   logs a one-time warning.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
   enrollment tokens. Required, and **≥ 32 characters**. Callers never see it.
-  Unset or too short makes `POST /api/registry/enroll` return
-  `503 SERVER_MISCONFIGURED` for every request, **in every environment** — not
-  just production, and unlike `API_KEYS` this is not a fail-safe on gated routes
-  but the total unavailability of enrollment. It is not validated at startup
-  either (the service is constructed lazily on the first enrollment), and
-  `/api/readyz` does not check it, so a bad value deploys green and fails only
-  when an agent tries to enroll. Verify after any deploy that changes it.
+  Unset or too short makes **both** `POST /api/registry/enroll` and
+  `POST /api/registry/agents` return `503 SERVER_MISCONFIGURED` for every
+  request, **in every environment** — not just production, and unlike `API_KEYS`
+  this is not a fail-safe on gated routes but the total unavailability of
+  enrollment *and* registration: one route cannot mint tokens, the other cannot
+  verify them. It is not validated at startup either (the service is constructed
+  lazily on the first request to either route), and `/api/readyz` does not check
+  it, so a bad value deploys green and fails only when an agent tries to enroll
+  or register. Verify after any deploy that changes it.
 - **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
   to a single origin, e.g. `https://console.example.com`. Applied per-request at
   runtime by the proxy, so it can be changed via the deploy environment
@@ -1223,16 +1225,47 @@ which is the whole point of the metric:
 - **Pre-validation** — malformed JSON, or a body with no `manifest` at all
   (`400 BODY_INVALID`, `400 MANIFEST_INVALID`). Never reaches the SDK.
 - **`503 SERVER_MISCONFIGURED`** — a server with no usable `ENROLLMENT_SECRET`
-  rejects *every* enrollment while this counter stays flat at zero.
+  rejects *every* enrollment while this counter stays flat at zero. The same
+  fault also 503s every `POST /api/registry/agents`, and that half is invisible
+  here in a stronger sense: this counter is the enroll route's alone, so the
+  register route contributes nothing to it under any condition — not even when
+  it is failing for exactly this reason.
 - **The rethrow to `500`** — an unclassifiable internal fault.
 
 The first two are the loudest fleet-wide breakages, and — be blunt about it —
-**neither has any other in-process signal**: the route logs only classified
-verification failures, `src/proxy.ts` has no logger at all, and
-`rate_limit_drops` moves only on a `429`. Until that is fixed (tracked as an open
-question on the #69 plan) the detection path for those two is your ingress or
-load balancer: alert on the enroll route's `5xx` rate and on a sustained `400`
-rate, not on this counter.
+**nothing in this process increments on either of them**: the route logs only
+classified verification failures, `src/proxy.ts` has no logger at all, and
+`rate_limit_drops` moves only on a `429`. The register half of the `503` is
+equally unlogged, and there is no register-side *failure* counter to catch it
+either. So no counter here rises when this breaks; the detection path is your
+ingress or load balancer: alert on the `5xx` rate of **both** registry POSTs —
+`/api/registry/enroll` and `/api/registry/agents` — and on a sustained `400`
+rate, not on this counter. (Something does go *quiet*, which is a weaker but real
+signal — see below.)
+
+Because both routes construct the same service, a bad secret hits both at once —
+so you never need the second route to corroborate the first. **But a `5xx` alone
+is not the diagnosis: read the `code` in the body.** `SERVER_MISCONFIGURED` is
+this fault. A `500` is an unclassifiable internal fault and belongs in the pod
+logs — and note that the register POST has more ways to produce one than enroll
+does, because it writes to Postgres (the jti consume, the upsert, the audit
+ingest) while enroll's happy path touches no database at all. A plain database
+outage therefore shows up as a sustained `5xx` rate on `/api/registry/agents`
+**alone**, with a perfectly good `ENROLLMENT_SECRET`. Do not rotate the secret on
+the strength of a `5xx` rate; confirm the `code` first.
+
+**For the bad-secret fault specifically** — not the database variant just
+described — there is one in-process signal, and it is an absence rather than an
+increment: `audit_events{type="agent.registered"}` stops rising for the whole
+outage, as does `agents_active`. Nobody can register, so nothing is recorded. It
+does not tell you *why*, which is what the `code` is for, and it is slow: you are
+waiting to notice that something stopped, so ingress `5xx` is still the faster
+alert.
+
+That signal does **not** transfer to the database variant, for the reason given
+above: those two series are DB-derived, so during a database outage they are
+*absent* from the scrape entirely rather than flat, and a rate-based alert on them
+goes no-data instead of firing. `db_up 0` is the signal there.
 
 The third — the rethrow to `500` — *is* visible, but only in the application log:
 Next prints the error and a stack trace to stderr. So during a `500` incident

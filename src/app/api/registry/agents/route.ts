@@ -111,10 +111,74 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    // Hoisted deliberately OUT of the try below, exactly as
+    // src/app/api/registry/enroll/route.ts does for the same reason.
+    // `getEnrollmentService()` constructs `EnrollmentService`, whose
+    // constructor throws when ENROLLMENT_SECRET is unset or shorter than 32
+    // chars — a server fault, not a problem with the caller's token. Fused
+    // into the try below it was caught by the same catch-all and answered
+    // `401 TOKEN_INVALID` **with the raw error message in the body**, which
+    // told every agent in the fleet "your token is bad" about a token that was
+    // fine, and published the name of the missing environment variable to an
+    // unauthenticated caller (this route is in src/proxy.ts's PUBLIC_PATHS).
+    // Hoisting also states the precedence in the control flow: a server that
+    // cannot verify any token has no business judging this one.
+    //
+    // This catch is safe to keep this narrow ONLY because that constructor has
+    // exactly two throw sites and no other statement in it can fail. The same
+    // caveat now extends one frame further: `validateToken`/`verify` throw
+    // deliberate caller-facing messages that the 401 below echoes on purpose,
+    // so a NON-caller throw added to either re-opens this exact defect on the
+    // 401 path, one frame down. (`createHmac` in `verify` is already such a
+    // site in principle — accepted, because it leaks no configuration and has
+    // no realistic trigger. See issue #91.) If either changes, this guard must
+    // be re-thought, not merely re-pointed.
+    let service;
+    try {
+      service = getEnrollmentService();
+    } catch {
+      // 503 + SERVER_MISCONFIGURED matches src/proxy.ts's existing precedent
+      // for a missing required secret, and docs/api.md already lists 503 as
+      // "misconfigured / draining". Two deliberate divergences from that
+      // precedent, both inherited from the enroll route: the message is fixed
+      // rather than naming the env var (the caller cannot act on it either
+      // way, and the catch binds no error variable, so leaking it is
+      // impossible by construction rather than by remembering to redact), and
+      // the guard is UNCONDITIONAL rather than production-only — nothing
+      // validates this secret at startup and a server without it cannot
+      // register anyone in any environment.
+      //
+      // Deliberately INSIDE the withIdempotency callback, which is where this
+      // differs from enroll. Placing it here keeps both `400 BODY_INVALID`
+      // pre-validations above (the JSON parse and the manifest.aid check)
+      // ahead of it, so a misconfigured server never masks a genuinely
+      // malformed request — the precedence enroll pins in its own tests. The
+      // route's later 400s (MANIFEST_EXPIRED, the namespace check) sit behind
+      // this guard, as they sat behind the throw before it existed. Hoisting
+      // out of the callback would invert that ordering, and moving the
+      // pre-validation out with it would stop persisting `400 BODY_INVALID`
+      // against an idempotency key, since 400 *is* cacheable. A 503 is not
+      // (see CACHEABLE_STATUSES in src/lib/idempotency.ts), so a transient
+      // misconfiguration cannot be pinned to a key for its TTL.
+      return {
+        status: 503,
+        body: {
+          error: 'agent registration is temporarily unavailable on this server',
+          code: 'SERVER_MISCONFIGURED',
+        },
+      };
+    }
+
     let tokenPayload;
     try {
-      tokenPayload = getEnrollmentService().validateToken(token, manifest.aid);
+      tokenPayload = service.validateToken(token, manifest.aid);
     } catch (err) {
+      // `err.message` is echoed on purpose: every message reachable here is
+      // deliberate caller-facing text about a credential the caller supplied
+      // and can fix (wrong scope, expired, sub/aid mismatch, missing jti,
+      // malformed, bad signature, unparseable payload). Redacting them would
+      // remove the caller's only signal about why their token failed, to solve
+      // a leak that — since the hoist above — no longer reaches this path.
       return {
         status: 401,
         body: {
