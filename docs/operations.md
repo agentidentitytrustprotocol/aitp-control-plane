@@ -296,6 +296,54 @@ It builds the image for one platform, then asserts against the built artifact:
   one fails the check rather than silently under-reporting. **Redirects are out of scope and
   not by omission**: a redirect returns a 3xx and the client issues a *fresh* request, which
   the gate then sees. A rewrite is server-internal and does not.
+- **The middleware manifest is empty, so the pinned matcher set is what the gate uses** —
+  `middlewareManifest` in `scripts/image-artifact-baseline.json`, the whole of the image's
+  `.next/server/middleware-manifest.json`. **Pinned because of precedence, not because it says
+  anything**, and that is the whole point of it.
+
+  The router reads **two** middleware manifests and prefers the one the matcher pin does *not*
+  come from (`router-utils/filesystem.js:278-288`):
+
+  ```js
+  if (middlewareManifest.middleware?.['/']?.matchers) { /* use those */ }
+  else if (functionsConfigManifest?.functions['/_middleware']) { /* use these */ }
+  ```
+
+  `middleware-manifest.json` **wins when populated**; the `functions-config-manifest.json` that
+  `middlewareMatchers` is read from is the **fallback**. So the matcher pin — the answer to four
+  separate defeats of that check — decides the gate's coverage only *while this other manifest is
+  empty*, and nothing asserted that until check 26. An image populating `middleware['/'].matchers`
+  moves the coverage decision into a file the harness did not read, while the matcher check goes on
+  pinning the now-unused one; a narrowing surgical enough to keep the live gate probes answering
+  (they cover `/api/audit`, `/api/webhooks`, `/api/health` and `POST /api/trust-anchors`, not the
+  rest of the tree) leaves the gate checks, the matcher pin and the compiled-gate pin all green
+  with the remaining routes served with no auth, no rate limiting and no CORS. That is the same
+  "a sampled probe set is satisfiable by a narrowed matcher" failure mode that made the matcher a
+  **pin** rather than a satisfaction test, arriving through a door the pin does not cover (#104).
+
+  The check has two halves. **The precondition** requires `middleware` and `functions` to each be
+  an **empty map** and **fails naming the observed value** rather than skipping — the disposition
+  the `basePath`/`i18n` preconditions above use, for the same reason. Emptiness is tested as **no
+  keys**, never as "`matchers` is an empty array", and that is measured: the branch above is a
+  plain truthiness test and `getMiddlewareRouteMatcher([])` matches **nothing**, so `matchers: []`
+  takes the first branch and attaches the gate to no path at all; and a `middleware['/']` carrying
+  no `matchers` still changes which *code* runs, because `next-server.js` then stops calling
+  `loadNodeMiddleware()` and dispatches through the edge sandbox instead. **The equality** asserts
+  the whole manifest against the pin, so a Next release reshaping this file — the event most likely
+  to move the precedence rule itself — arrives as a review rather than silently.
+
+  **Pinned whole rather than narrowed to the `middleware` key**, because the same file's
+  `functions` map is a second surface: `Object.keys` of it is `getEdgeFunctionsPages()`, and
+  `runApi` hands a matching `/api` route to the **edge sandbox** loading the `files` *that manifest
+  names* — a file no chunk loads is outside `bootGraph` by construction, so the compiled-gate pin
+  cannot see it. (Not to be confused with `functions-config-manifest.json`'s own `functions` key,
+  which holds all thirty built routes. Two different files.)
+
+  **There is no re-pin for the precondition and no consent flag anywhere on it**, including on
+  `--update-baseline`, which refuses a populated manifest outright. That is not caution: if Next
+  ever populates this file legitimately, then the matcher check is pinning a manifest the router no
+  longer consults, and *that* is what has to move. Recording the populated manifest would pin the
+  moved decision as expected and leave the matcher pin asserting a file that decides nothing.
 
 It then stands up the **live** half and runs the image for real:
 
@@ -382,10 +430,15 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   is a *security* review rather than housekeeping: a Next bump that moves this line
   fails the check by design, and the failure text names the re-pin command.
 
-  (Read from `functions-config-manifest.json`, not `middleware-manifest.json` — the
-  latter is `{"middleware":{},"sortedMiddleware":[]}` in this image *and* in one whose
-  gate is correctly attached, so a check against it would be green forever. The
-  former is load-bearing at runtime: delete it and the server refuses to boot.)
+  (Read from `functions-config-manifest.json`, not `middleware-manifest.json`, and the reason
+  is **precedence** — an earlier version of this paragraph had the inference backwards. It said
+  the latter is empty in this image *and* in one whose gate is correctly attached, "so a check
+  against it would be green forever". The emptiness is right; the conclusion was exactly wrong.
+  The router reads **both** and the *other* one **wins when populated**
+  (`router-utils/filesystem.js:278-288`), so this file decides the gate's coverage only
+  *because* `middleware-manifest.json` is empty and the fallback branch runs. That precondition
+  is now asserted — see the middleware-manifest pin above — rather than assumed. This file is
+  also load-bearing at runtime in its own right: delete it and the server refuses to boot.)
 
 - **The gate actually runs**, on a second gated route under a different top-level
   segment, on a public route that must still carry the injected `x-request-id`, and —
@@ -570,7 +623,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
 
   | axis | result |
   |---|---|
-  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation. Measured for **all four halves** (region, `bootGraph`, `nextTreeSha`, `imageConfig`) and for the pinned rewrite table, whose compiled `regex` strings Next builds from the source at build time: a full `--platform linux/amd64` run passes 25/25 against a baseline generated from an arm64 image |
+  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation. Measured for **all four halves** (region, `bootGraph`, `nextTreeSha`, `imageConfig`) and for the pinned rewrite table, whose compiled `regex` strings Next builds from the source at build time: a full `--platform linux/amd64` run passes 25/25 against a baseline generated from an arm64 image. `middlewareManifest` was added later and carries no arch token and no content hash, so one pin serves both by construction; the `verify-image` job's amd64 leg is what confirms it on every PR |
   | build inside the Debian image (Node 24) vs a local macOS build (Node 26) | byte-identical — the pin can be regenerated and reviewed without Docker |
   | rebuild of unchanged source | byte-identical |
   | **adding a new `/api/*` route** | **byte-identical**, filename hash included |
@@ -786,7 +839,10 @@ Two properties make it worth more than a smoke test:
   pins `tracedExternals`, `nativeModules`, `middlewareMatchers`, `apiRoutes` with
   `apiRouteCount`, `rewrites` — the compiled rewrite table, taken from the image's
   `.next/routes-manifest.json` rather than from `next.config.ts`'s `rewrites()`, whose
-  output Next compiles — and the gate's load-path fields (`bootGraph`, `nextTreeSha`,
+  output Next compiles — `middlewareManifest`, the whole of the image's
+  `.next/server/middleware-manifest.json`, which is pinned because it takes runtime
+  **precedence** over the `functions-config-manifest.json` that `middlewareMatchers` comes
+  from — and the gate's load-path fields (`bootGraph`, `nextTreeSha`,
   `imageConfig`, `gateRegion`).
 - **The baseline is normalised, so one file serves both arches**: the arch token
   becomes `<ARCH>` and a trailing `-<semver>` before `.node` is dropped (which
@@ -815,7 +871,13 @@ against itself and report green. Three guards:
   digests without the gate region would leave the check with only its opaque half —
   and, for the same reason, if the **rewrite table could not be read** out of the
   image: writing the other fields and leaving `rewrites` out would commit an
-  unreadable table as an absent one, which is the conflation the check refuses.
+  unreadable table as an absent one, which is the conflation the check refuses. The
+  **middleware manifest** gets both of those rules: it refuses if the manifest could not be
+  read, and it refuses **outright, with no override flag**, if `middleware` or `functions` is
+  populated — because the check that would catch it runs *after* this branch returns, so
+  otherwise the blessing operation would record a moved gate-coverage decision, print it as an
+  ordinary field change and exit 0. If Next has populated that file legitimately, the remedy is
+  to move `middlewareMatchers`' pin, not to record the manifest.
 - It prints the **diff against the existing baseline** and refuses if any entry
   would *disappear*. Additions are the benign direction and are written; a
   removal means something that used to ship no longer does, which is the exact

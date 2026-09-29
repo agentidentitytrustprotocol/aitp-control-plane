@@ -223,6 +223,17 @@ jobs:
   # unauthenticated caller — `200 {"entries":[],"count":0}` where a 401 belongs.
   # That image builds green and docker-build-check would ship it.
   #
+  # It ALSO pins the manifest that OVERRIDES that matcher set at runtime. The router reads
+  # TWO middleware manifests and prefers `.next/server/middleware-manifest.json` over the
+  # `functions-config-manifest.json` the matcher pin comes from, so the pin is load-bearing
+  # only while the other file is empty — and nothing asserted that until #104. Measured on a
+  # thin-overlay image: one edit to that one file (`middleware: {"/": {"matchers": []}}`)
+  # left an anonymous GET /api/audit answering 200 with the admin audit log and no
+  # x-request-id while the matcher pin and the compiled-gate pin both stayed GREEN. So the
+  # manifest is now pinned whole AND a populated `middleware`/`functions` map fails with no
+  # re-pin available, because if Next ever populates it legitimately the fix is to move the
+  # matcher pin rather than record the file.
+  #
   # The gate's matcher set is PINNED against the committed baseline rather than
   # tested for what it satisfies, because three successive satisfaction-tests were
   # each defeated by a one-line matcher edit: '/api/audit' alone; then the three
