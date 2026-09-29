@@ -489,7 +489,26 @@ paths:
       security: []
       responses:
         "200": { description: Ready }
-        "503": { description: Not ready }
+        "503":
+          description: >-
+            Not ready, for one of two reasons: a `SIGTERM` has been received and
+            this instance is draining itself out of rotation
+            (`reason: shutting_down`), or the database ping failed (`error`
+            carries the exception message). Exactly one of those two fields is
+            present.
+
+
+            The body is **not** the shared `Error` shape and carries no `code` —
+            see `ReadinessFailure` for why.
+
+
+            Distinct from `/api/health`, which is liveness: it keeps answering
+            `200` right through a drain. An orchestrator should therefore take
+            this pod out of service on a `503` here and leave the process
+            running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadinessFailure" }
 
   /api/metrics:
     get:
@@ -571,6 +590,15 @@ paths:
             instead of a `400` that blames a manifest which was fine. The body
             is whatever the framework renders and is **not** the shared `Error`
             shape, which is why no schema is declared here.
+
+
+            This is now the **only** `4xx`/`5xx` response in this file with no
+            `content`, and that is the point: every other one declares a schema,
+            so an absence here means the body genuinely cannot be described, not
+            that nobody has written it down yet. Keep it that way — a new error
+            response gets a schema, or a description saying why it cannot have
+            one. (The invariant is about error responses; several `2xx`
+            responses in this file still declare no `content`.)
         "503":
           description: >-
             `code` is `SERVER_MISCONFIGURED`. The server cannot issue
@@ -753,9 +781,15 @@ paths:
         "400": { description: Body not JSON }
         "413":
           description: >-
-            PAYLOAD_TOO_LARGE — batch over 256 KiB on the wire, more than 500
-            events in one batch, or a single event payload over 64 KiB (the
-            offending eventType is included in the response body).
+            PAYLOAD_TOO_LARGE — batch over 256 KiB on the wire (checked both
+            against the declared `Content-Length` and against the bytes actually
+            streamed, since the header is spoofable and omittable), more than
+            500 events in one batch, or a single event payload over 64 KiB. The
+            batch is rejected whole in every case; only the last of those
+            carries `eventType`, naming the offending event.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayloadTooLargeError" }
 
   /api/events/history:
     get:
