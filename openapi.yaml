@@ -559,6 +559,22 @@ paths:
             malformed body.
         "401": { description: Bad token }
         "429": { description: Rate limited }
+        "503":
+          description: >-
+            `code` is `SERVER_MISCONFIGURED`. The server has no usable
+            `ENROLLMENT_SECRET` and cannot verify any enrollment token —
+            `POST /api/registry/enroll` reports the same fault for the same
+            reason. This is an operator fault, not a problem with the submitted
+            token or manifest, and the body carries no configuration detail.
+            Unlike a `400` or a `401`, it is safe to retry once the deployment
+            is fixed, and the token's `jti` is not consumed on this path — but
+            reusing the same token only works within its 5-minute lifetime and
+            only if the secret was restored rather than rotated; a new secret
+            invalidates tokens minted under the old one, so the retry would get
+            `401 TOKEN_INVALID` and the caller must re-enroll.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/agents/{aid}:
     parameters:
