@@ -35,7 +35,7 @@ spec rather than restate it.
 
   `POST /api/revocation/entries` was the one exception, returning `{ "error": ..., "code": "INSERT_FAILED" }` with a raw database message in `error`. That code is **gone**; a client that special-cased it can delete that branch. The input mistakes that used to surface that way are now `400 BODY_INVALID` instead (see [Revocation](#revocation)).
 
-  This rule is about `500` specifically, **not** about 5xx. A `503` does carry `{error, code}` — it is a deliberate, classified answer (`SERVER_MISCONFIGURED`, or a readiness drain), not an unhandled fault.
+  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
 
 ## Authentication
 
@@ -278,7 +278,7 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 
 Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits:
 
-- **`revokedAt` must fall within years 0001–9999.** Wider than that is not a `timestamp with time zone` this server can write. Note that the bound applies to the **UTC instant**, not the digits you sent: `0001-01-01T00:00:00+01:00` is UTC year 0000 and is rejected.
+- **`revokedAt` must fall between `1970-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`.** The two ends have different reasons. Above the upper bound the value is not a `timestamp with time zone` this server can write at all. Below the epoch the value *can* be stored but cannot be republished faithfully — the signed list at `/.well-known/aitp-revocation-list` carries `revoked_at` as seconds since the epoch, which a revocation predating that epoch cannot express. The bound applies to the **UTC instant**, not the digits you sent: `1970-01-01T00:00:00+01:00` is `1969-12-31T23:00Z` and is rejected.
 - **`reason` must not contain a NUL (U+0000).** Other control characters — newline, tab — are fine; only U+0000 is unstorable. Send it as `\u0000` and you get a `400`; send a raw NUL byte and the body is not valid JSON, so you get a `400` from the parser instead.
 
 Both used to reach the database and come back as a `500` carrying the Postgres message verbatim. A genuine database fault is now a framework `500` with no `{error, code}` body at all, per [Conventions](#conventions) — never a coded body you can parse.

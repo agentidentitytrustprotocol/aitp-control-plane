@@ -18,36 +18,47 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * The instants `revoked_at` can actually hold, as millisecond bounds.
+ * The instants a revocation may be dated, as millisecond bounds.
  *
- * `revoked_at` is `timestamp with time zone` (drizzle/0000_init.sql:57) and what
- * this route sends it is `Date.prototype.toISOString()` output. Those two facts
- * together set the bound — NOT Postgres's own 4713 BC – 294276 AD span, which is
- * far wider. Outside years 0001-9999 `toISOString()` switches to the expanded-year
- * form (`+010000-01-01T00:00:00.000Z`, `-271821-04-20T00:00:00.000Z`) and Postgres
- * cannot parse that at all. Measured against a live server: years 0001 and 9999
- * are accepted at both extremes, one millisecond past either end is rejected —
- * `22009` for an expanded year, `22008` for year 0000 (Postgres has no year zero),
- * `22007` for a negative one.
+ * The UPPER bound is what the database can hold. `revoked_at` is
+ * `timestamp with time zone` (drizzle/0000_init.sql:57) and what this route sends
+ * it is `Date.prototype.toISOString()` output; past year 9999 that switches to the
+ * expanded-year form (`+010000-01-01T00:00:00.000Z`) which Postgres cannot parse
+ * at all. Measured against a live server: `9999-12-31T23:59:59.999Z` is accepted
+ * and one millisecond later is `22009`. Note this is far NARROWER than Postgres's
+ * own 294276 AD ceiling — the constraint is our serialization, not the column.
  *
- * `new Date(...)` accepts every one of those happily — its own range runs to
- * ±275760 — so the `Number.isNaN` check below does NOT subsume this one. Without
- * this bound a caller can make Postgres do the rejecting, and a Postgres parse
- * error names the column's type.
+ * The LOWER bound is what the PUBLISHED LIST can carry, which binds tighter than
+ * the column does. Postgres stores year 0001 happily, but the signed list at
+ * /.well-known/aitp-revocation-list publishes `revoked_at` as seconds since the
+ * Unix epoch (src/lib/revocation/producer.ts), and that producer re-parses the
+ * driver's TIMESTAMPTZ text with `new Date(...)`. That text is space-separated
+ * (`0001-01-01 00:00:00+00`), which V8 reads with its legacy two-digit-year rule:
+ * year 0001 comes back as **2001**, 0099 as 1999. A revocation accepted at year
+ * 0001 would therefore be SIGNED AND SERVED with a date ~2000 years wrong. The
+ * epoch floor puts us clear of that window by a wide margin rather than by the one
+ * year a "reject below 0100" bound would, and it is the right domain rule
+ * independently: a revocation cannot predate the epoch its own published
+ * representation counts from. (The producer's parse is fragile for any low-year
+ * row already stored and is tracked separately; this bound stops new ones.)
  *
- * The bound is checked against the UTC instant rather than the written year, which
- * is what we want: `0001-01-01T00:00:00+01:00` is UTC year 0000 and is correctly
- * rejected even though its text reads 0001.
+ * `new Date(...)` accepts everything outside both bounds happily — its own range
+ * runs to ±275760 — so the `Number.isNaN` check below does NOT subsume this one.
  *
- * This also covers the copy of this value that `ingestOneEvent` writes to
- * `audit_events.ts` further down — also a `timestamptz`, and with no guard of its
+ * Checked against the UTC instant rather than the written year, which is what we
+ * want: `9999-12-31T23:59:59.999-01:00` is UTC year 10000 and is correctly
+ * rejected even though its text reads 9999.
+ *
+ * The upper bound also covers the copy of this value that `ingestOneEvent` writes
+ * to `audit_events.ts` further down — also a `timestamptz`, with no guard of its
  * own.
  *
  * Computed from the boundary literals rather than written as numbers so constant
- * and comment cannot drift; entries.test.ts pins the numbers themselves.
+ * and comment cannot drift; entries.test.ts pins both bounds behaviourally, by
+ * asserting the millisecond either side of each.
  */
-const MIN_REVOKED_AT_MS = Date.parse('0001-01-01T00:00:00.000Z'); // -62135596800000
-const MAX_REVOKED_AT_MS = Date.parse('9999-12-31T23:59:59.999Z'); //  253402300799999
+const MIN_REVOKED_AT_MS = Date.parse('1970-01-01T00:00:00.000Z'); //               0
+const MAX_REVOKED_AT_MS = Date.parse('9999-12-31T23:59:59.999Z'); // 253402300799999
 
 interface RequestBody {
   jti?: unknown;
@@ -138,7 +149,8 @@ export async function POST(req: NextRequest) {
         return {
           status: 400,
           body: {
-            error: 'revokedAt must fall within years 0001-9999',
+            error:
+              'revokedAt must be between 1970-01-01T00:00:00.000Z and 9999-12-31T23:59:59.999Z',
             code: 'BODY_INVALID',
           },
         };

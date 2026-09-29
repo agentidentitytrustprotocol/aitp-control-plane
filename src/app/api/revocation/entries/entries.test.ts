@@ -1,15 +1,19 @@
 // Unit tests for POST /api/revocation/entries.
 //   • validation — non-JSON body, non-UUID jti (JTI_INVALID), non-string
 //     reason, reason > 500 chars, unparseable revokedAt
-//   • range      — revokedAt must land in years 0001-9999 (#98). Expanded-year
-//     and negative-year inputs are 400 BODY_INVALID, as are offsets that push a
-//     legal-looking year out of range; both exact boundaries are accepted.
+//   • range      — revokedAt must land in [1970-01-01Z, 9999-12-31T23:59:59.999Z]
+//     (#98). Each bound is probed from both sides one millisecond apart, so the
+//     module-private constants are pinned behaviourally. The upper bound is what
+//     timestamptz can hold; the lower one is what the SIGNED LIST can publish
+//     faithfully — see the mis-parse test at the end of that block.
 //   • charset    — reason may not contain U+0000, which neither `text` nor the
 //     `jsonb` event payload can store (#98); newlines and lone surrogates stay
 //     legal.
 //   • failure    — a database fault PROPAGATES (so the framework renders the
 //     500 and the Postgres message cannot reach the body) and is logged.
-//   • no leak    — no 4xx body carries Postgres vocabulary (#98 regression).
+//   • no leak    — a database error becomes a throw, never a response, asserted
+//     with an error carrying every Postgres tell at once (#98 regression); and
+//     our own rejection prose never quotes the schema.
 //   • success    — 201 with {jti, revokedAt, reason}, revokedAt normalized
 //     to ISO, producer cache invalidated, tct.revoked event ingested +
 //     published + webhooks dispatched
@@ -206,11 +210,13 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
   // expanded year (`+010000-…`) that Postgres cannot parse — so these all used
   // to pass validation and fail in the database, which answered 500 with the
   // Postgres message in the body.
-  it('rejects a revokedAt outside years 0001-9999 without touching the database', async () => {
+  it('rejects a revokedAt outside the accepted window without touching the database', async () => {
     const outOfRange = [
       '+010000-01-01T00:00:00Z',
       '-000001-01-01T00:00:00Z',
       '0000-01-01T00:00:00Z',
+      '0001-01-01T00:00:00.000Z', // storable, but the signed list would mis-publish it
+      '1969-12-31T23:59:59.999Z', // one ms before the epoch floor
       new Date(8640000000000000).toISOString(),
       new Date(-8640000000000000).toISOString(),
     ];
@@ -219,7 +225,7 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { code: string; error: string };
       expect(body.code).toBe('BODY_INVALID');
-      expect(body.error).toMatch(/years 0001-9999/);
+      expect(body.error).toMatch(/1970-01-01.*9999-12-31/);
     }
     // Never reached the insert: the point of the fix is that these are decided
     // from the request body, not by the database.
@@ -231,7 +237,7 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
   // of these.
   it('rejects a UTC instant out of range even when the written year looks legal', async () => {
     for (const revokedAt of [
-      '0001-01-01T00:00:00+01:00', // UTC year 0000
+      '1970-01-01T00:00:00+01:00', // UTC 1969-12-31T23:00Z — before the floor
       '9999-12-31T23:59:59.999-01:00', // UTC year 10000
     ]) {
       const res = await post({ jti: GOOD_JTI, revokedAt });
@@ -241,12 +247,33 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
     expect(insertedValues).toHaveLength(0);
   });
 
-  it('accepts both exact boundaries', async () => {
-    for (const revokedAt of ['0001-01-01T00:00:00.000Z', '9999-12-31T23:59:59.999Z']) {
+  // This is what pins the two bounds, and it does so BEHAVIOURALLY — the
+  // constants are module-private, so asserting `Date.parse(...)` against a
+  // literal would only test V8, not the route. Each bound is probed from both
+  // sides one millisecond apart, so moving, widening, narrowing or deleting
+  // either constant fails here. The exact epoch-millisecond values are 0 and
+  // 253402300799999.
+  it('accepts each exact bound and rejects the millisecond outside it', async () => {
+    const accepted = ['1970-01-01T00:00:00.000Z', '9999-12-31T23:59:59.999Z'];
+    for (const revokedAt of accepted) {
       const res = await post({ jti: GOOD_JTI, revokedAt });
       expect(res.status).toBe(201);
       expect(((await res.json()) as { revokedAt: string }).revokedAt).toBe(revokedAt);
     }
+    expect(insertedValues).toHaveLength(2);
+
+    // One millisecond outside each bound, derived from the bound itself rather
+    // than hand-written, so the two can never drift apart.
+    const justOutside = [
+      new Date(Date.parse(accepted[0]!) - 1).toISOString(),
+      new Date(Date.parse(accepted[1]!) + 1).toISOString(),
+    ];
+    for (const revokedAt of justOutside) {
+      const res = await post({ jti: GOOD_JTI, revokedAt });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
+    }
+    // Still 2 — nothing from the rejected pair reached the insert.
     expect(insertedValues).toHaveLength(2);
   });
 
@@ -260,14 +287,22 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
     );
   });
 
-  // LOAD-BEARING, not decoration. The route's guard is written as
-  // `!(ms >= MIN && ms <= MAX)` so that a NaN bound rejects everything rather
-  // than accepting everything; these two numbers are what a live Postgres was
-  // measured to accept at the extremes, and this is the only place they are
-  // written down as numbers. If someone "simplifies" the bound, this fails.
-  it('pins the measured Postgres boundary in milliseconds', () => {
-    expect(Date.parse('0001-01-01T00:00:00.000Z')).toBe(-62135596800000);
-    expect(Date.parse('9999-12-31T23:59:59.999Z')).toBe(253402300799999);
+  // The lower bound is NOT about what Postgres can store — it stores year 0001
+  // fine. It is about what the signed revocation list can faithfully publish:
+  // the producer re-parses the driver's space-separated TIMESTAMPTZ text with
+  // `new Date(...)`, and V8's legacy two-digit-year rule turns year 0001 into
+  // 2001. This asserts the mis-parse those years would suffer, so the reason for
+  // the floor is recorded as an executable fact rather than only as a comment.
+  it('documents why low years are excluded: the driver text mis-parses', () => {
+    expect(new Date('0001-01-01 00:00:00+00').getUTCFullYear()).toBe(2001);
+    expect(new Date('0099-01-01 00:00:00+00').getUTCFullYear()).toBe(1999);
+    // Everything at or above the floor round-trips correctly.
+    expect(new Date('1970-01-01 00:00:00+00').toISOString()).toBe(
+      '1970-01-01T00:00:00.000Z',
+    );
+    expect(new Date('9999-12-31 23:59:59.999+00').toISOString()).toBe(
+      '9999-12-31T23:59:59.999Z',
+    );
   });
 });
 
@@ -338,9 +373,7 @@ describe('POST /api/revocation/entries — database fault (#98)', () => {
 });
 
 describe('POST /api/revocation/entries — no internal detail in any body (#98)', () => {
-  // Stated as a property over Postgres VOCABULARY rather than against the one
-  // message this bug happened to leak, so it also catches a future rejection
-  // that starts echoing a different database error.
+  // Vocabulary a Postgres error message uses and ours must not.
   const PG_TELLS = [
     'relation ',
     'invalid input syntax',
@@ -351,12 +384,38 @@ describe('POST /api/revocation/entries — no internal detail in any body (#98)'
     'INSERT_FAILED',
   ];
 
-  it('never echoes Postgres vocabulary in a rejection body', async () => {
+  // THE regression test for #98, aimed at the path that actually leaked. The
+  // database error carries every tell at once, so if any future edit
+  // reintroduces a catch that answers instead of re-throwing — no matter which
+  // status or code it picks — this stops rejecting and fails. Asserting
+  // `rejects.toBe` is what makes it airtight: it proves no Response object was
+  // produced at all, which is a stronger claim than inspecting a body for
+  // substrings, and it cannot be satisfied by redacting the message.
+  it('turns a database error into a throw, never into a response', async () => {
+    const dbError = new Error(
+      `relation "revocation_entries" does not exist / invalid input syntax for type ` +
+        `timestamp with time zone / invalid byte sequence for encoding "UTF8": 0x00`,
+    );
+    insertError = dbError;
+    // Sanity: the fixture really does carry the vocabulary we are guarding
+    // against, so this test cannot pass by using a bland error message.
+    for (const tell of PG_TELLS.filter((t) => t !== 'INSERT_FAILED')) {
+      expect(dbError.message).toContain(tell);
+    }
+    await expect(post({ jti: GOOD_JTI })).rejects.toBe(dbError);
+  });
+
+  // Weaker, complementary property: the messages we author ourselves must not
+  // quote database internals either. This one cannot catch an echo (every body
+  // below is built from literals in the route) — it catches a human writing
+  // "invalid input syntax for type timestamp with time zone" into a validation
+  // message, which is the other way schema detail reaches a client.
+  it('describes rejections in terms of the rule, not the schema', async () => {
     const rejections: unknown[] = [
       'not json',
       { jti: 'not-a-uuid' },
       { jti: GOOD_JTI, revokedAt: '+010000-01-01T00:00:00Z' },
-      { jti: GOOD_JTI, revokedAt: '-000001-01-01T00:00:00Z' },
+      { jti: GOOD_JTI, revokedAt: '0001-01-01T00:00:00.000Z' },
       { jti: GOOD_JTI, revokedAt: 'yesterday-ish' },
       { jti: GOOD_JTI, reason: `a${NUL}b` },
       { jti: GOOD_JTI, reason: 'x'.repeat(501) },
