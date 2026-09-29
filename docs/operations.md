@@ -165,6 +165,137 @@ It builds the image for one platform, then asserts against the built artifact:
   `scripts/image-artifact-baseline.json`, plus the assertion that the `aitp`
   binary carries the `linux-<arch>-gnu` token the requested platform asked for.
   That last one catches an amd64 image shipping an arm64 binary, or none.
+- **The compiled rewrite table is exactly the pinned one** — `rewrites` in
+  `scripts/image-artifact-baseline.json`, read out of the image's own
+  `.next/routes-manifest.json` (the file the standalone server actually routes with, never
+  `next.config.ts`) and compared **whole**: all three rewrite phases, every key the
+  manifest carried, and the entry **order**, which is pinned and deliberately *not* sorted,
+  because within a phase the first match wins and a reordering therefore changes which
+  handler a request reaches.
+
+  **Why a rewrite is a gate question at all.** Next middleware matches the **incoming
+  request path** — a rewrite's *source* — and never a rewrite *destination*. The gate is
+  attached with `matcher: ['/api/:path*']`, and `src/proxy.ts` reads
+  `request.nextUrl.pathname`, which is still the source, so even a widened matcher would
+  early-return. A rewrite whose source falls outside `/api/*` therefore delivers a request
+  to its destination handler **with the gate never having run**: no auth, no rate limiting,
+  no CORS, no `x-request-id`. That is measured on the shipped image rather than argued — the
+  existing `/.well-known/aitp-manifest` rewrite reaches its handler exactly that way, and is
+  harmless only because its destination is in `PUBLIC_PATHS`. A rewrite added later at a
+  *gated* destination (`{source: '/admin/audit', destination: '/api/audit'}`) would serve the
+  admin audit log to an anonymous caller, and nothing else on this page would notice: the
+  matcher pin, `apiRoutes` and `apiRouteCount` all come from
+  `functions-config-manifest.json`, which a rewrite does not move, and `verify:gate` probes
+  `/api/*` paths directly and never a rewritten one. All three phases are pinned, not just
+  the one today's two rewrites land in, because the middleware runs **once, before every one
+  of them**.
+
+  Like the compiled-gate pin below, the table is read by `docker cp` out of a container that
+  is never started, so nothing in the image participates in reporting its own routing. An
+  **absent** `rewrites` in the baseline is a failure naming the re-pin command rather than a
+  skip — reading it as "expected no rewrites" would pass against an image carrying a
+  bypassing one — while an **empty** array is a legitimate pin, and the two are
+  distinguished. On the image side the same distinction runs the other way: a
+  `routes-manifest.json` that parses but carries no `rewrites` key at all fails, rather than
+  reading as a table with nothing in it, and a shape this harness does not model (a fourth
+  phase, a non-array phase) fails closed rather than being coerced.
+- **No rewrite reaches a path the gate protects.** Pinning the table makes a new rewrite a
+  reviewable diff; it does not make a dangerous one fail, because `--update-baseline` prints
+  an **addition** and writes it with exit 0. This is the floor that refuses one, and it is
+  evaluated against the **pinned** matcher on the host — over both the image's table and the
+  committed one, so blessing a bad rewrite into the baseline cannot hide it behind a green
+  equality.
+
+  A rewrite is permitted only if one of three things is true: it leaves this app entirely (an
+  absolute `http(s)://` destination); its destination is **one literal path** that the gate's
+  matcher does not cover under any normalised form; or its destination is one of the gate's
+  own `PUBLIC_PATHS`. Everything else is refused.
+
+  **Why the clearance is "a public path" and not "the matcher doesn't cover the
+  destination".** Measured on a clean tree: the matcher covers **both** of today's rewrite
+  destinations and **neither** source. So the intuitive rule — refuse any rewrite whose
+  destination is covered and whose source is not — is red before anyone does anything wrong.
+  What makes today's two rewrites harmless is not the matcher; it is that both destinations
+  are in `PUBLIC_PATHS`, so the gate would have served an anonymous request to them anyway.
+  Bypassing a gate to reach a route the gate does not protect removes no **authentication**.
+  That is the property the rule encodes.
+
+  **The residual this clearance accepts**, stated because "removes no protection" would be an
+  overclaim: the gate does more than authenticate. It applies rate limiting to public paths too,
+  exempting only `/api/health`, `/api/readyz` and `/api/metrics`, and it is what attaches
+  `x-request-id` and CORS. So a cleared rewrite to one of the other four — `/api/registry/enroll`,
+  `/api/registry/agents`, or either `/api/well-known/*` — really does lose rate limiting and
+  request-id observability, and for `/api/registry/enroll` that includes the bucket dedicated to
+  token brute force. Intersecting the clearance with the rate-limit exempt set would refuse both
+  rewrites that exist today, which the protocol requires at those exact `/.well-known/*` paths, so
+  the residual is documented rather than closed. Weigh it before adding a clearance entry.
+
+  **Why a template destination is refused outright.** A rewrite destination is a *template*,
+  not a path: Next interpolates the source's captures into it — and a `has` condition whose
+  value is a named capture group is interpolated too, so a **request header can supply the
+  destination path**. `{source: '/admin/:rest*', destination: '/:rest*'}` — the shape in
+  Next's own rewrite docs — has a destination the matcher does not cover, yet
+  `GET /admin/api/audit` lands on `/api/audit` with the gate never having run. Anything whose
+  destination cannot be reduced to one known path is therefore refused rather than analysed.
+  That is deliberately stricter than the security property, and the direction is fail-closed.
+
+  **"One literal path" is decided against the path Next will actually route, not the manifest's
+  bytes** — and that distinction was a *measured* bypass, not a theoretical one. Next resolves a
+  destination through `parseRelativeUrl`, i.e. `new URL(...)`, and WHATWG URL parsing **deletes**
+  ASCII tab, LF and CR from anywhere in its input. So `/api<TAB>/audit` tested as one literal path
+  *outside* the gated surface and was permitted, while the path Next routed was `/api/audit`:
+  on a real image, anonymous `GET /admin/audit` returned **200 with the admin audit log**, no
+  `x-request-id` and no CORS. The same deletion collapses `..<TAB>` to `..` and so also defeated
+  the dot-segment test, and `next build` accepts all three characters, so this was reachable from
+  source rather than only by tampering. Two things close it: a control character or DEL anywhere
+  in a destination is refused outright, and the variant set includes
+  `new URL(destination, …).pathname` — the path the URL-parsing stage produces.
+
+  **And a seventh construction defeated *that*, which is why the rule now names Next's own
+  substitutions.** `parseDestination` does three things in order: escape the known parameters,
+  `parseUrl`, then **`unescapeSegments`** — `str.replace(/__ESC_COLON_/gi, ':')`, applied to the
+  parsed pathname on every request, unconditionally and case-insensitively. So
+  `/__ESC_COLON_a/__ESC_COLON_b` **is** `/:a/:b` to the router, while the stored string holds no
+  template character, no control character, no `//` and no dot segment — it took the "one literal
+  path outside the gated surface" exit, and `new URL(…).pathname` is the *identity* on it. Measured:
+  `next build` accepts it, and anonymous `GET /x/api/audit` returned 200 with the admin audit log
+  and no `x-request-id`. The weaponised form needs no parameter in the source at all —
+  `{source: '/x', destination: '/__ESC_COLON_p', has: [{type: 'header', key: 'x-p', value: '(?<p>.*)'}]}`
+  lets a **request header** name any gated route, measured as anonymous 200s on both `/api/audit`
+  and `/api/webhooks`.
+
+  The check now applies Next's destination substitutions — `__ESC_COLON_` → `:` and the
+  interception-route separator `)_NEXTSEP_` → `)` — to a fixpoint, and requires **every** resulting
+  form to be a literal path and to be uncovered. State the claim at its real size: this is a
+  **blocklist of the substitutions Next 16.3.3 performs**, not a proof. It is defensible only
+  because a Next bump cannot add a third one silently — check 13 pins `nextTreeSha` over the whole
+  framework tree, so a new sentinel arrives as a failed digest and a review, which is where the
+  decision about it belongs. An earlier version of this document claimed testing
+  `new URL(…).pathname` made "the oracle the same function Next uses" and so covered the whole
+  class; that was false, and `__ESC_COLON_` — which lives in the third stage, not the second — is
+  exactly the unpredicted normalisation it claimed was covered.
+
+  **`PUBLIC_GET_PATTERNS` is not part of the clearance**, only the unconditional
+  `PUBLIC_PATHS`. A rewrite bypasses the gate for *every* method, so a destination that is
+  public only for `GET` is not safe to reach without the gate — a rewrite to
+  `/api/registry/agents/[aid]` would expose `DELETE`, which `verify:gate` has a dedicated
+  check to prevent.
+
+  **There is no "the source is gated too" exemption**, and that is measured rather than
+  cautious. It would have to reason that a source beginning with a literal `/api/` can only
+  match gated requests — but Next compiles rewrite sources with `sensitive: caseSensitive`,
+  and this manifest reports `caseSensitive: false`, so a source of `/api/old` also matches
+  `/API/old`, which the case-**sensitive** matcher does not cover. The cost is a false refusal
+  for a future `/api/old → /api/new` rewrite; the remedy is to widen the gate's matcher in
+  `src/proxy.ts` so the source really is covered, not to widen this check.
+
+  Two preconditions are asserted rather than assumed, because every comparison here comes down
+  to a destination string against a `^/api` anchor: a non-empty **`basePath`** (destinations
+  would carry the prefix and a gated one would test as outside the gated surface) and any
+  **`i18n`** config (locale prefixes create variants the matcher does not describe). Either
+  one fails the check rather than silently under-reporting. **Redirects are out of scope and
+  not by omission**: a redirect returns a 3xx and the client issues a *fresh* request, which
+  the gate then sees. A rewrite is server-internal and does not.
 
 It then stands up the **live** half and runs the image for real:
 
@@ -273,7 +404,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   it.
 
   (Every "13/13 green" and "all 13 checks" below is a record of a defeat measured against
-  the harness **as it stood at the time**, when it had 13 checks. It has 23 now. The counts
+  the harness **as it stood at the time**, when it had 13 checks. It has 25 now. The counts
   are kept verbatim because the count is part of the evidence, not a description of today.)
 
   The version of this check that shipped through eight review rounds probed the gate's
@@ -439,7 +570,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
 
   | axis | result |
   |---|---|
-  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation. Measured for **all four halves** (region, `bootGraph`, `nextTreeSha`, `imageConfig`): a full `--platform linux/amd64` run passes 23/23 against a baseline generated from an arm64 image |
+  | `linux/amd64` vs `linux/arm64` | byte-identical — one pin serves both arches with no normalisation. Measured for **all four halves** (region, `bootGraph`, `nextTreeSha`, `imageConfig`) and for the pinned rewrite table, whose compiled `regex` strings Next builds from the source at build time: a full `--platform linux/amd64` run passes 25/25 against a baseline generated from an arm64 image |
   | build inside the Debian image (Node 24) vs a local macOS build (Node 26) | byte-identical — the pin can be regenerated and reviewed without Docker |
   | rebuild of unchanged source | byte-identical |
   | **adding a new `/api/*` route** | **byte-identical**, filename hash included |
@@ -650,8 +781,13 @@ Two properties make it worth more than a smoke test:
   (`scripts/image-artifact-baseline.json`), not a value re-derived from
   `next.config.ts`. Without it these probes catch only a *crash*; with it they
   also catch **drift** — a new traced external appearing, `sharp`'s binary
-  vanishing, or a package quietly dropping out of the traced set. Drift is the
-  failure mode that ships quietly.
+  vanishing, a package quietly dropping out of the traced set, or a rewrite appearing
+  that routes around the gate. Drift is the failure mode that ships quietly. The file
+  pins `tracedExternals`, `nativeModules`, `middlewareMatchers`, `apiRoutes` with
+  `apiRouteCount`, `rewrites` — the compiled rewrite table, taken from the image's
+  `.next/routes-manifest.json` rather than from `next.config.ts`'s `rewrites()`, whose
+  output Next compiles — and the gate's load-path fields (`bootGraph`, `nextTreeSha`,
+  `imageConfig`, `gateRegion`).
 - **The baseline is normalised, so one file serves both arches**: the arch token
   becomes `<ARCH>` and a trailing `-<semver>` before `.node` is dropped (which
   absorbs a `sharp` bump). A genuinely new or missing binary still fails, and
@@ -676,12 +812,40 @@ against itself and report green. Three guards:
 - It **refuses outright** if any structural check (1–4) failed, so a dangling
   symlink or a wrong-architecture binary can never be recorded as normal. It also
   refuses if the compiled gate could not be *located*, since pinning the graph
-  digests without the gate region would leave the check with only its opaque half.
+  digests without the gate region would leave the check with only its opaque half —
+  and, for the same reason, if the **rewrite table could not be read** out of the
+  image: writing the other fields and leaving `rewrites` out would commit an
+  unreadable table as an absent one, which is the conflation the check refuses.
 - It prints the **diff against the existing baseline** and refuses if any entry
   would *disappear*. Additions are the benign direction and are written; a
   removal means something that used to ship no longer does, which is the exact
   regression the baseline exists to catch. If the removal really is intended,
   re-run with `--allow-removals`.
+
+  That gate covers `rewrites` as well: a rewrite that **vanished** from the table is a
+  removal and needs the flag, and because entry order is meaning here, a reorder is
+  printed as a reorder rather than as "unchanged". An **added** rewrite is printed and
+  written — and for this one field addition is the *dangerous* direction, since a new
+  rewrite whose source the gate does not cover is exactly the bypass described above.
+  That direction is deliberately answered by a **policy floor over the table's contents**
+  rather than by a fourth consent flag — the check above that refuses a rewrite reaching a
+  gated path. That floor is applied **at write time as well**, and there is no flag to
+  override it: pointing `--update-baseline` at an image whose table reaches a gated path
+  refuses, writes nothing and exits 1, naming the offending entries. Without that, blessing
+  a bypass printed it as an ordinary addition and **reported success** — the next plain run
+  did fail, so it was never a shipping fail-open, but a consent gate that says "written" over
+  a gate bypass teaches exactly the reflex this flag cannot survive. The floor also evaluates
+  the committed table on every later run, so a bypassing entry fails whether it is in the
+  image, in the pin, or in both. Permitted entries are still printed in full, one line each,
+  because a permitted rewrite is a routing change a human should read.
+
+  This write-time refusal is deliberately **not** extended to the other pinned fields.
+  Checks 5, 6 and 24 are *equalities*, and a legitimate drift is precisely when you
+  regenerate — gating the write on them would make the flag useless. This one is a *policy*:
+  there is no legitimate reason to pin a rewrite that reaches a gated path, and the remedy is
+  to make the gate cover the source, not to record the bypass. It is evaluated against the
+  matcher **from the same image**, not the committed one, because the question at write time is
+  whether the table about to be pinned is safe with respect to the matcher pinned beside it.
 - It prints the diff of **the whole gate load-path pin** — the located diff of the
   compiled gate region, plus any changed `bootGraph` file, `nextTreeSha` or `imageConfig`
   — and refuses to re-pin any of it without `--allow-gate-change`. The removal gate above
@@ -700,6 +864,14 @@ against itself and report green. Three guards:
   equality whatever the route list says. `apiRoutes` and `apiRouteCount` remain as
   **change detection** for the route surface — a route appearing, vanishing or being
   renamed is a review point — and consent has moved to where protection now lives.
+
+  **`--allow-gate-change` deliberately does not cover `rewrites`**, which is the obvious
+  question to ask of it. The flag guards *compiled code*, where every change is a security
+  event and the dangerous direction is change itself. A rewrite table is an **inventory of
+  routing entries** — the same category as `apiRoutes` — so it gets the removal gate above,
+  and the addition direction gets a rule over the table's contents instead. The reasoning is
+  the flag's own discipline: a consent demanded for every routine routing change stops being
+  read, and a consent that has become a reflex protects nothing.
 
 Other flags: `--no-build` reuses an existing local tag (and fails fast if its
 architecture does not match `--platform`), `--tag` names the image, `--keep`
@@ -792,7 +964,7 @@ Two things to know about what it leaves behind:
 
 - **Anonymous volumes: the harness leaves none, but a local `docker build` may.**
   Measured, because the distinction is easy to get wrong when auditing a dev
-  machine: a full 23-check run with `--no-build` moves the host's
+  machine: a full 25-check run with `--no-build` moves the host's
   `docker volume ls` count by **zero**. Every container is removed with
   `docker rm -f -v`, and `PGDATA` is a `--tmpfs` so postgres's declared
   `VOLUME /var/lib/postgresql/data` never materialises one in the first place;

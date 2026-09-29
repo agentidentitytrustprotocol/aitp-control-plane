@@ -96,7 +96,7 @@
  *     `Set.prototype.has` shim in it served four un-probed routes anonymously with all 13
  *     checks the harness then had passing. (Every "13/13" and "n of 13" in this file is a
  *     record of a defeat measured against the harness AS IT STOOD AT THE TIME, not against
- *     today's 23 checks. They are kept verbatim because the count is part of the evidence.)
+ *     today's 25 checks. They are kept verbatim because the count is part of the evidence.)
  *     Complete over the COMPILED CHUNK GRAPH the gate's loaders reach, including
  *     bytes outside the gate function (deny(), applyCors(), the config parser). It is NOT
  *     complete over everything that executes — see WHAT IS OUT OF SCOPE.
@@ -222,6 +222,24 @@
  * strings that mean the OTel tree failed to load, and confirms the process did not
  * crash after boot. It does NOT prove a span reached a collector — stated in the
  * harness's own output so no reader over-claims.
+ *
+ *   THE COMPILED REWRITE TABLE (check 24). A SECOND PINNED SURFACE, and it exists
+ * because every check above can be green while a routing entry hands a request to a
+ * gated handler without the gate. Next middleware matches the INCOMING REQUEST PATH,
+ * never a `rewrites()` destination (`src/proxy.ts:257-259` attaches the gate with
+ * `matcher: ['/api/:path*']`, and `:179` reads `request.nextUrl.pathname`, which is
+ * still the source), so a rewrite whose SOURCE the matcher does not cover reaches its
+ * destination with no auth, no rate limiting, no CORS and no `x-request-id`. Measured
+ * on the shipped image, not argued. `{source:'/admin/audit', destination:'/api/audit'}`
+ * would therefore serve the admin audit log anonymously while check 11 stayed green —
+ * it pins `middlewareMatchers`/`apiRoutes`/`apiRouteCount` out of
+ * `functions-config-manifest.json`, and a rewrite moves none of the three. So the
+ * table Next compiles into `.next/routes-manifest.json` — the file the standalone
+ * server actually routes with — is pinned as `rewrites` in the baseline and asserted
+ * WHOLE, across all three rewrite phases, with ENTRY ORDER included because within a
+ * phase the first match wins. Read like check 13's input: `docker create` plus
+ * `docker cp`, no code from the image. What it proves is CHANGE DETECTION — the shipped
+ * routing table is the reviewed one — and not that the reviewed one is safe.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -416,6 +434,12 @@ const PROBE_MS = 120_000;
  * replaced 360 HTTP requests, which cost seconds but needed their own deadline and
  * non-answer cap to stay bounded; the equality needs neither. A whole `--no-build` run
  * against a local image, substrate included, measures about 30 s.
+ *
+ * Check 24's extraction of the compiled rewrite table adds ONE more such cycle — one
+ * `docker create`, one `docker cp` of /app/.next/routes-manifest.json and one `docker rm`,
+ * each under DEFAULT_DOCKER_MS, again against a container that never boots. Bounded the
+ * same structural way, so it needs no PROBE_MS slot of its own and is not a meaningful
+ * line in the budget either.
  */
 const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 40 * 60_000;
 /**
@@ -466,6 +490,64 @@ const MIGRATE_MS = 180_000;
  */
 const GATE_CANONICAL_PATH = path.join(ROOT, 'scripts', 'image-gate-canonical.txt');
 /**
+ * The gate's UNCONDITIONALLY public paths, as `src/proxy.ts:10-18` declares them.
+ *
+ * ONE LITERAL, TWO JOBS, and that is the design rather than a convenience:
+ *
+ *   1. It builds `GATE_REGION_START_ANCHOR` below — `PUBLIC_PATHS` exactly as Turbopack
+ *      emits it — which is how check 13 locates the compiled gate.
+ *   2. It is check 25's CLEARANCE SET. A rewrite may target one of these paths even though
+ *      the gate's matcher covers it, because the gate would have served an anonymous request
+ *      to that exact path anyway — so reaching it without the gate removes no AUTHENTICATION.
+ *
+ * THE RESIDUAL THIS CLEARANCE ACCEPTS, stated because "removes no protection" would be an
+ * OVERCLAIM and this file's history is a record of checks that claimed more than they proved.
+ * The gate does more than authenticate. `src/proxy.ts:223` applies rate limiting to public
+ * paths too, exempting only `RATE_LIMIT_EXEMPT_PATHS` (`/api/health`, `/api/readyz`,
+ * `/api/metrics`), and it is what attaches `x-request-id` and CORS. So a rewrite cleared here
+ * to one of the OTHER four — `/api/registry/enroll`, `/api/registry/agents`, or either
+ * `/api/well-known/*` — really does lose rate limiting and request-id observability, and for
+ * `/api/registry/enroll` that includes the dedicated bucket `src/proxy.ts:146-160` names for
+ * token brute force.
+ *
+ * Accepted rather than closed, with the reasoning visible: intersecting this clearance with
+ * `RATE_LIMIT_EXEMPT_PATHS` would refuse BOTH rewrites that exist today, which are the
+ * `/.well-known/*` manifest and revocation-list routes the protocol requires to be reachable
+ * at those exact paths. The authentication bypass is the one this check exists to stop; the
+ * rate-limit residual is named here, in the failure text, and in `docs/operations.md` so that
+ * a future reader weighing a new clearance entry knows what it costs.
+ *
+ * WHY THIS IS NOT THE `publicApiRoutes` PIN THAT WAS DELETED AS ROT. That one was a SECOND,
+ * separately hand-maintained list of exempt routes, and its entries could drift out of
+ * agreement with the gate without anything noticing. This one cannot drift: it IS the
+ * anchor. If `PUBLIC_PATHS` changes in `src/proxy.ts` and this array does not, the anchor
+ * stops locating and CHECK 13 FAILS CLOSED. The set is therefore validated against the
+ * shipped artifact on every run, by a check that already existed — so giving check 25 its
+ * clearance from here adds no maintenance surface at all, and needs no "an unused entry is
+ * a failure" rule to stay honest.
+ *
+ * ORDER IS MEANING HERE, unusually for a list in this file: the anchor must reproduce
+ * Turbopack's emitted order, which follows the source order in `src/proxy.ts`. Reordering
+ * this array changes the anchor and fails check 13 — loudly, which is correct, but do not
+ * reorder it expecting a no-op.
+ *
+ * `PUBLIC_GET_PATTERNS` (`src/proxy.ts:26-29`) IS DELIBERATELY NOT HERE, and that omission
+ * is load-bearing. Those paths are public only for GET, and a rewrite bypasses the gate for
+ * EVERY METHOD — so exempting one would let a rewrite expose a mutating verb the gate
+ * refuses. `verify-request-gate.mjs` check 12 exists to keep DELETE on a discoverable agent
+ * gated; a rewrite to `/api/registry/agents/[aid]` would undo it, and check 25 refuses
+ * exactly that.
+ */
+const PUBLIC_PATHS_PINNED = [
+  '/api/health',
+  '/api/readyz',
+  '/api/well-known/aitp-manifest',
+  '/api/well-known/aitp-revocation-list',
+  '/api/registry/enroll',
+  '/api/registry/agents',
+  '/api/metrics',
+];
+/**
  * The anchor that locates the compiled gate inside the entry module.
  *
  * This is `PUBLIC_PATHS` from `src/proxy.ts:10-18` as Turbopack emits it. It is the
@@ -483,11 +565,14 @@ const GATE_CANONICAL_PATH = path.join(ROOT, 'scripts', 'image-gate-canonical.txt
  *     decoy copy to satisfy it still changed the chunk, so the digest half fails.
  * Because the anchor is itself inside the region, editing PUBLIC_PATHS breaks the
  * locate and fails the check rather than slipping past it.
+ *
+ * BUILT from PUBLIC_PATHS_PINNED rather than written out, so the public set has exactly one
+ * definition in this file. This reproduces the hand-written literal it replaced BYTE FOR
+ * BYTE — `JSON.stringify` emits double quotes, `join(',')` puts no spaces between them, and
+ * the whole is wrapped in `new Set([`…`])` — which was verified against the old string
+ * before the change, and is verified on every run by check 13 continuing to locate.
  */
-const GATE_REGION_START_ANCHOR =
-  'new Set(["/api/health","/api/readyz","/api/well-known/aitp-manifest",' +
-  '"/api/well-known/aitp-revocation-list","/api/registry/enroll","/api/registry/agents",' +
-  '"/api/metrics"])';
+const GATE_REGION_START_ANCHOR = `new Set([${PUBLIC_PATHS_PINNED.map((p) => JSON.stringify(p)).join(',')}])`;
 /**
  * Sanity bound on the extracted region, so a locate that goes wrong in a way nobody
  * predicted reports "the region came out implausible" instead of pinning 70 KB of
@@ -1467,9 +1552,26 @@ process.stdout.write(JSON.stringify({ error: error, files: files }));
  * app, so this borrows Next's own compiled semantics rather than reimplementing
  * path-to-regexp on the host and hoping the two agree.
  *
- * NOT `middleware-manifest.json`: it is `{"middleware":{},"sortedMiddleware":[]}`
- * in this image — and, verified, also in an image whose gate IS attached — so a
- * check written against it would be vacuously green forever.
+ * NOT `middleware-manifest.json`, and the reason is PRECEDENCE rather than the one
+ * this comment used to give. It said that file is `{"middleware":{},
+ * "sortedMiddleware":[]}` in this image — true, and verified also in an image whose
+ * gate IS attached — "so a check written against it would be vacuously green
+ * forever". The emptiness is right; the inference was backwards. The router reads
+ * BOTH, and the empty one wins when it is non-empty
+ * (`router-utils/filesystem.js:278-287`):
+ *
+ *     if (middlewareManifest.middleware?.['/']?.matchers) { ...use those... }
+ *     else if (functionsConfigManifest?.functions['/_middleware']) { ...use these... }
+ *
+ * So `functions-config-manifest.json` decides the gate's coverage only BECAUSE
+ * `middleware-manifest.json` is empty and the fallback branch runs. An image that
+ * POPULATED `middleware['/'].matchers` would move the decision into a file nothing
+ * here reads, while this check went on pinning the now-unused one. Not measured, and
+ * out of scope for the rewrite work that added checks 24/25 — a narrowed matcher is
+ * checks 8/10/12/13's surface, not a routing-table question — but it is a real gap
+ * and it is filed rather than left in a comment. The remedy is to pin
+ * `middleware-manifest.json` whole, or at minimum to assert it is still empty, which
+ * is what makes the fallback branch the one that runs.
  */
 const PROBE_MIDDLEWARE = `
 const P = '/app/.next/server/functions-config-manifest.json';
@@ -2398,6 +2500,628 @@ async function extractGatePin(tag, platform) {
       imageConfig,
     };
   });
+}
+
+// ── the compiled rewrite table (check 24) ───────────────────────────────────
+/**
+ * Where the compiled rewrite table lives inside the image.
+ *
+ * `.next/routes-manifest.json` is what the standalone server ACTUALLY routes with — it
+ * reads this file at runtime to build its route list — which is why the pin comes from
+ * here and not from `next.config.ts`. Rule 2 of the contract above: expectations come
+ * from a committed snapshot of the ARTIFACT, never re-derived from the thing under test.
+ * `rewrites()` in `next.config.ts` is an async function whose output Next compiles, so
+ * re-invoking or re-parsing it would assert only that the config says what the config
+ * says.
+ */
+const ROUTES_MANIFEST_PATH = '/app/.next/routes-manifest.json';
+/**
+ * The three rewrite phases Next emits, in the order its router evaluates them.
+ *
+ * ALL THREE ARE PINNED, not just the one today's rewrites land in, because the gate runs
+ * ONCE AND BEFORE EVERY ONE OF THEM. Next 16.3.3's router builds its route list as
+ * `middleware_next_data`, `headers`, `redirects`, MIDDLEWARE, `rewrites.beforeFiles`,
+ * `before_files_end`, `check_fs`, `rewrites.afterFiles`, `rewrites.fallback`
+ * (`node_modules/next/dist/server/lib/router-utils/resolve-routes.js`), and
+ * `verify-request-gate.mjs:550-551` says the same thing from the other side. (Beware a
+ * stale comment in Next's own source: `// check middleware (using matchers)` sits above
+ * the route named `before_files_end`, which is NOT a middleware invocation. Reading it as
+ * one would wrongly suggest `beforeFiles` destinations are gated.)
+ *
+ * A FOURTH phase key appearing is an unmodelled routing stage and fails closed — see
+ * `extractRewrites`.
+ */
+const REWRITE_PHASES = ['beforeFiles', 'afterFiles', 'fallback'];
+
+/**
+ * How a value that is not the shape this harness models reads in a failure message.
+ *
+ * Named rather than coerced: a shape this harness does not model is one it may not bless,
+ * and the operator needs to see WHAT it got before deciding whether Next changed its
+ * manifest or something changed the image.
+ */
+function describeShape(v) {
+  if (v === null) return 'null';
+  if (v === undefined) return 'absent';
+  if (Array.isArray(v)) return `an array of ${v.length}`;
+  if (typeof v !== 'object') return `a ${typeof v} (${JSON.stringify(v)})`;
+  return `an object with keys ${JSON.stringify(Object.keys(v))}`;
+}
+
+/**
+ * One rewrite entry, flattened into `{phase, ...allKeysSorted}`.
+ *
+ * TWO RULES, and the second is the one a reader will otherwise "fix":
+ *
+ *   EVERY KEY THE MANIFEST CARRIED IS PRESERVED, keys sorted so the committed file is
+ * byte-stable across runs and a JSON diff of it stays reviewable. Same discipline as
+ * `normaliseMatcher`: dropping an unknown key would rob the check of the thing it exists
+ * to catch. A rewrite can carry `has`, `missing`, `locale`, `internal`, `basePath` or
+ * `statusCode`, and a `has` condition whose `value` is a NAMED CAPTURE GROUP has that
+ * group interpolated INTO the destination — so a request header can supply the
+ * destination path. All of it must be visible in a diff.
+ *
+ *   ENTRY ORDER IS PINNED, NOT SORTED, and that is the DELIBERATE OPPOSITE of
+ * `imageConfig.Env`, which `readImageConfig` sorts. Env's order is not meaning, so a
+ * Dockerfile reordering its own ENV lines must not read as a security event; the same
+ * argument sorts `middlewareMatchers` and `apiRoutes`. A rewrite's order IS meaning:
+ * within a phase the FIRST MATCH WINS, so swapping two entries changes which handler a
+ * request reaches. This file therefore has a precedent both ways — do not "fix" this one
+ * to match them. A reordering is a routing change and must read as a diff.
+ *
+ * Nothing here is arch-normalised: Next compiles the `regex` from the source at build
+ * time, so linux/amd64 and linux/arm64 produce identical strings and ONE pin serves both
+ * — the same argument `normaliseMatcher` makes, and measured rather than assumed.
+ */
+function normaliseRewrite(phase, entry) {
+  // `Object.fromEntries`, not `out[k] = …`, for one reason: a manifest entry carrying a
+  // literal `__proto__` key. `JSON.parse` makes that an own DATA property, so it is a key
+  // the manifest genuinely carried and this function promises to preserve — but assigning
+  // it with `out[k] =` would set the output object's PROTOTYPE instead and drop the key,
+  // quietly making "every key is preserved" false for exactly the key name an attacker
+  // would pick. `fromEntries` defines own data properties, so the key survives into the
+  // pin and shows up in a diff. Not exploitable today (Next reads `route.source`/`route.has`
+  // directly, never through the prototype chain) but the claim above has to be true.
+  return Object.fromEntries([
+    ['phase', phase],
+    ...Object.keys(entry)
+      .sort()
+      .map((k) => [k, entry[k]]),
+  ]);
+}
+
+/**
+ * One rewrite entry as one CANONICAL line, WHOLE — never a projection.
+ *
+ * `JSON.stringify` of the entire entry, because a projection onto a couple of fields is
+ * exactly how the `--update-baseline` diff once printed "middlewareMatchers: unchanged"
+ * over a matcher carrying `missing: [{type:"header",key:"cookie"}]` (see
+ * ALLOWED_MATCHER_KEYS). An entry is small, so the whole of it fits on a line a human can
+ * read, and the diff, the removal gate and the check all key on the same bytes.
+ *
+ * IT RE-SORTS THE KEYS rather than trusting the caller's order, and that is what makes the
+ * comparison semantic instead of textual. The IMAGE side always arrives from
+ * `normaliseRewrite`, but the BASELINE side is whatever key order the committed file
+ * happens to hold — so without this, re-spelling the pin's JSON (same entries, same order,
+ * same values, keys written in a different order) would FAIL check 24 with a located diff
+ * and no hint that only the spelling moved. The pin's security content is which entries
+ * ship, in which order, with which values; it is not the byte order of object keys. Fails
+ * closed either way, but a check that reds on a cosmetic edit teaches people to re-pin
+ * without reading, which is the one habit this file cannot afford.
+ *
+ * The sort is RECURSIVE, which it was not at first. A `has`/`missing` condition is an array of
+ * objects, so sorting only the entry's own keys left `has:[{type,key}]` and `has:[{key,type}]`
+ * — the same condition to Next — producing different lines. That was fail-closed and therefore
+ * not a hole, but the failure it produced is exactly the read-nothing re-pin the paragraph above
+ * says this function exists to prevent, so the claim had to be made true rather than narrowed.
+ * ARRAY order is preserved, deliberately: `has` conditions are ANDed and so order-free, but a
+ * future keyed-by-position field would not be, and reordering an array is the kind of change
+ * this pin should show.
+ */
+function canonicaliseRewriteValue(v) {
+  if (Array.isArray(v)) return v.map(canonicaliseRewriteValue);
+  if (v === null || typeof v !== 'object') return v;
+  return Object.fromEntries(
+    Object.keys(v)
+      .sort()
+      .map((k) => [k, canonicaliseRewriteValue(v[k])]),
+  );
+}
+
+function rewriteLine(e) {
+  const keys = Object.keys(e).sort();
+  return JSON.stringify(
+    Object.fromEntries([
+      ...(Object.prototype.hasOwnProperty.call(e, 'phase')
+        ? [['phase', canonicaliseRewriteValue(e.phase)]]
+        : []),
+      ...keys
+        .filter((k) => k !== 'phase')
+        .map((k) => [k, canonicaliseRewriteValue(e[k])]),
+    ]),
+  );
+}
+
+/**
+ * Characters that mean a destination is a TEMPLATE rather than one known path.
+ *
+ * `:` and `*` are path-to-regexp parameters; `+` its one-or-more modifier; `(`/`)` a custom
+ * pattern; `{`/`}` an optional group; `%` a percent-escape that decodes to something else; `\`
+ * an escape; `?`/`#` a query or fragment (stripped before this test, so their presence here
+ * means something stranger); `[`/`]` Next's own bracket syntax. Any of them and the destination
+ * is not a single path.
+ *
+ * `+` is in the class even though it is not exploitable on its own — `/api+/audit` makes
+ * `prepareDestination` throw `Unexpected MODIFIER at 4`, which is a 500 and not a bypass. It is
+ * here because it is a MODIFIER: a fix for `__ESC_COLON_` (below) that neutralised the sentinel
+ * only at a segment start would leave `/__ESC_COLON_p+`, a repeating parameter, live.
+ *
+ * C0 CONTROLS AND DEL ARE REFUSED OUTRIGHT, and that is not tidiness — it closed a MEASURED
+ * BYPASS. WHATWG URL parsing DELETES ASCII tab (0x09), LF (0x0A) and CR (0x0D) from anywhere
+ * in its input, and Next routes a destination through `parseRelativeUrl`, which is
+ * `new URL(...)` over the destination string. So `/api\t/audit` is not the path Next routes —
+ * `/api/audit` is. Before this class was refused, that destination tested as "one literal path
+ * outside the gated surface" and was ALLOWED, while an anonymous request to its source returned
+ * 200 with the admin audit log and no x-request-id. The same deletion also defeated the `..`
+ * segment test, since `..\t` collapses to `..`. Verified introducible from source: `next build`
+ * accepts all three characters in a destination.
+ *
+ * No legitimate destination contains a control character, so this is the cheap fail-closed
+ * floor. It is NOT the whole fix — `rewriteDestinationVariants` additionally tests the path
+ * WHATWG URL parsing actually produces.
+ */
+const REWRITE_TEMPLATE_CHARS = /[:*+(){}%\\?#[\]]/;
+
+/**
+ * The substitutions Next performs on a rewrite DESTINATION at request time, as of the pinned
+ * version — each one a way for a string carrying none of the characters above to become a
+ * template anyway.
+ *
+ * THIS LIST EXISTS BECAUSE A SEVENTH CONSTRUCTION DEFEATED THIS CHECK, measured end to end.
+ * `parseDestination` (`prepare-destination.js:140-181`) escapes each known parameter as
+ * `__ESC_COLON_<name>` so URL parsing cannot eat the colon, parses with `parseUrl` (which for a
+ * path destination delegates to `parseRelativeUrl`, i.e. `new URL(url, DUMMY_BASE)` —
+ * `parse-url.js:13-17`; the two names elsewhere in this file mean the same stage), and then runs
+ * `unescapeSegments` — `str.replace(/__ESC_COLON_/gi, ':')`, `prepare-destination.js:54` — over
+ * the parsed pathname UNCONDITIONALLY and CASE-INSENSITIVELY, whether anything was escaped or
+ * not. So `/__ESC_COLON_a/__ESC_COLON_b` IS `/:a/:b` to the router, while the stored manifest
+ * string holds no template character, no control character, no `//` and no dot segment. It took
+ * the "one literal path outside the gated surface" exit, and `new URL(...).pathname` — the fix
+ * for the sixth construction — is the identity on it and revealed nothing. Measured: `next
+ * build`'s own `loadCustomRoutes` accepts it, and on a real image anonymous `GET /x/api/audit`
+ * returned 200 with the admin audit log and no x-request-id. The weaponised form needs no
+ * parameter in the source at all — `{source:'/x', destination:'/__ESC_COLON_p',
+ * has:[{type:'header',key:'x-p',value:'(?<p>.*)'}]}` lets a REQUEST HEADER name any gated route,
+ * measured as anonymous 200s on both `/api/audit` and `/api/webhooks`.
+ *
+ * WHAT THIS IS AND IS NOT. It is a blocklist of known sentinels, not a proof, and saying so is
+ * the point: the honest claim is "the destination substitutions Next 16.3.3 performs", which are
+ * exactly these two. A blocklist is defensible here only because a Next bump cannot introduce a
+ * third one silently — check 13 pins `nextTreeSha` over the whole framework tree, so a new
+ * sentinel arrives as a failed digest and a review, which is where a decision about it belongs.
+ *
+ * The second entry is the interception-route separator (`route-pattern-normalizer.ts`).
+ * `stripNormalizedSeparators` only ever removes the separator that FOLLOWS a `)`, and `)` is
+ * already refused above, so it cannot inject anything by itself — measured:
+ * `hasAdjacentParameterIssues('/_NEXTSEP_api/audit')` is false and `prepareDestination` returns
+ * that string unchanged. It is listed anyway because the substitutions are applied to a fixpoint
+ * below, and a stripped `)` can splice text together: `/__ESC_)_NEXTSEP_COLON_p` becomes
+ * `/__ESC_COLON_p` becomes `/:p`.
+ */
+const NEXT_DESTINATION_SUBSTITUTIONS = [
+  [/__ESC_COLON_/gi, ':'],
+  [/\)_NEXTSEP_/g, ')'],
+];
+
+/**
+ * Every form of a destination that Next's request-time substitutions can produce, including the
+ * one handed in.
+ *
+ * Applied to a FIXPOINT rather than once, because one substitution can expose another (see the
+ * `)_NEXTSEP_` note above). The iteration is bounded: each substitution strictly shortens the
+ * string, so the set cannot grow without end, and the cap is a belt on a function that decides
+ * a security property.
+ */
+function nextDestinationForms(destPath) {
+  const forms = new Set([destPath]);
+  for (let round = 0; round < 8; round++) {
+    let grew = false;
+    for (const form of [...forms]) {
+      for (const [pattern, replacement] of NEXT_DESTINATION_SUBSTITUTIONS) {
+        const next = form.replace(pattern, replacement);
+        if (!forms.has(next)) {
+          forms.add(next);
+          grew = true;
+        }
+      }
+    }
+    if (!grew) break;
+  }
+  return [...forms];
+}
+/**
+ * Does this destination contain a C0 control character or DEL?
+ *
+ * Tested by CODE POINT rather than as a regex escape range, deliberately: writing the range
+ * as an escape inside a character class invites a tool to put the LITERAL byte into this
+ * file, which makes the source itself binary to grep. Numbers cannot be mangled that way.
+ */
+function hasControlChar(str) {
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Is this destination provably ONE literal path?
+ *
+ * THE WHOLE SECURITY ARGUMENT OF CHECK 25 TURNS ON THIS FUNCTION, so it is written to be
+ * wrong only in the safe direction. A rewrite DESTINATION IS A TEMPLATE, NOT A PATH: Next
+ * interpolates the source's captures — and any named capture group in a `has` condition —
+ * into it. So "the gate's matcher does not cover this destination string" is NOT a safety
+ * property, and treating it as one is how the first version of this check was defeated on
+ * paper by five configs Next accepts, among them `{source:'/admin/:rest*',
+ * destination:'/:rest*'}`, which is the shape in Next's own rewrite docs and under which
+ * `GET /admin/api/audit` reaches `/api/audit` with the gate never having run.
+ *
+ * A SIXTH construction defeated a later version and is why the control-character test is here.
+ * WHATWG URL parsing DELETES tab (0x09), LF (0x0A) and CR (0x0D) from anywhere in its input,
+ * and Next routes a destination through `parseRelativeUrl`, which is `new URL(...)` over that
+ * string. So `/api\t/audit` tested as one literal path outside the gated surface and was
+ * ALLOWED, while the path Next actually routed was `/api/audit` — measured on a real image as
+ * an anonymous 200 carrying the admin audit log, with no x-request-id and no CORS. The same
+ * deletion collapses `..\t` to `..`, defeating the dot-segment test below. `next build` accepts
+ * all three characters, so this was introducible from source and not only by tampering.
+ *
+ * A SEVENTH construction is why this runs over `nextDestinationForms` and not over the raw
+ * string. Next's `unescapeSegments` rewrites `__ESC_COLON_` to `:` on the parsed pathname of
+ * EVERY request, so `/__ESC_COLON_a/__ESC_COLON_b` is `/:a/:b` to the router while carrying no
+ * template character at all — see NEXT_DESTINATION_SUBSTITUTIONS for the measurement. Testing
+ * every substituted form means the `:` ban already written above catches the whole shape.
+ *
+ * Only a destination that survives every test here may be cleared by "the matcher does not
+ * cover it". Everything else must be cleared by being a pinned public path, or it is refused.
+ */
+function isLiteralPathForm(destPath) {
+  if (!destPath.startsWith('/')) return false; // relative: resolves against something unknown
+  if (destPath.startsWith('//')) return false; // protocol-relative: a host, not a path
+  if (hasControlChar(destPath)) return false; // stripped by URL parsing -> routes elsewhere
+  if (REWRITE_TEMPLATE_CHARS.test(destPath)) return false;
+  if (destPath.includes('//')) return false; // an empty segment normalises away
+  const segs = destPath.split('/');
+  if (segs.includes('.') || segs.includes('..')) return false; // resolves elsewhere
+  return true;
+}
+
+function isLiteralRewriteDestination(destPath) {
+  // EVERY form, not just the one stored: a destination is literal only if nothing Next does to
+  // it at request time can turn it into a template. `.every`, so a single template-shaped form
+  // refuses the whole entry.
+  return nextDestinationForms(destPath).every((form) => isLiteralPathForm(form));
+}
+
+/**
+ * The normalised forms of a destination that the gate's matcher is tested against.
+ *
+ * Covered if ANY of them matches, because the question is "could this destination reach a
+ * gated route", and a single spelling does not answer it. The live variant is the LOWERCASED
+ * one: `routes-manifest.json` reports `caseSensitive: false`, and Next compiles custom routes
+ * with `sensitive: caseSensitive` (see its `buildCustomRoute`), while the pinned matcher
+ * regexp is case-SENSITIVE — measured, `/Api/audit` is not matched by it and `/api/audit` is.
+ * So without the lowercase form, `{source:'/x', destination:'/Api/audit'}` would test as
+ * uncovered and be allowed.
+ *
+ * The rest are defence in depth rather than measured live gaps, and they are cheap: a
+ * percent-decoded form, a collapsed-double-slash form, a dot-segment-resolved form, and a
+ * leading slash added. Note this does NOT over-refuse in practice: `/api-docs`, `/apidocs`
+ * and `/API-DOCS` all stay uncovered, because the matcher requires `/api` followed by a
+ * segment boundary.
+ */
+function rewriteDestinationVariants(destPath) {
+  const out = new Set([destPath, destPath.toLowerCase()]);
+  try {
+    const dec = decodeURIComponent(destPath);
+    out.add(dec);
+    out.add(dec.toLowerCase());
+  } catch {
+    // A malformed escape is not a reason to stop testing the other forms. It is also already
+    // a TEMPLATE by the `%` rule above, so it can never reach the "uncovered" exit anyway.
+  }
+  // THE PATH URL PARSING PRODUCES, which is the load-bearing variant rather than a
+  // belt-and-braces one. Next resolves a destination through `parseUrl`, i.e.
+  // `new URL(\`${protocol}//${host}${url}\`)` — so the routed path is whatever WHATWG URL
+  // parsing produces, not the manifest's raw bytes. That parser DELETES tab/LF/CR from
+  // anywhere in the input, percent-encodes some characters and resolves dot segments, any of
+  // which can turn a string that looks uncovered into a gated path.
+  //
+  // SCOPED CLAIM, and the scope matters: this covers the URL-PARSING STAGE of Next's
+  // destination pipeline, not the pipeline. `parseDestination` does three things in order —
+  // escape the known parameters, `parseUrl`, then `unescapeSegments`
+  // (`prepare-destination.js:140-181`) — and `prepareDestination` then compiles the result with
+  // path-to-regexp against the source's and the `has` conditions' captures. An earlier version
+  // of this comment claimed testing the parser's output "closes the CLASS ... because the oracle
+  // is the same function Next uses". That was false, and the seventh construction
+  // (`__ESC_COLON_`) is precisely the "normalisation nobody here predicted" it claimed was
+  // covered: it lives in the THIRD stage. The substitution stage is handled by
+  // NEXT_DESTINATION_SUBSTITUTIONS, and the compile stage by refusing template characters
+  // outright rather than analysing them.
+  for (const form of nextDestinationForms(destPath)) {
+    out.add(form);
+    out.add(form.toLowerCase());
+    try {
+      const parsed = new URL(form, 'http://n.invalid');
+      out.add(parsed.pathname);
+      out.add(parsed.pathname.toLowerCase());
+    } catch {
+      // Unparseable as a URL. It is already refused by the literality test, so there is nothing
+      // to add — but never let this throw and take the whole check down with it.
+    }
+  }
+  out.add(destPath.replace(/\/{2,}/g, '/'));
+  if (!destPath.startsWith('/')) out.add(`/${destPath}`);
+  const segs = [];
+  for (const s of destPath.split('/')) {
+    if (s === '.' || s === '') continue;
+    if (s === '..') segs.pop();
+    else segs.push(s);
+  }
+  out.add(`/${segs.join('/')}`);
+  return [...out];
+}
+
+/**
+ * Does the GATE's pinned matcher cover this path?
+ *
+ * `.some`, never `[0]`: `baseline.middlewareMatchers` is an ARRAY and check 11 iterates it
+ * the same way. Reading it as a single matcher would let a second one silently decide nothing.
+ *
+ * The regexps come from the COMMITTED BASELINE, evaluated here on the host — the same
+ * construction as PINNED_MATCHER_MUST_COVER, and for the same reason: a floor derived from
+ * the thing it constrains is not a floor. Check 11 separately proves the image's matchers
+ * equal this pin, so the two together cover both halves; check 25 must not wait for check 11
+ * to have run, since it deliberately runs earlier.
+ */
+function gateMatcherCovers(matchers, p) {
+  return matchers.some((m) => new RegExp(m.regexp).test(p));
+}
+
+/**
+ * THE POLICY. Is this rewrite allowed to ship, and why?
+ *
+ * The rule, in one sentence: a rewrite is REFUSED unless it targets an external service, or
+ * targets a single literal path the gate's matcher does not cover, or targets a path the gate
+ * deliberately does not protect.
+ *
+ * WHY THE CLEARANCE IS "A PINNED PUBLIC PATH" AND NOT "THE MATCHER DOES NOT COVER THE
+ * DESTINATION". Measured on this repo: the matcher covers BOTH of today's rewrite
+ * destinations (`/api/well-known/aitp-manifest`, `/api/well-known/aitp-revocation-list`) and
+ * covers NEITHER source. So "refuse any rewrite whose destination is covered and whose source
+ * is not" — the rule issue #94 proposes — is RED ON A CLEAN TREE. What makes today's two
+ * rewrites harmless is not the matcher; it is that both destinations are in PUBLIC_PATHS, so
+ * the gate would have let an anonymous caller through anyway. That is the property this
+ * function encodes, and it is why the clearance list is PUBLIC_PATHS_PINNED. What the clearance
+ * does NOT preserve is rate limiting and x-request-id for the four members that are not in
+ * RATE_LIMIT_EXEMPT_PATHS — see the residual spelled out on PUBLIC_PATHS_PINNED.
+ *
+ * THERE IS DELIBERATELY NO "THE SOURCE IS GATED TOO" CLEARANCE, though it sounds legitimate.
+ * It would have to reason "this source's compiled regex begins with a literal /api/, so the
+ * gate ran" — and that inference is FALSE. Next compiles rewrite sources with
+ * `sensitive: caseSensitive` and this manifest reports `caseSensitive: false`, so a source of
+ * `/api/old` ALSO matches a request for `/API/old`, which the case-SENSITIVE matcher does not
+ * cover. Such a rewrite would have been cleared while `GET /API/old` reached a gated handler
+ * ungated. The cost of leaving it out is a false refusal for a future `/api/old -> /api/new`
+ * rewrite, which reds this check and needs a reviewed harness change. That is what a floor is
+ * for: it forces a human decision at the moment the case first becomes real.
+ */
+function classifyRewrite(entry, matchers) {
+  const dest = typeof entry.destination === 'string' ? entry.destination : '';
+  if (!dest) {
+    return {
+      ok: false,
+      why:
+        entry.destination === ''
+          ? 'destination is an empty string'
+          : `destination is ${describeShape(entry.destination)}, not a non-empty string`,
+    };
+  }
+  // 1. An absolute URL leaves this app entirely, so no route of ITS OWN is served ungated.
+  //    Still pinned by check 24, so a new external rewrite is a reviewable diff; named in the
+  //    detail line so the skip is visible rather than silent. (Proxying has its own risks —
+  //    SSRF, credential forwarding — which are a code-review question, not this check's.)
+  if (/^https?:\/\//i.test(dest)) return { ok: true, why: 'external destination (leaves this app)' };
+  // 2. Query and fragment are stripped, and that is measured rather than tidy:
+  //    `/api/audit?x=1` is NOT matched by the pinned matcher regexp, so testing the raw
+  //    destination would let a query string hide a bypass.
+  const destPath = dest.split('#')[0].split('?')[0];
+  // 3. Literality. A template gets NO "uncovered" exit.
+  if (!isLiteralRewriteDestination(destPath)) {
+    return {
+      ok: false,
+      why:
+        `destination ${JSON.stringify(dest)} is a TEMPLATE, not one known path — Next ` +
+        "interpolates the source's captures (and any named capture group in a `has` " +
+        'condition) into it, so where it lands is not decidable here',
+    };
+  }
+  // 4. The ONLY allow-because-uncovered exit.
+  const hit = rewriteDestinationVariants(destPath).find((v) => gateMatcherCovers(matchers, v));
+  if (!hit) return { ok: true, why: `literal destination ${destPath} is outside the gated surface` };
+  // 5. Clearance: a route the gate deliberately does not protect.
+  // Membership is tested on the path AND on its single-trailing-slash-stripped form, because
+  // Next strips exactly one trailing slash when it resolves a route — so `/api/health/` IS the
+  // public path `/api/health`, and refusing it would be a false refusal. Only ONE slash is
+  // stripped, deliberately: `/api/health//` is not the same path and stays refused.
+  const destNoSlash =
+    destPath.length > 1 && destPath.endsWith('/') ? destPath.slice(0, -1) : destPath;
+  if (PUBLIC_PATHS_PINNED.includes(destPath) || PUBLIC_PATHS_PINNED.includes(destNoSlash)) {
+    return { ok: true, why: `${destPath} is a pinned PUBLIC_PATHS route — the gate does not protect it` };
+  }
+  return {
+    ok: false,
+    why:
+      `destination ${destPath} IS covered by the gate's matcher` +
+      (hit === destPath ? '' : ` (as the normalised form ${hit})`) +
+      ` and is not one of the gate's public paths, while the source ${JSON.stringify(entry.source)}` +
+      ' is what the middleware actually sees',
+  };
+}
+
+/**
+ * The compiled rewrite table, read out of the image with NO code from the image run.
+ *
+ * WHY A REWRITE IS A GATE QUESTION AT ALL. `src/proxy.ts:257-259` attaches the gate with
+ * `matcher: ['/api/:path*']`, and Next middleware matches the INCOMING REQUEST PATH,
+ * never a `rewrites()` destination. So a rewrite whose SOURCE falls outside the matcher
+ * delivers a request to its destination handler with the gate never having run — no auth,
+ * no rate limiting, no CORS, no `x-request-id`. `src/proxy.ts:179` makes it doubly blind:
+ * even a widened matcher would early-return, because the function reads
+ * `request.nextUrl.pathname`, which is still the source. Measured, not argued: the
+ * existing `/.well-known/aitp-manifest` rewrite was observed reaching its handler with no
+ * `x-request-id` and no CORS headers in the shipped image. It is benign today only
+ * because its destination is in `PUBLIC_PATHS`; the consequence is not benign in general.
+ * A later `{source:'/admin/audit', destination:'/api/audit'}` would serve the admin audit
+ * log to an anonymous caller while every other check here stayed green — check 11 pins
+ * `middlewareMatchers`/`apiRoutes`/`apiRouteCount` out of
+ * `functions-config-manifest.json`, and adding a rewrite moves none of the three.
+ *
+ * READ THROUGH `withImageContainer`, NOT THROUGH A PROBE. `docker create` + `docker cp`
+ * against a container that is never started, for the same reason check 13's extraction
+ * departs from the `node -e` probes: the artifact must not get to report on its own
+ * routing table. A probe would additionally inherit the image's `ENV NODE_OPTIONS`, which
+ * is a measured primitive here, not a theoretical one.
+ *
+ * NOT FOLDED INTO `extractGatePin`, which would save the container. Two unrelated
+ * surfaces would then share one failure: `extractGatePin`'s failure is deliberately FATAL
+ * because there is no partial answer for the gate's bytes, whereas a
+ * `routes-manifest.json` this harness cannot parse should not abort a run that could
+ * still report every other finding.
+ *
+ * IT NEVER THROWS. It returns `{entries, error}` and RECORDS its failures, mirroring
+ * `gate.regionError`, so an unreadable or unmodelled table lands as check 24's named
+ * finding — "a table this harness could not read is not a table it may bless" — and so
+ * that `--update-baseline` can refuse to write rather than committing an unreadable
+ * state.
+ */
+async function extractRewrites(tag, platform) {
+  // `basePath` and `i18n` come out alongside the entries because check 25's path comparisons
+  // SILENTLY ASSUME both. Check 24 does not care about either — it is pure equality — but a
+  // precondition that is assumed rather than asserted is how a floor becomes decoration, so
+  // they are carried here (one read, one container) and asserted there.
+  //
+  // KNOWN RESIDUAL, named rather than left implicit: these come from `routes-manifest.json`,
+  // whereas the router reads its own copy from `.next/required-server-files.json`, which
+  // nothing here pins. For a legitimate build the two agree (measured: both `basePath: ""`,
+  // no `i18n`). Under the thin-overlay tamper model this harness works in they could be made
+  // to disagree — but only in the harmless direction, since a non-empty `basePath` makes `/api`
+  // HARDER to reach, not easier. Pinning the serialised config is the obvious strengthening and
+  // is deliberately out of scope here.
+  const bad = (error) => ({ entries: null, basePath: null, i18n: null, error });
+  try {
+    return await withImageContainer(tag, platform, async ({ readFile }) => {
+      let text;
+      try {
+        text = (await readFile(ROUTES_MANIFEST_PATH)).toString('utf8');
+      } catch (err) {
+        return bad(
+          `${ROUTES_MANIFEST_PATH} could not be copied out of the image: ${err.message}\n` +
+            'The standalone server READS that file at runtime to build its route list, so ' +
+            'its absence means this image is not the standalone output this harness ' +
+            'understands — a Next major, a bundler change, or an image that is not the ' +
+            'standalone output. It does NOT mean the image has no rewrites.',
+        );
+      }
+      let manifest;
+      try {
+        manifest = JSON.parse(text);
+      } catch (err) {
+        return bad(`${ROUTES_MANIFEST_PATH} is not valid JSON: ${err.message}`);
+      }
+      if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+        return bad(
+          `${ROUTES_MANIFEST_PATH} parsed to ${describeShape(manifest)} rather than a ` +
+            'manifest object.',
+        );
+      }
+      // PRESENT AND PARSEABLE BUT CARRYING NO `rewrites` KEY IS A FAILURE, NOT AN EMPTY
+      // TABLE. This is the one place "absent" and "empty" are easy to conflate on the
+      // IMAGE side, and conflating them means an image that routes by some shape this
+      // harness cannot see reads as an image with no rewrites at all. The symmetric rule
+      // on the BASELINE side is the other way round and lives in check 24: an absent
+      // `baseline.rewrites` fails, while `[]` is a legitimate pin — because a tree with
+      // zero rewrites is genuinely reachable.
+      if (!Object.prototype.hasOwnProperty.call(manifest, 'rewrites')) {
+        return bad(
+          `${ROUTES_MANIFEST_PATH} (manifest version ${JSON.stringify(manifest.version)}) ` +
+            'carries NO `rewrites` key at all. That is not the same as carrying none: this ' +
+            'harness reads the rewrite table from exactly that key, so a manifest without ' +
+            'it is one whose routing stages this check cannot see, and it fails rather ' +
+            'than recording an empty table.',
+        );
+      }
+      const rw = manifest.rewrites;
+      if (rw === null || typeof rw !== 'object' || Array.isArray(rw)) {
+        return bad(
+          `\`rewrites\` in ${ROUTES_MANIFEST_PATH} is ${describeShape(rw)}. This harness ` +
+            `models it as an object of the three arrays ${REWRITE_PHASES.join('/')} (a ` +
+            '`rewrites()` returning a bare array normalises into `afterFiles`), and it is ' +
+            'NOT coerced: a shape this harness does not model is one it may not bless.',
+        );
+      }
+      const unknownPhases = Object.keys(rw).filter((k) => !REWRITE_PHASES.includes(k));
+      if (unknownPhases.length) {
+        return bad(
+          `\`rewrites\` in ${ROUTES_MANIFEST_PATH} carries phase key(s) this harness has ` +
+            `not reasoned about: ${JSON.stringify(unknownPhases)} (modelled: ` +
+            `${JSON.stringify(REWRITE_PHASES)}). An unmodelled phase is an unmodelled ` +
+            'ROUTING STAGE — the gate runs once, before every phase Next evaluates, so a ' +
+            'phase this check does not read could deliver requests past it unseen.',
+        );
+      }
+      const entries = [];
+      for (const phase of REWRITE_PHASES) {
+        const list = rw[phase];
+        if (!Array.isArray(list)) {
+          return bad(
+            `\`rewrites.${phase}\` in ${ROUTES_MANIFEST_PATH} is ${describeShape(list)}, ` +
+              'not an array. All three phases are expected, and a missing or differently ' +
+              'shaped one is a manifest shape this harness does not model.',
+          );
+        }
+        for (const [i, entry] of list.entries()) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+            return bad(
+              `\`rewrites.${phase}[${i}]\` in ${ROUTES_MANIFEST_PATH} is ` +
+                `${describeShape(entry)}, not a rewrite object.`,
+            );
+          }
+          // The phase label is this harness's own addition, so an entry carrying its own
+          // `phase` key would silently overwrite it and the pin would then record a phase
+          // that is not the one Next routes it in. Fails closed rather than guessing.
+          if (Object.prototype.hasOwnProperty.call(entry, 'phase')) {
+            return bad(
+              `\`rewrites.${phase}[${i}]\` carries its own \`phase\` key ` +
+                `(${JSON.stringify(entry.phase)}), which would collide with the phase ` +
+                'label this harness adds to each entry. Refusing rather than pinning an ' +
+                'entry whose phase cannot be trusted.',
+            );
+          }
+          entries.push(normaliseRewrite(phase, entry));
+        }
+      }
+      return {
+        entries,
+        basePath: manifest.basePath,
+        i18n: Object.prototype.hasOwnProperty.call(manifest, 'i18n') ? manifest.i18n : null,
+        error: null,
+      };
+    });
+  } catch (err) {
+    // The container itself could not be created, or the copy machinery failed outside the
+    // callback. Recorded like every other failure here rather than thrown.
+    return bad(`could not open the image to read ${ROUTES_MANIFEST_PATH}: ${err.message}`);
+  }
 }
 
 /**
@@ -3865,6 +4589,21 @@ async function main() {
     );
   }
 
+  // The compiled rewrite table (check 24). Gathered HERE rather than inside the check,
+  // and that is a CORRECTNESS requirement rather than a matter of style: the
+  // --update-baseline branch below RETURNS before checks 5, 6 and 24 ever run, so a table
+  // extracted inside the check would not exist when the write path needs it and `rewrites`
+  // could never be written to the baseline at all. Facts first, comparison later — exactly
+  // as tracedExternals, nativeModules, middlewareMatchers and apiRoutes already work.
+  //
+  // Like the gate pin above and unlike every `probe()`, this runs NO code from the image:
+  // `docker create` + `docker cp` against a container that is never started, so the
+  // artifact cannot report on its own routing table and no `ENV NODE_OPTIONS` preload can
+  // fire. Unlike the gate pin, a failure is RECORDED rather than fatal (see
+  // extractRewrites): there is no partial answer for the gate's bytes, but a
+  // routes-manifest this harness cannot parse should still let the rest of the run report.
+  const rewrites = await extractRewrites(opts.tag, platform);
+
   // These two run BEFORE any check, so they must tolerate a failed probe without
   // throwing — the whole point of the named-check machinery is that a probe
   // failure becomes checks 3/5/6 reporting it, not an abort that also skips the
@@ -4098,6 +4837,64 @@ async function main() {
           'nothing more — losing exactly the triage the region exists to provide.',
       );
     }
+    // The same rule, for the same reason, applied to the rewrite table: a baseline cannot
+    // pin a routing table that could not be read. Writing the other fields and leaving
+    // `rewrites` out would put an unreadable state in the committed file, and check 24
+    // would then report it as "this baseline never pinned rewrites" — an unreadable table
+    // recorded as an absent one, which is exactly the conflation that check refuses.
+    if (rewrites.error) {
+      fail(
+        'refusing to write a baseline: the compiled rewrite table could not be read out of ' +
+          `this image.\n  ${rewrites.error}\n\n` +
+          'That table is what the standalone server actually routes with, and a rewrite ' +
+          "whose SOURCE the gate's matcher does not cover reaches its destination handler " +
+          'with the gate never having run. Fix the image or the extraction before pinning ' +
+          'anything from it.',
+      );
+    }
+    // AND THE POLICY ITSELF, at write time — not only on the next run.
+    //
+    // Check 25 lives after the `--update-baseline` return, so before this gate existed the
+    // blessing operation never evaluated it: pointing `--update-baseline` at an image carrying
+    // `{source:'/admin/audit', destination:'/api/audit'}` WROTE the bypass into the committed
+    // pin, printed it as an ordinary addition, and exited 0. The next plain run did red check
+    // 25 (and CI would have caught it), so it was never a shipping fail-open — but "blessing a
+    // rewrite does not make it safe" was true only of the NEXT run, while the act of blessing
+    // reported success. A consent gate that says "written" over a gate bypass is teaching the
+    // wrong reflex, which is the one thing this flag's discipline cannot survive.
+    //
+    // Deliberately NOT extended to the other checks: 5, 6 and 24 are equalities, and a
+    // legitimate drift is exactly when you regenerate, so gating the write on them would make
+    // the flag useless. This one is a POLICY, not an equality — there is no legitimate reason
+    // to pin a rewrite that reaches a gated path, and no flag to override it, because the
+    // remedy is to make the gate cover the source rather than to record the bypass.
+    // Evaluated against THIS IMAGE's matchers (the local gathered above), not the committed
+    // baseline's — and that is the right oracle rather than a convenience. The question at write
+    // time is "is the table I am about to pin safe with respect to the matcher I am about to pin
+    // alongside it", and on a first run or a matcher change the committed baseline is not that.
+    // (`baseline` is also not in scope yet here; it is built below.)
+    {
+      const badPins = (rewrites.entries ?? [])
+        .map((e) => [e, classifyRewrite(e, middlewareMatchers)])
+        .filter(([, r]) => !r.ok);
+      if (badPins.length) {
+        fail(
+          `refusing to write a baseline: ${badPins.length} rewrite(s) in this image reach a ` +
+            'path the gate protects, or reach somewhere this harness cannot prove is safe:\n' +
+            badPins
+              .map(
+                ([e, r]) =>
+                  `  ${e.phase}: ${JSON.stringify(e.source)} -> ` +
+                  `${JSON.stringify(e.destination)}\n      ${r.why}`,
+              )
+              .join('\n') +
+            '\n\nThis is check 25 applied at write time. Recording these would put a gate ' +
+            'bypass in the committed pin and report success while doing it. There is no ' +
+            'consent flag for this one: fix the rewrite, or widen the gate matcher in ' +
+            '`src/proxy.ts` so the source is actually covered, and re-pin after that.',
+        );
+      }
+    }
     // The structural gate above is necessary but NOT sufficient, and the hole is
     // demonstrable: an image with the whole `.next/node_modules/@opentelemetry`
     // scope deleted passes checks 1-4 (check 2 used to be vacuous; check 3 only
@@ -4155,6 +4952,34 @@ async function main() {
       } else {
         console.log('  apiRouteCount: unchanged');
       }
+      // Diffed over the WHOLE entry, never a projection. `middlewareMatchers` was once
+      // diffed through matcherKey() — two fields of an object — and an image whose matcher
+      // carried `missing: [{type:"header",key:"cookie"}]` was recorded with the condition
+      // intact while the diff printed "unchanged". A rewrite entry is small enough to
+      // print whole, so it is, and the diff keys on the same bytes check 24 compares.
+      const prevRewriteLines = (Array.isArray(prev.rewrites) ? prev.rewrites : []).map(
+        rewriteLine,
+      );
+      const nowRewriteLines = rewrites.entries.map(rewriteLine);
+      const rw = diff(prevRewriteLines, nowRewriteLines);
+      // ORDER IS MEANING HERE, so a pure reorder must not print "unchanged". Within a
+      // phase the first match wins, so swapping two entries changes which handler a
+      // request reaches even though nothing was added or removed — and `diff` above is
+      // set-based and cannot see it. Check 24 fails on it; this makes the re-pin path say
+      // the same thing rather than looking like a no-op.
+      if (
+        !rw.added.length &&
+        !rw.removed.length &&
+        prevRewriteLines.join('\n') !== nowRewriteLines.join('\n')
+      ) {
+        console.log(
+          '  rewrites: REORDERED — the same entries in a new order. Within a phase the ' +
+            'FIRST MATCH WINS, so this is a routing change:',
+        );
+        for (const s of nowRewriteLines) console.log(`    ${s}`);
+      } else {
+        show('rewrites', rw);
+      }
 
       const removed = [
         ...t.removed.map((s) => `tracedExternals: ${s}`),
@@ -4178,6 +5003,22 @@ async function main() {
         // dangerous. Without this gate, `--update-baseline` would re-bless the decoy
         // population at the same count with exit 0 and no consent.
         ...ar.removed.map((s) => `apiRoutes: ${s}`),
+        // A rewrite that VANISHED is a removal like any other inventory entry: a routing
+        // entry that used to ship no longer does.
+        //
+        // AN ADDITION IS PRINTED AND ALLOWED — the existing convention for every inventory
+        // in this file — AND IT IS WORTH SAYING OUT LOUD, HERE WHERE THE ASYMMETRY LIVES,
+        // THAT ADDITION IS PRECISELY THE DANGEROUS DIRECTION FOR THIS FIELD. Next
+        // middleware matches the request's SOURCE path, so a NEW rewrite whose source the
+        // gate's matcher does not cover delivers a request to its destination handler with
+        // the gate never having run: `{source:'/admin/audit', destination:'/api/audit'}`
+        // serves the admin audit log to an anonymous caller, measured. The equality of
+        // check 24 alone would bless that with exit 0 the moment anyone re-pinned, which is
+        // why check 25's hand-authored policy floor is REQUIRED rather than optional —
+        // pinning without the floor turns a gate bypass into a line in a diff that a
+        // reviewer has to notice and reason about, in a file whose own `_comment` is forty
+        // lines long.
+        ...rw.removed.map((s) => `rewrites: ${s}`),
       ];
       if (removed.length && !opts.allowRemovals) {
         fail(
@@ -4210,6 +5051,17 @@ async function main() {
       // for a compiled-gate edit, and the edit is now a failed equality whatever the
       // route list says. What consent protects has moved, so the consent has moved
       // with it.
+      //
+      // AND WHY `rewrites` IS DELIBERATELY NOT COVERED BY THIS FLAG — the obvious reviewer
+      // question ("shouldn't a new rewrite need --allow-gate-change?"), answered here
+      // rather than left to be re-derived. This flag guards COMPILED CODE, where the
+      // dangerous direction is CHANGE and where every change is a security event. A rewrite
+      // table is an INVENTORY of routing entries — the same category as `apiRoutes` — so it
+      // gets the removal gate above, and the ADDITION direction is answered by check 25's
+      // policy floor rather than by a fourth consent flag. The flag's whole discipline is
+      // that the consent cannot become a reflex, and a flag demanded for every routine
+      // routing change stops being read: that is the one thing this discipline cannot
+      // survive. Do not extend it here to buy a feeling of extra safety.
       const prevGraph = Array.isArray(prev.bootGraph) ? prev.bootGraph : null;
       const prevCanonical = existsSync(GATE_CANONICAL_PATH)
         ? readFileSync(GATE_CANONICAL_PATH, 'utf8').replace(/\n$/, '')
@@ -4313,6 +5165,19 @@ async function main() {
         'answered 200 anonymously. Those two are CHANGE DETECTION for the route surface ' +
         '(a route appearing, vanishing or being renamed is a review point) and are no ' +
         'longer what establishes the gate is CORRECT — check 13 does that by equality. ' +
+        '`rewrites` is the compiled rewrite table read out of .next/routes-manifest.json — ' +
+        'the file the standalone server actually ROUTES with, never next.config.ts — ' +
+        'flattened to one array of {phase, ...} entries across ' +
+        'beforeFiles/afterFiles/fallback, with every key the manifest carried preserved and ' +
+        'the ENTRY ORDER pinned rather than sorted, because within a phase the FIRST MATCH ' +
+        'WINS and a reordering is a routing change. It is pinned because a rewrite\'s ' +
+        'SOURCE is what the middleware sees: Next matches the incoming request path and ' +
+        'never a rewrite destination, so a rewrite whose source the gate\'s matcher does ' +
+        'not cover delivers a request to its destination handler with the gate never having ' +
+        'run — no auth, no rate limiting, no CORS, no x-request-id — and adding one moves ' +
+        'nothing in middlewareMatchers, apiRoutes or apiRouteCount. Check 24 asserts this ' +
+        'table WHOLE, so adding, removing, reordering or editing a rewrite is a reviewable ' +
+        'diff here instead of an invisible change. ' +
         '`bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, ' +
         'and they cover the gate\'s whole LOAD PATH rather than just its own chunk: ' +
         'bootGraph is server.js plus every file the middleware and instrumentation ' +
@@ -4341,10 +5206,11 @@ async function main() {
         'between a security review and housekeeping. ' +
         'Review every line by hand: a new entry means a new external or a new native ' +
         'binary shipped, a missing entry means one stopped shipping, and any change to ' +
-        'middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes or ' +
-        'apiRouteCount is a security review — the first changes what the gate covers, ' +
-        'the next three change the code it runs and the environment it runs in, and the ' +
-        'last two mean a route appeared, vanished or was renamed.',
+        'middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes, ' +
+        'apiRouteCount or rewrites is a security review — the first changes what the gate ' +
+        'covers, the next three change the code it runs and the environment it runs in, ' +
+        'the next two mean a route appeared, vanished or was renamed, and the last means a ' +
+        'request can now reach a handler by a path the gate may never see.',
       _regenerate: 'node scripts/verify-image.mjs --update-baseline',
       tracedExternals,
       nativeModules,
@@ -4363,6 +5229,20 @@ async function main() {
       // equality whatever the route list says.
       apiRoutes,
       apiRouteCount,
+      // ── check 24: the compiled rewrite table ─────────────────────────────
+      //
+      // Read out of `.next/routes-manifest.json` in the image — the file the standalone
+      // server actually routes with — and pinned WHOLE: every key the manifest carried,
+      // across all three rewrite phases, because the gate runs once and BEFORE every one
+      // of them.
+      //
+      // ENTRY ORDER IS PRESERVED, NOT SORTED, and that is the deliberate opposite of
+      // `imageConfig.Env` below (which readImageConfig sorts) and of `middlewareMatchers`
+      // and `apiRoutes` above. Their order is not meaning; this one's is — within a phase
+      // the FIRST MATCH WINS, so a swap changes which handler a request reaches. See
+      // normaliseRewrite: the file has a precedent both ways, so do not "fix" one to match
+      // the other.
+      rewrites: rewrites.entries,
       // ── check 13: the gate-code pin ──────────────────────────────────────
       //
       // The gate's LOAD PATH: server.js, the files `.next/server/middleware.js` loads,
@@ -4414,6 +5294,12 @@ async function main() {
     console.log(`  apiRoutes (${apiRoutes.length}):`);
     for (const r of apiRoutes) console.log(`    ${r}`);
     console.log(`  apiRouteCount: ${apiRouteCount}`);
+    // Printed in full, ONE LINE PER ENTRY, for the same reason middlewareMatchers and
+    // apiRoutes are: it is a line a human has to review. The question to ask of every line
+    // is whether the gate's matcher covers that entry's SOURCE — the destination is where
+    // the request lands, but the source is all the middleware ever sees.
+    console.log(`  rewrites (${rewrites.entries.length}):`);
+    for (const e of rewrites.entries) console.log(`    ${rewriteLine(e)}`);
     console.log(`  bootGraph (${gate.graph.length} file(s), middleware entry module ${gate.entryId}):`);
     for (const g of gate.graph) console.log(`    ${g.sha256}  ${String(g.bytes).padStart(7)}  ${g.path}`);
     console.log(`  nextTreeSha: ${gate.nextTree.sha256} (${gate.nextTree.count} files)`);
@@ -4537,6 +5423,360 @@ async function main() {
     return `${nativeModules.length} native module(s): ${nativeModules.join(', ')}`;
   });
 
+  // ── check 24: the compiled rewrite table ─────────────────────────────────
+  //
+  // CALLED HERE, IN THE STATIC HALF, and not where its id would suggest. The id is 24
+  // because this file APPENDS check ids and never renumbers them — renumbering to slot
+  // this next to check 11 would touch ~60 live references plus docs/operations.md prose
+  // and bury a security addition in a rename, and the historical counts in the header are
+  // part of the evidence. But `runCheck` takes the id as an argument, so the CALL SITE is
+  // free, and this one is a pure function of a file copied out of the image plus the
+  // committed baseline. Put behind the live substrate with checks 7-23, a Postgres flake
+  // or a failed container boot would leave a ROUTING BYPASS NEVER EVALUATED AT ALL. Here
+  // it is evaluated on every invocation that reaches a comparison.
+  await runCheck(24, 'the compiled rewrite table matches the committed baseline', async () => {
+    // A TABLE THIS HARNESS COULD NOT READ IS NOT A TABLE IT MAY BLESS. The extraction
+    // records its failure rather than throwing (mirroring gate.regionError), so it lands
+    // here as a named finding instead of aborting a run that can still report every other
+    // result.
+    if (rewrites.error) {
+      fail(
+        'the shipped rewrite table could not be read out of the image:\n' +
+          `  ${rewrites.error}\n\n` +
+          'This check pins what the standalone server actually ROUTES with. Next middleware ' +
+          "matches the incoming request path, so a rewrite whose SOURCE the gate's matcher " +
+          'does not cover reaches its destination handler with the gate never having run — ' +
+          'and a table this harness cannot read is one in which such an entry would be ' +
+          'invisible.',
+      );
+    }
+    // FAILS CLOSED ON ABSENCE, and `?? []` here would be exactly the quiet disposition
+    // checks 5 and 6 were corrected away from: it would mean "expected no rewrites", which
+    // PASSES against an image carrying a bypassing one. An absent key means a baseline that
+    // predates this check, not a tree with no rewrites.
+    //
+    // ABSENCE AND EMPTINESS ARE DELIBERATELY DISTINGUISHED, and this is the one pinned
+    // array where `[]` is legitimate and compared normally: a tree with zero rewrites is
+    // genuinely reachable, whereas a tree with zero traced externals or zero native
+    // binaries is not — which is why checks 5 and 6 additionally reject an empty array and
+    // this one must not.
+    if (!Array.isArray(baseline.rewrites)) {
+      fail(
+        `${BASELINE_PATH} has no \`rewrites\` array (it is ` +
+          `${describeShape(baseline.rewrites)}). That is the pin on the compiled rewrite ` +
+          'table, and without it this check has nothing to compare against — so it fails ' +
+          'rather than passing vacuously. Treating the absence as "expected no rewrites" ' +
+          'would pass against an image carrying a rewrite that reaches a gated handler ' +
+          'without the gate. An EMPTY array is a different thing and is a legitimate pin. ' +
+          `Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    // A MALFORMED PIN IS NAMED AS A MALFORMED PIN, not reported as image drift. Without
+    // this, a baseline whose `rewrites` holds strings still fails closed — but through the
+    // generic "the shipped rewrite table is not the pinned one" path, which tells the
+    // operator the IMAGE changed when in fact the committed file is wrong. Wrong diagnosis
+    // on a security check costs more than the four lines it takes to separate the cases.
+    const malformed = baseline.rewrites
+      .map((e, i) => [i, e])
+      .filter(
+        ([, e]) =>
+          e === null ||
+          typeof e !== 'object' ||
+          Array.isArray(e) ||
+          !REWRITE_PHASES.includes(e.phase),
+      );
+    if (malformed.length) {
+      fail(
+        `${BASELINE_PATH}'s \`rewrites\` is an array, but ${malformed.length} of its ` +
+          `${baseline.rewrites.length} entr(ies) are not pinned rewrite objects:\n` +
+          malformed
+            .map(
+              ([i, e]) =>
+                `  [${i}] ${describeShape(e)}` +
+                (e && typeof e === 'object' && !Array.isArray(e)
+                  ? ` — \`phase\` is ${JSON.stringify(e.phase)}, expected one of ` +
+                    `${JSON.stringify(REWRITE_PHASES)}`
+                  : ''),
+            )
+            .join('\n') +
+          '\n\nThat is a malformed PIN, not a changed image. Each entry must be ' +
+          '`{phase, ...}` with `phase` one of the three rewrite phases. The baseline is ' +
+          `generated, never hand-edited — regenerate it with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const want = baseline.rewrites;
+    const got = rewrites.entries;
+    // Compared WHOLE and CANONICALLY — `rewriteLine` on both sides, no projection — because
+    // a projection is what let a matcher condition be recorded as "unchanged" (see
+    // ALLOWED_MATCHER_KEYS), and because the comparison must be sensitive to ORDER: within a
+    // phase the first match wins. `rewriteLine` re-sorts each entry's keys, so the comparison
+    // is on what SHIPS rather than on how the committed file happens to spell its objects.
+    const wantLines = want.map(rewriteLine);
+    const gotLines = got.map(rewriteLine);
+    if (JSON.stringify(wantLines) !== JSON.stringify(gotLines)) {
+      const lines = [];
+      const max = Math.max(want.length, got.length);
+      for (let i = 0; i < max; i++) {
+        const w = want[i];
+        const g = got[i];
+        if (wantLines[i] === gotLines[i]) continue;
+        if (w === undefined) {
+          lines.push(`  [${i}] ADDED in the image:     ${rewriteLine(g)}`);
+          continue;
+        }
+        if (g === undefined) {
+          lines.push(`  [${i}] MISSING from the image: ${rewriteLine(w)}`);
+          continue;
+        }
+        lines.push(
+          `  [${i}] DIFFERS:\n` +
+            `        pinned ${rewriteLine(w)}\n` +
+            `        image  ${rewriteLine(g)}\n` +
+            locatedDiff(rewriteLine(w), rewriteLine(g), 40)
+              .split('\n')
+              .map((l) => `      ${l}`)
+              .join('\n'),
+        );
+      }
+      // THE SET DIFF, alongside the positional one, because the positional diff alone
+      // MISNAMES THE DANGEROUS ENTRY ON A PREPEND. An entry inserted at the FRONT shifts
+      // every later index, so each position "DIFFERS" and the last one reads as
+      // "[n] ADDED in the image: <a benign entry that was always there>" — while the
+      // actually-injected rewrite appears only as the `image` half of `[0]`. The prose then
+      // says "an ADDED entry is the dangerous direction" with the reader's eye on an
+      // innocent line. That matters here specifically: `beforeFiles` is the FIRST phase Next
+      // evaluates, so prepending is the likely shape of an attack, and it is exactly where
+      // the positional log is least legible. Keyed on `rewriteLine`, so it is a set diff over
+      // what ships, not over file spelling.
+      const onlyInImage = gotLines.filter((l) => !wantLines.includes(l));
+      const onlyInPin = wantLines.filter((l) => !gotLines.includes(l));
+      // A pure REORDER would otherwise read as a wall of per-entry diffs with no clue
+      // what happened, so it is named. It is a routing change, not a cosmetic one.
+      const reordered =
+        want.length === got.length && !onlyInImage.length && !onlyInPin.length;
+      const setSummary =
+        onlyInImage.length || onlyInPin.length
+          ? '\n\n  IGNORING POSITION — the entries that actually differ:\n' +
+            onlyInImage.map((l) => `    only in the IMAGE (ADDED):   ${l}`).join('\n') +
+            (onlyInImage.length && onlyInPin.length ? '\n' : '') +
+            onlyInPin.map((l) => `    only in the PIN (MISSING):   ${l}`).join('\n') +
+            '\n  Read THIS list for what changed; the indexed diff above shifts by one for ' +
+            'every inserted entry, so a rewrite added at the FRONT makes each later position ' +
+            'look changed.'
+          : '';
+      fail(
+        'the shipped rewrite table is not the pinned one:\n' +
+          lines.join('\n') +
+          setSummary +
+          (reordered
+            ? '\n\n  The entries are the SAME SET in a DIFFERENT ORDER. That is a routing ' +
+              'change, not a cosmetic one: within a phase the FIRST MATCH WINS, so a swap ' +
+              'changes which handler a request reaches. Entry order is pinned on purpose ' +
+              'and is deliberately not sorted.'
+            : '') +
+          '\n\nEach entry is `{phase, ...}` with every key the manifest carried preserved. ' +
+          "An ADDED entry is the dangerous direction: a rewrite's SOURCE is what the " +
+          'middleware sees, so an entry whose source the gate\'s matcher does not cover ' +
+          'delivers a request to its destination handler with the gate never having run — ' +
+          'no auth, no rate limiting, no CORS, no x-request-id — and it moves nothing in ' +
+          'middlewareMatchers, apiRoutes or apiRouteCount. A MISSING entry means a routing ' +
+          'entry that used to ship no longer does.\n' +
+          'A Next upgrade that starts emitting internal rewrites (i18n, PPR) lands here ' +
+          'too, on a build nobody touched. That is the accepted cost of an equality and not ' +
+          'a break-in — the same trade middlewareMatchers already makes. Review every line ' +
+          `above, then re-pin with \`${REPIN_CMD}\` (an entry that VANISHED additionally ` +
+          'needs --allow-removals).',
+      );
+    }
+    const counts = REWRITE_PHASES.map(
+      (p) => `${p} ${got.filter((e) => e.phase === p).length}`,
+    ).join(', ');
+    return (
+      `${got.length} rewrite(s) (${counts}), read from ${ROUTES_MANIFEST_PATH} by ` +
+      '`docker cp` against a container that was never started, so no code from the image ' +
+      'ran' +
+      (got.length ? `:\n${got.map((e) => `  ${rewriteLine(e)}`).join('\n')}` : '')
+    );
+  });
+
+  // ── check 25: no rewrite may reach a path the gate protects ──────────────
+  //
+  // THE FLOOR. Check 24 proves the shipped routing table is the REVIEWED one; it says
+  // nothing about whether the reviewed one is safe, and --update-baseline prints an
+  // ADDITION and writes it with exit 0. So on its own, check 24 turns a gate bypass into a
+  // line in a diff that a reviewer has to notice in a file whose own _comment is 40 lines
+  // long. This check is what makes an added rewrite fail rather than merely appear.
+  //
+  // Called immediately after check 24, in the static half, for the same reason: it is a
+  // pure function of a copied file plus the committed baseline, and a routing-bypass check
+  // must not be reachable only after Postgres health and two container boots.
+  await runCheck(25, 'no rewrite reaches a path the gate protects', async () => {
+    if (rewrites.error) {
+      fail(
+        'the shipped rewrite table could not be read, so this policy could not be ' +
+          `evaluated at all:\n  ${rewrites.error}\n\n` +
+          'Reported separately from check 24 on purpose: an unreadable table means the ' +
+          'FLOOR did not run, which is a different and worse thing than a table that ' +
+          'disagrees with its pin.',
+      );
+    }
+    // THE PRECONDITIONS, asserted rather than assumed. Every comparison below puts a
+    // destination string against a matcher regexp anchored at `^\/api`.
+    //
+    // basePath: under a non-empty one the manifest's destinations carry that prefix, so
+    // `/app/api/audit` would test as UNCOVERED and be ALLOWED — the assumption fails
+    // silently and in the dangerous direction. Next applies basePath to custom routes in
+    // its own `buildCustomRoute`, so this is not hypothetical.
+    if (rewrites.basePath !== '') {
+      fail(
+        `${ROUTES_MANIFEST_PATH} reports basePath ${JSON.stringify(rewrites.basePath)}, ` +
+          'not "". Every destination comparison in this check assumes destinations are ' +
+          "root-relative and compares them against the gate matcher's `^/api` anchor; " +
+          'under a basePath they carry that prefix, so a gated destination would test as ' +
+          'outside the gated surface and be ALLOWED. Refusing rather than guessing: this ' +
+          'check needs re-reasoning before it can run under a basePath.',
+      );
+    }
+    // i18n: locale prefixes generate route variants reachable under prefixes the pinned
+    // matcher never sees.
+    if (rewrites.i18n !== null && rewrites.i18n !== undefined) {
+      fail(
+        `${ROUTES_MANIFEST_PATH} carries an \`i18n\` config ` +
+          `(${JSON.stringify(rewrites.i18n)}). Locale-prefixed route variants are ` +
+          'reachable under prefixes the pinned matcher does not describe, so this check ' +
+          'cannot decide coverage. Refusing rather than under-reporting.',
+      );
+    }
+    const matchers = baseline.middlewareMatchers;
+    // Fails closed on a baseline that cannot supply a matcher, and does NOT assume check 11
+    // ran first — check 11 lives in the live half and runs later than this one.
+    if (!Array.isArray(matchers) || !matchers.length) {
+      fail(
+        `${BASELINE_PATH} has no \`middlewareMatchers\` array (it is ` +
+          `${describeShape(matchers)}). This check evaluates the gate's PINNED matcher ` +
+          'against every rewrite destination, so without it there is nothing to decide ' +
+          `coverage with. Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const noRegexp = matchers.filter((m) => !m || typeof m.regexp !== 'string');
+    if (noRegexp.length) {
+      fail(
+        `${BASELINE_PATH}'s \`middlewareMatchers\` has ${noRegexp.length} entr(ies) with ` +
+          'no `regexp` string. A matcher this check cannot compile is a matcher whose ' +
+          'coverage it cannot test, so it refuses rather than skipping it.',
+      );
+    }
+    for (const m of matchers) {
+      try {
+        new RegExp(m.regexp);
+      } catch (err) {
+        // Its own message rather than an opaque RegExp throw from inside a loop.
+        fail(
+          'a pinned middleware matcher regexp does not compile on this host: ' +
+            `${err.message}\n  ${m.regexp}`,
+        );
+      }
+    }
+    // ANTI-ROT ON THE CLEARANCE SET. Every bracket-free public path must be a route that is
+    // actually built. A typo, or a public path whose route stopped being built, would
+    // otherwise sit here as a silent permission to rewrite at it. Bracket-free because
+    // apiRoutes uses Next bracket syntax (`/api/registry/agents/[aid]`), so this can never
+    // clear a dynamic path — true of all seven members today, and said so rather than
+    // discovered later.
+    // Not wrapped in `if (Array.isArray(...))`: a baseline with `apiRoutes` missing would then
+    // SKIP the clearance's only anti-rot assertion. Check 11 does catch that, but two container
+    // boots later — and this check refuses elsewhere precisely so it never depends on another
+    // check having run first.
+    if (!Array.isArray(baseline.apiRoutes)) {
+      fail(
+        `${BASELINE_PATH} has no \`apiRoutes\` array (it is ` +
+          `${describeShape(baseline.apiRoutes)}). This check cross-checks its clearance set ` +
+          'against the built route surface, so without it the clearance cannot be validated ' +
+          `at all. Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const unbuilt = PUBLIC_PATHS_PINNED.filter(
+      (p) => !p.includes('[') && !baseline.apiRoutes.includes(p),
+    );
+    if (unbuilt.length) {
+      fail(
+        `PUBLIC_PATHS_PINNED names ${unbuilt.length} path(s) that are not in ` +
+          `\`baseline.apiRoutes\`: ${unbuilt.join(', ')}.\nThis set is the gate's public ` +
+          "surface AND this check's clearance list, so an entry naming a route that is " +
+          'not built is a standing permission to rewrite at a path nobody serves. Either ' +
+          'the route was removed (update `src/proxy.ts` and this array) or it is a typo.',
+      );
+    }
+    // EVALUATED OVER BOTH TABLES, so this check is not a corollary of check 24. The image's
+    // table is what ships; the PINNED table matters because a bypassing rewrite could
+    // otherwise be smuggled in by blessing it with --update-baseline while the image stays
+    // clean — check 24 would then be green by construction. When the two agree (the normal
+    // case) the second pass costs nothing.
+    //
+    // A missing or malformed `baseline.rewrites` FAILS here rather than being read as an empty
+    // PIN side. Check 24 runs immediately before and already refuses it, so this is unreachable
+    // in practice — but "check N ran first" is the assumption this check declines to make for
+    // `middlewareMatchers` a few lines up, and it would be inconsistent to make it here.
+    if (!Array.isArray(baseline.rewrites)) {
+      fail(
+        `${BASELINE_PATH} has no \`rewrites\` array (it is ` +
+          `${describeShape(baseline.rewrites)}), so the PINNED half of this policy cannot be ` +
+          'evaluated. Treating it as an empty table would mean a hand-blessed bypass in a ' +
+          `malformed baseline went unexamined. Regenerate with \`${REPIN_CMD}\`.`,
+      );
+    }
+    const sides = [
+      ['the IMAGE', rewrites.entries],
+      ['the PIN', baseline.rewrites],
+    ];
+    const offenders = [];
+    const allowed = [];
+    for (const [side, entries] of sides) {
+      for (const e of entries) {
+        const r = classifyRewrite(e, matchers);
+        const label =
+          `${side} ${e.phase ?? '?'}: ${JSON.stringify(e.source)} -> ` +
+          `${JSON.stringify(e.destination)}`;
+        if (r.ok) allowed.push(`${label} — ${r.why}`);
+        else offenders.push(`  ${label}\n      REFUSED: ${r.why}\n      regex: ${e.regex}`);
+      }
+    }
+    if (offenders.length) {
+      fail(
+        `${offenders.length} rewrite(s) reach a path the gate protects, or reach somewhere ` +
+          'this harness cannot prove is safe:\n' +
+          offenders.join('\n') +
+          '\n\nWHY THIS IS A BYPASS, not a style point. Next middleware matches the ' +
+          "INCOMING REQUEST PATH — a rewrite's SOURCE — and never a destination. The gate " +
+          'is attached with a `/api/:path*` matcher, so a request to a source outside it ' +
+          'is delivered to the destination handler with NO auth, NO rate limiting, NO ' +
+          'CORS and NO x-request-id. Measured on a real image: an added ' +
+          '`/admin/audit -> /api/audit` served the admin audit log to an anonymous caller ' +
+          'while every other check here stayed green.\n' +
+          'A rewrite is permitted only if it leaves this app, or its destination is ONE ' +
+          'LITERAL PATH outside the gated surface, or its destination is one of the gate\'s ' +
+          `own public paths (${PUBLIC_PATHS_PINNED.join(', ')}). A TEMPLATE destination is ` +
+          'refused because where it lands depends on the source\'s captures and on `has` ' +
+          'capture groups, which is not decidable here — that is deliberate, and fixing it ' +
+          'by widening the rule is how this check stops being a floor.\n' +
+          'There is no "the source is gated too" exemption, and that is measured, not ' +
+          'cautious: Next compiles rewrite sources case-INSENSITIVELY when ' +
+          '`caseSensitive: false`, so a source of /api/old also matches /API/old, which the ' +
+          'case-sensitive matcher does not cover. If you need such a rewrite, the remedy is ' +
+          'to make the gate cover the source (widen the matcher in `src/proxy.ts` and ' +
+          're-pin), not to widen this check.',
+      );
+    }
+    const n = rewrites.entries.length;
+    return (
+      `${n} shipped rewrite(s) and ${sides[1][1].length} pinned, all permitted; ` +
+      `${PUBLIC_PATHS_PINNED.length} pinned public path(s) form the only clearance` +
+      (allowed.length ? `:\n${allowed.map((a) => `  ${a}`).join('\n')}` : '') +
+      '\n  (evaluated against the PINNED matcher on the host, over both the image\'s table ' +
+      "and the committed one, so blessing a bad rewrite into the baseline cannot hide it)"
+    );
+  });
+
   // ── the cross-arch inventory artifact ────────────────────────────────────
   //
   // WHAT THIS IS FOR, and why it is a file rather than a check. Both arches
@@ -4551,15 +5791,23 @@ async function main() {
   // exactly when the inventory is worth having, and a file that only appears on green
   // would be missing from every run that needed it.
   //
-  // WHAT `structuralChecksFailed` DOES AND DOES NOT COVER. It is written HERE, before
-  // the live substrate is stood up, so it can only ever report on checks 1-6 — the
-  // structural half, which is the half whose findings this file's contents come from. A
-  // run that fails check 13 or check 20 emits `structuralChecksFailed: []`, and that is
-  // correct rather than misleading: the field is scoped by its name. It is NOT a summary
-  // of the run. Do not read an empty array here as "the run passed" — the job's exit
-  // code is the only thing that says that. (Moving the write into a `finally` after all
-  // 23 checks would widen the field, and would also mean no inventory at all from a run
-  // that died in the live phase, which is the one this file is most often wanted for.)
+  // WHAT `structuralChecksFailed` DOES AND DOES NOT COVER. It is written HERE, before the
+  // live substrate is stood up, so it can only ever report on the checks that have RUN by
+  // this point — the structural half, which is the half whose findings this file's contents
+  // come from. That is checks 1-6 and checks 24-25 — the rewrite-table pin and its policy
+  // floor — which keep the ids they were appended with but are CALLED in the static half on
+  // purpose, because a routing-bypass check must not be reachable only after Postgres
+  // health, migrations and two container boots. (This sentence used to say "checks 1-6" and
+  // was corrected when 24 and 25 landed; keep it in step with the CALL SITES above rather
+  // than with the id order.)
+  //
+  // A run
+  // that fails check 13 or check 20 emits `structuralChecksFailed: []`, and that is correct
+  // rather than misleading: the field is scoped by its name. It is NOT a summary of the
+  // run. Do not read an empty array here as "the run passed" — the job's exit code is the
+  // only thing that says that. (Moving the write into a `finally` after all 25 checks would
+  // widen the field, and would also mean no inventory at all from a run that died in the
+  // live phase, which is the one this file is most often wanted for.)
   if (opts.inventoryOut) {
     const doc = {
       _comment:
