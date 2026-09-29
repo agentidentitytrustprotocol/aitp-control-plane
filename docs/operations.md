@@ -42,15 +42,44 @@ signing key, not a config toggle.
   logs a one-time warning.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
   enrollment tokens. Required, and **≥ 32 characters**. Callers never see it.
-  Unset or too short makes **both** `POST /api/registry/enroll` and
-  `POST /api/registry/agents` return `503 SERVER_MISCONFIGURED` for every
-  request, **in every environment** — not just production, and unlike `API_KEYS`
-  this is not a fail-safe on gated routes but the total unavailability of
-  enrollment *and* registration: one route cannot mint tokens, the other cannot
-  verify them. It is not validated at startup either (the service is constructed
-  lazily on the first request to either route), and `/api/readyz` does not check
-  it, so a bad value deploys green and fails only when an agent tries to enroll
-  or register. Verify after any deploy that changes it.
+  Unset or too short takes out **both** `POST /api/registry/enroll` and
+  `POST /api/registry/agents` — and unlike `API_KEYS` this is not a fail-safe on
+  gated routes but the total unavailability of enrollment *and* registration: one
+  route cannot mint tokens, the other cannot verify them. On a server that is
+  running, both answer `503 SERVER_MISCONFIGURED` for every request; in
+  production the server does not get that far.
+
+  **Validated at boot, and under `NODE_ENV=production` an unusable value is
+  fatal:** the process prints one line naming both affected routes and exits `1`
+  before serving anything. Since the image's runner stage hardcodes
+  `NODE_ENV=production`, that covers every container deploy — the healthcheck
+  never passes, so the release fails and the previous one keeps serving, instead
+  of a green deploy that 503s every enrollment for as long as it runs. (You will
+  see Next's own `✓ Ready` line *above* the fatal one: the listener binds before
+  the boot hook runs. The port is open for well under a second on a process that
+  is already exiting.)
+
+  Outside production the same line is printed as a warning and the process
+  starts, because `.env.example` ships the variable empty and a hard stop would
+  break `npm run dev` for anyone who only wants the discovery routes. Both
+  routes' 503s are what covers that case, and they remain correct: a running
+  process must answer sanely. Note `next start` defaults `NODE_ENV` to
+  production, so a local `npm start` gets the fatal path, not this one.
+
+  **The gate is `NODE_ENV === 'production'` exactly**, so a deployment that sets
+  `NODE_ENV` to something else — `staging`, say — gets the warning and starts. That
+  is deliberate consistency rather than an oversight: it is the same
+  `config.isProduction` every other production gate in this service keys on, and a
+  deployment with a non-`production` `NODE_ENV` has already lost more than this
+  one check — empty `API_KEYS` stops failing closed and *disables auth on gated
+  routes* instead. If you run a staging environment, set `NODE_ENV=production`
+  there and differentiate it some other way; the image does this for you.
+
+  `/api/readyz` deliberately does **not** check it — see
+  [Health, readiness & graceful shutdown](#health-readiness--graceful-shutdown)
+  for why. Still verify an enrollment after any deploy that changes the value:
+  boot only proves the secret is *usable*, not that it is the same one your
+  already-issued tokens were minted under.
 - **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
   to a single origin, e.g. `https://console.example.com`. Applied per-request at
   runtime by the proxy, so it can be changed via the deploy environment
@@ -1463,7 +1492,12 @@ which is the whole point of the metric:
   fault also 503s every `POST /api/registry/agents`, and that half is invisible
   here in a stronger sense: this counter is the enroll route's alone, so the
   register route contributes nothing to it under any condition — not even when
-  it is failing for exactly this reason.
+  it is failing for exactly this reason. **A production process can no longer
+  reach this state from a bad env var** — the boot check exits before serving —
+  so in production this is now mostly a *deploy-time* failure you read in the
+  container's first log lines rather than a runtime one you infer from a 5xx rate.
+  Everything below still applies to non-production servers, which start anyway by
+  design.
 - **The rethrow to `500`** — an unclassifiable internal fault.
 
 The first two are the loudest fleet-wide breakages, and — be blunt about it —
@@ -1477,6 +1511,15 @@ ingress or load balancer: alert on the `5xx` rate of **both** registry POSTs —
 rate, not on this counter. (Something does go *quiet*, which is a weaker but real
 signal — see below.)
 
+For the bad-secret half specifically there is now one loud signal, and it is at
+the front of the deploy rather than in the metrics: a production process with an
+unusable `ENROLLMENT_SECRET` prints `[aitp-cp] FATAL: …` and exits `1`, so the
+release fails its healthcheck and never takes traffic. That does not replace the
+ingress alert — it covers a bad *env var*, not a secret that was valid at boot and
+is now the wrong one (a rotation, say, which no boot check can detect) — but it
+does mean a fleet-wide enrollment outage caused by configuration should reach you
+as a failed deploy, not as a 5xx graph.
+
 Because both routes construct the same service, a bad secret hits both at once —
 so you never need the second route to corroborate the first. **But a `5xx` alone
 is not the diagnosis: read the `code` in the body.** `SERVER_MISCONFIGURED` is
@@ -1489,12 +1532,13 @@ outage therefore shows up as a sustained `5xx` rate on `/api/registry/agents`
 the strength of a `5xx` rate; confirm the `code` first.
 
 **For the bad-secret fault specifically** — not the database variant just
-described — there is one in-process signal, and it is an absence rather than an
-increment: `audit_events{type="agent.registered"}` stops rising for the whole
-outage, as does `agents_active`. Nobody can register, so nothing is recorded. It
-does not tell you *why*, which is what the `code` is for, and it is slow: you are
-waiting to notice that something stopped, so ingress `5xx` is still the faster
-alert.
+described — there is one in-process *metric* signal, and it is an absence rather
+than an increment: `audit_events{type="agent.registered"}` stops rising for the
+whole outage, as does `agents_active`. Nobody can register, so nothing is
+recorded. It does not tell you *why*, which is what the `code` is for, and it is
+slow: you are waiting to notice that something stopped, so ingress `5xx` is still
+the faster alert — and the boot failure above is faster than either, when the
+cause is the environment.
 
 That signal does **not** transfer to the database variant, for the reason given
 above: those two series are DB-derived, so during a database outage they are
@@ -1527,13 +1571,41 @@ from a scrape — that guarantee is specific to `enroll_verification_failures`;
 ## Health, readiness & graceful shutdown
 
 - **`GET /api/health`** — liveness + DB ping. Stays `200` even while draining.
-- **`GET /api/readyz`** — readiness (DB reachable, identity initialized).
+- **`GET /api/readyz`** — readiness: not draining, and the database answers
+  `SELECT 1`. (It does **not** check identity, despite what this line used to
+  say — `initCpIdentity()` is reached from the manifest handler, not from here.
+  See the section below for what else it deliberately leaves out.)
 
 On SIGTERM the process enters a drain window: `/api/readyz` flips to
 `503 { "ready": false, "reason": "shutting_down" }` so a load balancer pulls the
 pod out of rotation, while `/api/health` stays `200` so the orchestrator doesn't
 hard-kill it mid-drain. Point your LB/orchestrator readiness probe at
 `/api/readyz` and the liveness probe at `/api/health`.
+
+### What `/api/readyz` deliberately does not check
+
+It checks the drain flag and `SELECT 1`, and nothing else. In particular it does
+**not** check `ENROLLMENT_SECRET`, and that is a decision rather than an
+oversight (issue #99 asked for exactly that and it was answered at boot instead):
+
+- **A readiness probe is for conditions that can change while a process runs.**
+  The secret cannot. It is snapshotted from the environment at module load and
+  the enrollment service memoizes on first success, so one process's verdict on
+  it is fixed for the process's whole life. Failing readiness on a constant could
+  only ever mean "this process should never have started" — so the honest place
+  to say that is startup, which is where it is now said.
+- **The blast radius is wrong.** A `503` from `/api/readyz` removes the replica
+  from rotation for *every* route — discovery, the revocation list, sessions,
+  audit — over a fault that affects two POSTs, and nothing the replica can do
+  will clear it. The two routes' own `503 SERVER_MISCONFIGURED` is the
+  proportionate answer, and `POST` callers get a `code` that names the fault.
+- **It would not have caught the deploy anyway.** `railway.json` points the
+  platform healthcheck at `/api/health`, not `/api/readyz`, so a readyz-only
+  check would leave the very deploy this was reported against green.
+
+If you add a check here, the bar is that a *running* replica can genuinely enter
+and leave the state — a lost database connection qualifies, a startup config
+value does not.
 
 ## Database
 

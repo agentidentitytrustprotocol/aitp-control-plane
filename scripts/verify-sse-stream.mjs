@@ -277,6 +277,21 @@ const API_KEY = 'verify-sse-harness-key-0000';
 /** A fixed NON-PRODUCTION seed, so identity-touching routes answer normally rather
  *  than throwing into the logs this harness reads. Not a secret. */
 const SEED_HEX = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+/**
+ * Must be SET and >= 32 chars, or the container does not boot at all.
+ *
+ * Nothing in this harness touches enrollment — so this looked like a variable it
+ * could omit, and it was omitted until the boot check landed. The image runs
+ * `NODE_ENV=production`, where `src/instrumentation.ts` now exits non-zero before
+ * serving anything if `ENROLLMENT_SECRET` is unusable (issue #99). Without this
+ * every check here would fail as "the app container exited during readiness",
+ * pointing at Docker rather than at a missing variable. Same class of dependency
+ * as `API_KEY` above: a production-required variable this harness must supply
+ * even though it is not what is under test.
+ *
+ * Not a secret — a fixed harness value, like every other constant in this block.
+ */
+const ENROLLMENT_SECRET = 'verify-sse-harness-secret-min-thirty-two-chars';
 
 // ── timeouts ────────────────────────────────────────────────────────────────
 const DEFAULT_DOCKER_MS = 60_000;
@@ -970,6 +985,9 @@ async function startApp(platform, label, extraEnv = {}) {
   const env = {
     API_KEYS: API_KEY,
     CP_AID_SEED_HEX: SEED_HEX,
+    // Required for the container to BOOT under NODE_ENV=production, not for
+    // anything this harness asserts — see the constant's docstring.
+    ENROLLMENT_SECRET,
     SSE_HEARTBEAT_MS: String(HEARTBEAT_MS),
     // NO DATABASE, on purpose — see the NO POSTGRES note in the file header. A
     // closed loopback port fails fast with ECONNREFUSED instead of waiting on DNS,

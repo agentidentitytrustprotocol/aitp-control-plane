@@ -4,8 +4,12 @@
 //   • 503 SERVER_MISCONFIGURED when EnrollmentService cannot be constructed
 //     (unset or too-short ENROLLMENT_SECRET) — a server fault, not the
 //     caller's, and the body names no configuration. Asserted for BOTH
-//     constructor throw sites, with explicit no-leak assertions rather than
+//     unusable-secret cases, with explicit no-leak assertions rather than
 //     implied ones.
+//   • …and its complement: a throw from getEnrollmentService() that is NOT an
+//     EnrollmentConfigError is RETHROWN, not laundered into a 503. The guard
+//     discriminates by class; it used to catch everything and justify itself by
+//     counting throw sites in another file.
 //   • Precedence: a malformed body and a missing manifest.aid still answer
 //     400 BODY_INVALID on a misconfigured server, so a broken deployment
 //     never masks a genuinely bad request.
@@ -78,6 +82,12 @@ jest.mock('@/lib/webhooks/service', () => ({
 }));
 
 import { GET, POST } from './route';
+// NOT mocked, deliberately, unlike `@/lib/registry/enrollment` above: the route
+// tests this class with `instanceof`, so the test and the route must be holding
+// the same class object. Mocking the module — or reconstructing a look-alike
+// error here — would make every 503 case below pass for the wrong reason, or
+// fail for one.
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { NextRequest } from 'next/server';
 
 function makeReq(path: string, init?: RequestInit): NextRequest {
@@ -220,7 +230,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       // telling the whole fleet to stop retrying and re-enroll over tokens
       // that were never the problem.
       getServiceImpl = () => {
-        throw new Error('ENROLLMENT_SECRET is required');
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
       };
       const res = await POST(
         makeReq('/api/registry/agents', {
@@ -241,10 +251,12 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     });
 
     it('returns 503 for a short secret too, with the same opaque body', async () => {
-      // The second of the constructor's two throw sites, and the more
-      // dangerous one: its message embeds the observed length.
+      // The second unusable-secret case, and the more dangerous one: its message
+      // embeds the observed length. (It is no longer a second THROW SITE — the
+      // constructor has one, throwing EnrollmentConfigError for both cases. See
+      // src/lib/registry/enrollment-config.ts.)
       getServiceImpl = () => {
-        throw new Error(
+        throw new EnrollmentConfigError(
           'ENROLLMENT_SECRET must be at least 32 characters (got 9). ' +
             'Generate with: node -e "..."',
         );
@@ -270,7 +282,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       // misconfigured server does not mask a genuinely malformed request
       // behind a 503.
       getServiceImpl = () => {
-        throw new Error('ENROLLMENT_SECRET is required');
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
       };
       const res = await POST(
         makeReq('/api/registry/agents', {
@@ -288,7 +300,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       // The route's second pre-validation, which has no enroll analogue —
       // enroll only checks that `manifest` is an object.
       getServiceImpl = () => {
-        throw new Error('ENROLLMENT_SECRET is required');
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
       };
       const res = await POST(
         makeReq('/api/registry/agents', {
@@ -300,6 +312,35 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { code: string };
       expect(body.code).toBe('BODY_INVALID');
+    });
+
+    it('RETHROWS a non-configuration throw instead of calling it misconfigured', async () => {
+      // The point of discriminating by class, and the behaviour that replaced a
+      // comment in route.ts counting throw sites in another file. Before this,
+      // ANY throw out of getEnrollmentService() became 503 SERVER_MISCONFIGURED
+      // — so a bug or an exhausted resource would send an operator to check an
+      // env var that was fine. A plain Error is the specific case that used to be
+      // indistinguishable: it is what the constructor threw before
+      // EnrollmentConfigError existed.
+      //
+      // It propagates all the way out of withIdempotency, which does not catch
+      // callback throws, so the framework renders a 500 — and nothing is
+      // persisted against an idempotency key (this request sets no
+      // Idempotency-Key header at all, and neither 500 nor 503 is cacheable).
+      getServiceImpl = () => {
+        throw new Error('native binding failed to load');
+      };
+      await expect(
+        POST(
+          makeReq('/api/registry/agents', {
+            method: 'POST',
+            headers: { authorization: 'Bearer ok-token' },
+            body: envelope(3600),
+          }),
+        ),
+      ).rejects.toThrow('native binding failed to load');
+      expect(validateTokenMock).not.toHaveBeenCalled();
+      expect(upsertAgentMock).not.toHaveBeenCalled();
     });
   });
 

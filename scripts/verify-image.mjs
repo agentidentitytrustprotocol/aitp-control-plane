@@ -670,7 +670,15 @@ const SEED_HEX = '00112233445566778899aabbccddeeff00112233445566778899aabbccddee
  * silently exercise a different code path than the one being asserted.
  */
 const API_KEY = 'verify-image-harness-key-0000';
-/** >= 32 chars, or EnrollmentService throws when first constructed. */
+/**
+ * Must be SET and >= 32 chars, or the container does not boot at all.
+ *
+ * It used to be "or EnrollmentService throws when first constructed", which
+ * understated it: the image runs `NODE_ENV=production`, where
+ * `src/instrumentation.ts` exits non-zero before serving anything if this is
+ * unusable (issue #99). An empty value here would fail every check in this
+ * harness as a container that died during readiness, not as an enrollment fault.
+ */
 const ENROLLMENT_SECRET = 'verify-image-harness-secret-min-thirty-two-chars';
 /** Matches ci.yml and docker-compose.yml rather than introducing a third pin. */
 const PG_IMAGE = 'postgres:16-alpine';

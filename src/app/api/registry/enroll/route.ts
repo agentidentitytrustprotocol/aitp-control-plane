@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { childLogger } from '@/lib/logger';
 import { recordEnrollFailure } from '@/lib/registry/enroll-metrics';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import {
   ManifestRejectedError,
   sdkVerifyCode,
@@ -128,23 +129,41 @@ export async function POST(req: NextRequest) {
   // states the precedence in the control flow: a broken server cannot
   // evaluate anyone's manifest.
   //
-  // This second catch is safe to keep this narrow ONLY because that
-  // constructor has exactly two throw sites and no other statement in it can
-  // fail. If you add anything to `EnrollmentService`'s constructor that can
-  // throw for a different reason, this guard must be re-thought — otherwise
-  // it becomes the same catch-all bug pointed the other way.
+  // The guard discriminates BY CLASS: `EnrollmentConfigError` means the
+  // operator's configuration is unusable and the answer is 503, and anything
+  // else out of this call is an internal fault and is RETHROWN — this route's
+  // own idiom for the catch below (discriminate, map, rethrow the rest) applied
+  // one frame earlier. It replaced a narrow catch justified by counting throw
+  // sites in another file; `src/lib/registry/enrollment-config.ts` explains why
+  // that was fragile, once, so this does not have to.
   let service;
   try {
     service = getEnrollmentService();
-  } catch {
+  } catch (err) {
+    if (!(err instanceof EnrollmentConfigError)) {
+      // Not a configuration fault, so not ours to translate. Let the framework
+      // render a 500 and keep internal detail out of the body by construction.
+      // Answering 503 SERVER_MISCONFIGURED here instead would blame the
+      // operator's environment for, say, a bug or an exhausted resource — and
+      // send them looking at an env var that is perfectly fine.
+      throw err;
+    }
     // 503 + SERVER_MISCONFIGURED matches src/proxy.ts's existing precedent for
     // a missing required secret, and docs/api.md already lists 503 as
     // "misconfigured / draining". Two deliberate divergences from that
     // precedent: the message is fixed rather than naming the env var (the
-    // caller is unauthenticated and cannot act on it either way), and the
-    // guard is UNCONDITIONAL rather than production-only — enroll is a public
-    // route, nothing validates this secret at startup, and a server without it
-    // cannot serve enrollment in any environment.
+    // caller is unauthenticated and cannot act on it either way — `err` is
+    // bound above only to test its class, and nothing from it reaches this
+    // body), and the guard is UNCONDITIONAL rather than production-only.
+    //
+    // That second one now matters MORE than when it was written, not less.
+    // Since issue #99 a production boot with an unusable secret exits non-zero
+    // (`src/instrumentation.ts`), so in production this branch is close to
+    // unreachable — but the boot check is deliberately production-gated, which
+    // leaves non-production servers reaching it exactly as before, and leaves
+    // anything holding a service built with an explicit bad secret reaching it
+    // in any environment. A running process must still answer sanely; catching
+    // the fault earlier does not replace answering it.
     return Response.json(
       {
         error: 'enrollment is temporarily unavailable on this server',

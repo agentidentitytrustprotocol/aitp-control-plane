@@ -1,5 +1,6 @@
 import { AitpAgent } from 'aitp';
 import { EnrollmentService, getEnrollmentService } from './enrollment';
+import { EnrollmentConfigError } from './enrollment-config';
 import { ManifestRejectedError, sdkVerifyCode } from './verify-error';
 
 const USABLE_SECRET = 'config-boundary-secret-padded-past-the-32-char-minimum';
@@ -235,13 +236,22 @@ describe('EnrollmentService', () => {
 
   it('refuses to construct with a sub-32-char secret', () => {
     expect(() => new EnrollmentService('too-short')).toThrow(/at least 32/);
+    expect(() => new EnrollmentService('too-short')).toThrow(
+      EnrollmentConfigError,
+    );
   });
 
   it('refuses to construct with no secret at all', () => {
-    // The other half of the pair the route's 503 guard depends on. Both throws
-    // are plain Errors with no cpCode and no .code — which is exactly why the
-    // route cannot be allowed to classify them as a bad manifest, and why it
-    // hoists this construction out of the verification try/catch.
+    // The other half of the pair the route's 503 guard depends on, and the CLASS
+    // is now the contract: both cases throw EnrollmentConfigError, which is what
+    // each route tests for before answering 503. Asserted here, at the throw
+    // site, as well as in each route's own tests — a constructor that started
+    // throwing a plain Error again would turn both 503s into 500s, and the route
+    // tests alone could not tell you where the break was.
+    //
+    // Still with no cpCode and no .code, which is why the route cannot classify
+    // either case as a bad manifest, and why it hoists this construction out of
+    // the verification try/catch.
     expect(() => new EnrollmentService('')).toThrow(/ENROLLMENT_SECRET is required/);
     const err = (() => {
       try {
@@ -250,6 +260,7 @@ describe('EnrollmentService', () => {
         return e;
       }
     })();
+    expect(err).toBeInstanceOf(EnrollmentConfigError);
     expect(err).not.toBeInstanceOf(ManifestRejectedError);
     expect(sdkVerifyCode(err)).toBeUndefined();
   });
@@ -262,9 +273,16 @@ describe('getEnrollmentService — the config boundary', () => {
   // argument, and the constructor throws. Every other test either passes a
   // secret explicitly (bypassing `config`) or mocks `getEnrollmentService`
   // (bypassing both), so without these the two halves were each tested and
-  // their join was not. It matters because nothing validates this secret at
-  // startup — `config.ts` warns only about `API_KEYS`, and only in dev — so
-  // this throw is the entire protection against a silently broken deploy.
+  // their join was not.
+  //
+  // It used to matter because nothing validated this secret at startup, which
+  // made this throw the entire protection against a silently broken deploy.
+  // Since issue #99 a PRODUCTION boot with an unusable secret exits non-zero
+  // (`src/instrumentation.ts`, policy in `enrollment-config.ts`) — but that gate
+  // is production-only by design, so outside production this join is still the
+  // only thing standing between a bad env var and a 500, and inside production
+  // it is still what answers a process that was handed a bad secret some other
+  // way. The boot check made it a second line of defence, not a dead one.
 
   it('throws when ENROLLMENT_SECRET is unset, which is what the route turns into a 503', () => {
     withEnrollmentSecret(undefined, (mod) => {

@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { consumeEnrollmentJti } from '@/lib/registry/jti-store';
 import { listAgents, upsertAgent } from '@/lib/registry/store';
 import { ingestOneEvent } from '@/lib/audit/event-store';
@@ -124,29 +125,48 @@ export async function POST(req: NextRequest) {
     // Hoisting also states the precedence in the control flow: a server that
     // cannot verify any token has no business judging this one.
     //
-    // This catch is safe to keep this narrow ONLY because that constructor has
-    // exactly two throw sites and no other statement in it can fail. The same
-    // caveat now extends one frame further: `validateToken`/`verify` throw
-    // deliberate caller-facing messages that the 401 below echoes on purpose,
-    // so a NON-caller throw added to either re-opens this exact defect on the
-    // 401 path, one frame down. (`createHmac` in `verify` is already such a
-    // site in principle — accepted, because it leaks no configuration and has
-    // no realistic trigger. See issue #91.) If either changes, this guard must
-    // be re-thought, not merely re-pointed.
+    // This guard discriminates BY CLASS: `EnrollmentConfigError` means the
+    // operator's configuration is unusable and the answer is 503, and anything
+    // else out of this call is an internal fault and is RETHROWN, which
+    // `withIdempotency` passes through untouched (it does not catch callback
+    // throws) for the framework to render as a 500. It replaced a narrow catch
+    // justified by counting throw sites in another file;
+    // `src/lib/registry/enrollment-config.ts` explains why that was fragile,
+    // once, so this does not have to.
+    //
+    // The CALLER-FACING half of that caveat still stands, unchanged, one frame
+    // further down: `validateToken`/`verify` throw deliberate caller-facing
+    // messages that the 401 below echoes on purpose, so a NON-caller throw added
+    // to either re-opens this defect on the 401 path. (`createHmac` in `verify`
+    // is already such a site in principle — accepted, because it leaks no
+    // configuration and has no realistic trigger. See issue #91.) A class check
+    // here cannot fix that one; it is a property of what the 401 echoes.
     let service;
     try {
       service = getEnrollmentService();
-    } catch {
+    } catch (err) {
+      if (!(err instanceof EnrollmentConfigError)) {
+        // Not a configuration fault, so not ours to translate — and 503
+        // SERVER_MISCONFIGURED would send an operator to check an env var that
+        // is fine. Rethrown for the framework to render as a 500.
+        throw err;
+      }
       // 503 + SERVER_MISCONFIGURED matches src/proxy.ts's existing precedent
       // for a missing required secret, and docs/api.md already lists 503 as
       // "misconfigured / draining". Two deliberate divergences from that
       // precedent, both inherited from the enroll route: the message is fixed
-      // rather than naming the env var (the caller cannot act on it either
-      // way, and the catch binds no error variable, so leaking it is
-      // impossible by construction rather than by remembering to redact), and
-      // the guard is UNCONDITIONAL rather than production-only — nothing
-      // validates this secret at startup and a server without it cannot
-      // register anyone in any environment.
+      // rather than naming the env var (the caller cannot act on it either way;
+      // `err` is bound above solely to test its class and nothing from it
+      // reaches this body — the value is not even read), and the guard is
+      // UNCONDITIONAL rather than production-only.
+      //
+      // That second one now matters more, not less. Since issue #99 a production
+      // boot with an unusable secret exits non-zero
+      // (`src/instrumentation.ts`), so in production this branch is close to
+      // unreachable — but the boot check is deliberately production-gated, so
+      // non-production servers reach it exactly as before. A running process
+      // must still answer sanely; catching the fault at boot does not replace
+      // answering it.
       //
       // Deliberately INSIDE the withIdempotency callback, which is where this
       // differs from enroll. Placing it here keeps both `400 BODY_INVALID`

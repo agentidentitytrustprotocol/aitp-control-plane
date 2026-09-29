@@ -410,7 +410,10 @@ async function probe(base, route) {
  *      incidental: its guard sits inside the `withIdempotency` callback
  *      specifically to keep the body checks ahead of it.
  *   3. `boot()` always supplies a valid 43-char ENROLLMENT_SECRET, so the 503
- *      has no reason to fire at all.
+ *      has no reason to fire at all — and since issue #99 it could not: the
+ *      server is booted with NODE_ENV=production, where an unusable secret makes
+ *      the process exit non-zero at startup instead of serving. This harness
+ *      would fail as "server did not come up", not as a misclassified probe.
  * (Reaching the 503 would additionally need a body parsing to
  * `{manifest: <object>}` — plus, on the agents route, a `manifest.aid` — which
  * `probe()` cannot send.)
