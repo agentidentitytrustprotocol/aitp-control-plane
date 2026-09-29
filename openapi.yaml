@@ -342,8 +342,26 @@ components:
       required: [jti]
       properties:
         jti: { type: string, format: uuid }
-        reason: { type: string }
-        revokedAt: { type: string, format: date-time }
+        reason:
+          type: string
+          maxLength: 500
+          description: >-
+            Free-form operator note. Must not contain a NUL (U+0000) — that is
+            the one code point neither the `reason` column nor the `jsonb` audit
+            payload can store, and it is rejected `400 BODY_INVALID`. Other
+            control characters (newline, tab) are fine. Not expressible in JSON
+            Schema, hence the prose.
+        revokedAt:
+          type: string
+          format: date-time
+          description: >-
+            Defaults to now. Must fall within years 0001-9999 — the range in
+            which this server's ISO-8601 serialization is a writable
+            `timestamp with time zone`. The bound applies to the UTC instant, not
+            to the digits sent, so `0001-01-01T00:00:00+01:00` is UTC year 0000
+            and is rejected `400 BODY_INVALID`. RFC 3339 `date-time` already
+            forbids the expanded-year forms (`+010000-…`), so a spec-validating
+            client is constrained before it reaches the server.
 
     Webhook:
       type: object
@@ -937,12 +955,27 @@ paths:
         "201": { description: Added }
         "400":
           description: >-
-            `code` is `JTI_INVALID` when `jti` is absent or not a UUID, or
-            `BODY_INVALID` when the body is not JSON, `reason` is not a string or
-            exceeds 500 characters, or `revokedAt` is not a parseable date.
+            `code` is `JTI_INVALID` when `jti` is missing or not a UUID, and
+            `BODY_INVALID` for every other rejection: the body is not JSON,
+            `reason` is not a string, exceeds 500 characters, or contains a NUL
+            (U+0000), or `revokedAt` is unparseable or falls outside years
+            0001-9999. See `RevocationEntryRequest` for the last two, which exist
+            because the values are storable by neither the revocation table nor
+            the audit event this route emits.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            An internal fault — in practice a database one, since the caller-caused
+            failures above are all decided before any SQL runs. Documented because
+            it is reachable **by design** rather than only by accident: this route
+            rethrows a database error instead of answering with it, so the message
+            (which names tables, columns and types) cannot reach the client. The
+            body is whatever the framework renders and is **not** the shared
+            `Error` shape, which is why no schema is declared here. This replaced
+            a `500` carrying `{"error": "<postgres message>", "code":
+            "INSERT_FAILED"}`; that code no longer exists.
 
   /api/webhooks:
     get:
