@@ -373,6 +373,52 @@ It builds the image for one platform, then asserts against the built artifact:
   ever populates this file legitimately, then the matcher check is pinning a manifest the router no
   longer consults, and *that* is what has to move. Recording the populated manifest would pin the
   moved decision as expected and leave the matcher pin asserting a file that decides nothing.
+- **The other routing tables are exactly the pinned ones** — `dataRoutes`, `dynamicRoutes` and
+  `staticRoutes` in `scripts/image-artifact-baseline.json`, read out of the *same*
+  `.next/routes-manifest.json` as the rewrite table and compared **whole**: every key each entry
+  carried, and the entry **order** preserved rather than sorted.
+
+  **This is the one pinned surface with no measured exploit behind it, and that is stated rather
+  than dressed up.** Two thin-overlay images patching only these tables — one on `dataRoutes`, one
+  prepending `{page: '/api/audit', regex: '^/z/audit(?:/)?$'}` to the other two — passed every
+  check the harness then had, and on the running image `GET /z/audit` answered 404 while
+  `GET /api/audit` answered 401. It is pinned for three reasons that need no exploit:
+
+  1. **`nextTreeSha` demonstrably does not cover this file.** The same overlay trick against
+     `rewrites` passed every pre-existing check, so "the framework tree digest covers it" is not
+     available as an argument for *any* table in it.
+  2. **It is nearly free.** The rewrite table is already copied out with `docker cp` against a
+     container that is never started. This adds fields to the same read: no new container, no new
+     probe, no new consent flag.
+  3. **"Not exploitable" is a property of Next 16.3.3, not of the manifest.** The `dynamicRoutes`
+     tamper is inert because `filesystem.js` rebuilds every matcher as
+     `getRouteMatcher(getRouteRegex(route.page))` — recomputed from `page` — and `next-server.js`
+     does it a second time under Next's own comment,
+     `// TODO: can we just re-use the regex from the manifest?`. The serialised regex is dead only
+     while Next chooses to recompute it, in a place its authors have flagged to change; the day it
+     does not, the same tamper is a routing bypass and the failure is silent. And one table needs
+     no future version at all: `dataRoutes`' `dataRouteRegex` is compiled **straight from the
+     manifest string** today, harmless here only because an app-router-only build emits that table
+     empty.
+
+  **Pure change detection, with no policy attached** — the same category as `apiRoutes`. None of
+  these tables has a source/destination split, so there is no "does this reach a gated path"
+  question for a floor to answer, and the rewrite policy is deliberately *not* extended to them.
+
+  **Its own check rather than more of the rewrite-table check**, because a new `/api` route is
+  routine and the rewrite check's failure text is security-worded about gate bypasses. Folding the
+  two together would make an ordinary route addition red a check that opens "an ADDED entry is the
+  dangerous direction" — the same failure mode that keeps `NODE_VERSION` out of the `imageConfig`
+  pin. Split, the triage is precise: the rewrite check red means a rewrite moved and is a security
+  review; this one red means the route inventory moved and is usually a route addition.
+
+  **The accepted cost**, stated so it is not discovered: a new route reds this check. It already
+  reds the matcher check, which pins `apiRoutes` and `apiRouteCount` as equalities, so this adds no
+  new re-pin *event* — only more lines to the diff at one that already exists, and a single
+  `--update-baseline` clears both. The useful signal is the **disagreement**: the two pins come
+  from different files (`functions-config-manifest.json` and `routes-manifest.json`) and describe
+  the same thirty built `/api` routes, so one red without the other means one manifest was changed
+  and the other was not.
 
 It then stands up the **live** half and runs the image for real:
 
@@ -868,8 +914,10 @@ Two properties make it worth more than a smoke test:
   pins `tracedExternals`, `nativeModules`, `middlewareMatchers`, `apiRoutes` with
   `apiRouteCount`, `rewrites` — the compiled rewrite table, taken from the image's
   `.next/routes-manifest.json` rather than from `next.config.ts`'s `rewrites()`, whose
-  output Next compiles — `middlewareManifest`, the whole of the image's
-  `.next/server/middleware-manifest.json`, which is pinned because it takes runtime
+  output Next compiles — `dataRoutes`, `dynamicRoutes` and `staticRoutes`, the other
+  routing tables in that same manifest, pinned as change detection because the framework
+  tree digest demonstrably does not cover that file — `middlewareManifest`, the whole of the
+  image's `.next/server/middleware-manifest.json`, which is pinned because it takes runtime
   **precedence** over the `functions-config-manifest.json` that `middlewareMatchers` comes
   from — and the gate's load-path fields (`bootGraph`, `nextTreeSha`,
   `imageConfig`, `gateRegion`).
@@ -913,8 +961,9 @@ against itself and report green. Three guards:
   regression the baseline exists to catch. If the removal really is intended,
   re-run with `--allow-removals`.
 
-  That gate covers `rewrites` as well: a rewrite that **vanished** from the table is a
-  removal and needs the flag, and because entry order is meaning here, a reorder is
+  That gate covers `rewrites` and the three other routing tables as well: an entry that
+  **vanished** from any of them is a removal and needs the flag, and because entry order is
+  meaning, a reorder is
   printed as a reorder rather than as "unchanged". An **added** rewrite is printed and
   written — and for this one field addition is the *dangerous* direction, since a new
   rewrite whose source the gate does not cover is exactly the bypass described above.
@@ -956,11 +1005,13 @@ against itself and report green. Three guards:
   **change detection** for the route surface — a route appearing, vanishing or being
   renamed is a review point — and consent has moved to where protection now lives.
 
-  **`--allow-gate-change` deliberately does not cover `rewrites`**, which is the obvious
+  **`--allow-gate-change` deliberately does not cover `rewrites`** — nor `dataRoutes`,
+  `dynamicRoutes` or `staticRoutes` — which is the obvious
   question to ask of it. The flag guards *compiled code*, where every change is a security
-  event and the dangerous direction is change itself. A rewrite table is an **inventory of
+  event and the dangerous direction is change itself. A routing table is an **inventory of
   routing entries** — the same category as `apiRoutes` — so it gets the removal gate above,
-  and the addition direction gets a rule over the table's contents instead. The reasoning is
+  and for `rewrites` the addition direction gets a rule over the table's contents instead. The
+  reasoning is
   the flag's own discipline: a consent demanded for every routine routing change stops being
   read, and a consent that has become a reflex protects nothing.
 
