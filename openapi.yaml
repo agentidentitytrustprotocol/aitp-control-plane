@@ -668,9 +668,40 @@ paths:
             inside the 5-minute registration window — the same code
             `POST /api/registry/enroll` returns for that identical condition, so
             a client may handle it once for both routes — or `BODY_INVALID` for a
-            malformed body.
-        "401": { description: Bad token }
-        "429": { description: Rate limited }
+            malformed body (not JSON, no `manifest.aid`, or a non-string
+            `manifest.extensions.namespace`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: >-
+            The enrollment token was rejected. `code` is `TOKEN_INVALID` — wrong
+            scope, expired, `sub` not matching `manifest.aid`, missing `jti`,
+            malformed, bad signature, or an unparseable payload — or
+            `TOKEN_REPLAYED`, meaning a still-valid token was presented a second
+            time: the `jti` is consumed atomically on first use, so a captured
+            token cannot resurrect a deregistered agent or overwrite a
+            registration an operator has since changed.
+
+
+            `error` names the specific reason as human-facing text. Branch on
+            `code`, which distinguishes only those two cases; the prose is not a
+            contract. Note that a server with no usable `ENROLLMENT_SECRET`
+            answers `503`, not `401` — it cannot judge this token at all, and
+            saying otherwise would blame a caller whose token was fine.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: >-
+            Rate limited. `bucket` is `public-ip`: this path is public as far as
+            the request gate is concerned — the enrollment token is checked by
+            the handler, not the gate — so it shares the per-IP bucket rather
+            than the per-key one, even though the request carries a bearer
+            token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RateLimitError" }
         "503":
           description: >-
             `code` is `SERVER_MISCONFIGURED`. The server has no usable
@@ -700,13 +731,26 @@ paths:
       security: []
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
-        "404": { description: Not found }
+        "404":
+          description: No agent with this AID. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [registry]
       summary: Deregister an agent (admin)
       responses:
         "204": { description: Deregistered }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No registry row with this AID, so nothing was deregistered. `code` is
+            `NOT_FOUND`. It specifically does **not** mean "already
+            deregistered": the row is matched on AID alone regardless of status,
+            so repeating this call against an agent that is already
+            `deregistered` still matches and still succeeds.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/agents/{aid}/manifest:
     parameters:
@@ -720,7 +764,15 @@ paths:
       security: []
       responses:
         "200": { description: ManifestEnvelope JSON }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No agent with this AID. `code` is `NOT_FOUND`. Note the `404` body is
+            JSON `Error`, while the `200` body is the agent's stored
+            ManifestEnvelope passed through verbatim — so a client must branch on
+            status before parsing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/sessions:
     get:
@@ -759,7 +811,11 @@ paths:
       summary: Fetch one handshake session
       responses:
         "200": { description: OK }
-        "404": { description: Not found }
+        "404":
+          description: No handshake session with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/events:
     post:
@@ -778,7 +834,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EventIngestResponse" }
-        "400": { description: Body not JSON }
+        "400":
+          description: >-
+            The body did not parse as JSON. `code` is `BODY_INVALID`. Note that a
+            body which parses but is neither an array nor an object with an
+            `events` array is **not** an error — it ingests zero events and
+            answers `200`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "413":
           description: >-
             PAYLOAD_TOO_LARGE — batch over 256 KiB on the wire (checked both
@@ -819,7 +883,16 @@ paths:
                     items: { $ref: "#/components/schemas/AuditEvent" }
                   count:
                     type: integer
-        "400": { description: FILTER_INVALID — unparseable filter value }
+        "400":
+          description: >-
+            `code` is `FILTER_INVALID` — a filter value could not be parsed.
+            Today that means `since` or `until`: they are the only two filters
+            validated rather than passed through, so every other filter either
+            matches or returns an empty result. `error` names the offending
+            filter and echoes the value; branch on `code`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/events/stream:
     get:
@@ -839,7 +912,15 @@ paths:
             arrive as `data: <json>` frames.
           content:
             text/event-stream: { schema: { type: string } }
-        "503": { description: SSE_CAPACITY — MAX_SSE_CONNECTIONS streams already open; back off and retry }
+        "503":
+          description: >-
+            `code` is `SSE_CAPACITY` — `MAX_SSE_CONNECTIONS` streams are already
+            open on this process; back off and retry. Carries a `Retry-After: 30`
+            header. The capacity is per-process, so behind more than one replica
+            a retry may land on an instance with a free slot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/revocation/entries:
     post:
@@ -854,7 +935,14 @@ paths:
             schema: { $ref: "#/components/schemas/RevocationEntryRequest" }
       responses:
         "201": { description: Added }
-        "400": { description: Bad JTI }
+        "400":
+          description: >-
+            `code` is `JTI_INVALID` when `jti` is absent or not a UUID, or
+            `BODY_INVALID` when the body is not JSON, `reason` is not a string or
+            exceeds 500 characters, or `revokedAt` is not a parseable date.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/webhooks:
     get:
@@ -896,7 +984,11 @@ paths:
       summary: Fetch one subscription
       responses:
         "200": { description: OK }
-        "404": { description: Not found }
+        "404":
+          description: No webhook subscription with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     patch:
       tags: [webhooks]
       summary: Update a subscription
@@ -907,13 +999,23 @@ paths:
             schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
       responses:
         "200": { description: Updated }
-        "404": { description: Not found }
+        "404":
+          description: No webhook subscription with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [webhooks]
       summary: Delete a subscription
       responses:
         "204": { description: Deleted }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No webhook subscription with this id, so nothing was deleted. `code`
+            is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/audit:
     get:
@@ -1045,7 +1147,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TrustAnchor" }
-        "404": { description: Not found }
+        "404":
+          description: No trust anchor with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     patch:
       tags: [trust]
       summary: Update a trust anchor
@@ -1061,13 +1167,23 @@ paths:
                 label: { type: string, nullable: true }
       responses:
         "200": { description: Updated }
-        "404": { description: Not found }
+        "404":
+          description: No trust anchor with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [trust]
       summary: Delete a trust anchor
       responses:
         "204": { description: Deleted }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No trust anchor with this id, so nothing was deleted. `code` is
+            `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/pinned-keys:
     get:
@@ -1090,7 +1206,16 @@ paths:
                       pinnedKeys:
                         type: array
                         items: { $ref: "#/components/schemas/PinnedKey" }
-        "404": { description: aid lookup with no match }
+        "404":
+          description: >-
+            An `?aid=` lookup with no matching row in `(namespace, aid)` —
+            `namespace` defaults to `default` when omitted. `code` is
+            `NOT_FOUND`. Reachable **only** on the single-row lookup: without
+            `?aid=` this is a list, and an empty list is a `200` with
+            `pinnedKeys: []`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       tags: [trust]
       summary: Upsert a pinned key
@@ -1126,7 +1251,14 @@ paths:
         - { name: aid, in: query, required: true, schema: { type: string } }
       responses:
         "204": { description: Deleted }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No pinned key for this `(namespace, aid)`, so nothing was deleted.
+            `code` is `NOT_FOUND`. A missing `?aid=` is a `400 BAD_REQUEST`
+            instead, not a `404`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/sessions/{sessionId}/export:
     parameters:
@@ -1141,7 +1273,14 @@ paths:
           content:
             application/json: { schema: { type: object } }
             application/x-ndjson: { schema: { type: string } }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No handshake session with this id. `code` is `NOT_FOUND`, and the body
+            is JSON `Error` regardless of `?format=` — the `jsonl` format applies
+            to the bundle, not to the failure.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/sessions/{sessionId}/replay:
     parameters:
@@ -1184,7 +1323,14 @@ paths:
           content:
             application/json: { schema: { type: object } }
             application/x-ndjson: { schema: { type: string } }
-        "404": { description: Not found }
+        "404":
+          description: >-
+            No agent with this AID. `code` is `NOT_FOUND`, and the body is JSON
+            `Error` regardless of `?format=` — the `jsonl` format applies to the
+            bundle, not to the failure.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/webhooks/{id}/circuit-breaker:
     parameters:
