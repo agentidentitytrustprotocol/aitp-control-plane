@@ -486,7 +486,7 @@ unauthenticated. `verify:gate` cannot see that in the standalone output, because
   it.
 
   (Every "13/13 green" and "all 13 checks" below is a record of a defeat measured against
-  the harness **as it stood at the time**, when it had 13 checks. It has 25 now. The counts
+  the harness **as it stood at the time**, when it had 13 checks. It has 26 now. The counts
   are kept verbatim because the count is part of the evidence, not a description of today.)
 
   The version of this check that shipped through eight review rounds probed the gate's
