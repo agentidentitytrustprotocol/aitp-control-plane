@@ -110,8 +110,22 @@ export async function GET() {
     // anywhere `lines` is appended to. `warn` rather than `error` because the
     // scrape still succeeds (200, with every process-local series intact) and a
     // tight scrape interval would otherwise flood the log during an outage.
+    //
+    // The log is try-guarded, for the reason enroll's recordFailure states:
+    // "instrumentation must never change the response, so neither half may
+    // throw". That rule is at its sharpest here. This handler answers 200 with
+    // every process-local series in it, and pino's `err` serializer does throw
+    // synchronously for an error carrying a throwing getter — so an unguarded
+    // log would convert a DB outage into a 500 scrape, taking the SSE, enroll
+    // and breaker counters down with it. Those are emitted outside this try
+    // precisely because they must survive a DB outage, and a swallowed log line
+    // is a far smaller loss than the whole scrape.
     dbOk = false;
-    logger.warn({ err }, 'metrics scrape: database query failed');
+    try {
+      logger.warn({ err }, 'metrics scrape: database query failed');
+    } catch {
+      // Intentionally ignored — see above.
+    }
   }
 
   // Kept as a literal, with no detail. It is the human hint for whoever is

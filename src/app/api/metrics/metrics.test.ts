@@ -386,6 +386,24 @@ describe('GET /api/metrics — DB unavailable', () => {
     expect(typeof msg).toBe('string');
   });
 
+  it('still serves the full scrape when the logger itself throws', async () => {
+    // Instrumentation must not change the response (the rule
+    // registry/enroll/route.ts states for its own recordFailure), and this is
+    // where that matters most: an unguarded throw from the log would turn a DB
+    // outage into a 500 and take the process-local series down with it —
+    // exactly the series emitted outside the DB try so they survive an outage.
+    dbFail = true;
+    sseMetrics = { open: 2, openedTotal: 3, rejectedTotal: 1 };
+    loggerWarnMock.mockImplementation(() => {
+      throw new Error('logger is broken');
+    });
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('aitp_control_plane_db_up 0');
+    expect(text).toContain('aitp_control_plane_sse_streams_open 2');
+  });
+
   it('publishes no connection detail from a failed scrape', async () => {
     // One rejection carrying every tell issue #112 names at once.
     dbFail = true;

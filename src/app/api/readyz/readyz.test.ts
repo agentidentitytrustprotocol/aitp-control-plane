@@ -110,10 +110,34 @@ describe('GET /api/readyz', () => {
     isShuttingDownMock.mockReturnValue(true);
     const res = await GET();
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { ready: boolean; reason: string };
-    expect(body.ready).toBe(false);
-    expect(body.reason).toBe('shutting_down');
+    // Exact shape here too: the drain body is the other half of the 503
+    // contract, and "a 503 carries exactly `reason`" is only a contract if an
+    // added field fails on both branches.
+    expect((await res.json()) as Record<string, unknown>).toEqual({
+      ready: false,
+      reason: 'shutting_down',
+    });
     expect(executeMock).not.toHaveBeenCalled();
     expect(loggerWarnMock).not.toHaveBeenCalled();
+  });
+
+  it('still answers the classified 503 when the logger itself throws', async () => {
+    // Instrumentation must not change the response — the rule
+    // registry/enroll/route.ts states for its own recordFailure. It bites here
+    // because this path answers 503: an unguarded throw from the log would
+    // render a framework 500 with `Internal Server Error` text, which is
+    // neither the documented readiness body nor the 503 an LB drains on. pino
+    // does throw synchronously for an error carrying a throwing getter, so this
+    // is reachable rather than theoretical.
+    executeMock.mockRejectedValue(new Error('pool exhausted'));
+    loggerWarnMock.mockImplementation(() => {
+      throw new Error('logger is broken');
+    });
+    const res = await GET();
+    expect(res.status).toBe(503);
+    expect((await res.json()) as Record<string, unknown>).toEqual({
+      ready: false,
+      reason: 'db_unreachable',
+    });
   });
 });

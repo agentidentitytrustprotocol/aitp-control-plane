@@ -36,30 +36,47 @@ export async function GET() {
   // carries — deliberate drain, or fault? — which is what decides "wait" versus
   // "page". Keeping an `error` field with fixed text would preserve the slot a
   // message sat in, and the slot is how this bug class keeps coming back (#91,
-  // #98, #99, #111). The values are a closed vocabulary of literals authored
-  // here, so no future one can carry infrastructure detail. Deliberately not a
+  // #98, #111). The values are a closed vocabulary of literals authored here, so
+  // no future one can carry infrastructure detail. Deliberately not a
   // `{error, code}` pair: docs/api.md states the probes answer their own shapes.
   //
-  // Structure is the guard. The catch's ONLY statement is the log, and every
-  // byte of every response body is built outside it, so `err` is not in scope
-  // anywhere a body is constructed — the property `catch {}` buys
-  // (registry/agents/route.ts, and /api/health right next door) without losing
-  // the diagnostic. It cannot be #111's log-and-rethrow: a rethrow renders a
-  // framework 500 with `Internal Server Error` text, which is not the documented
-  // readiness body and not the 503-means-not-ready contract an LB is pointed at.
+  // Structure is the guard. The catch builds no output — every byte of every
+  // response body is constructed outside it, so `err` is not in scope where a
+  // body exists. That is the property a catch binding nothing buys (/api/health
+  // right next door swallows its probe error exactly this way; registry/agents
+  // and enroll use the bare `catch {}` form for parse failures they answer from
+  // literals), without giving up the diagnostic. It cannot be #111's
+  // log-and-rethrow: a rethrow renders a framework 500 with `Internal Server
+  // Error` text, which is not the documented readiness body and not the
+  // 503-means-not-ready contract an LB is pointed at.
   //
   // The log is not optional. src/instrumentation.ts registers no
   // `onRequestError`, so without this line a database outage on the readiness
   // path would produce no pino record at all and the fix would trade a leak for
   // blindness. `warn`, not `error`: the route still answers, and a 5-10s probe
-  // interval would otherwise emit ~100 error lines per replica per ten-minute
+  // interval would otherwise emit 60-120 error lines per replica per ten-minute
   // outage.
+  //
+  // The log is try-guarded for the reason enroll's recordFailure states
+  // ("instrumentation must never change the response, so neither half may
+  // throw"), and that rule bites here specifically: this path answers 503, so a
+  // throw from the log — pino's `err` serializer does throw synchronously if the
+  // error carries a throwing getter — would turn the classified 503 into the
+  // framework 500 the paragraph above exists to avoid. Guarding it is what lets
+  // both halves of that argument hold at once. revocation/entries deliberately
+  // does NOT guard its log for the complementary reason: that path is already a
+  // 500, so a logger fault cannot change its status.
   let dbReachable = false;
   try {
     await db.execute(sql`SELECT 1`);
     dbReachable = true;
   } catch (err) {
-    logger.warn({ err }, 'readiness probe failed: database unreachable');
+    try {
+      logger.warn({ err }, 'readiness probe failed: database unreachable');
+    } catch {
+      // Intentionally ignored — see above. A lost log line is strictly better
+      // than a probe that answers 500 instead of 503.
+    }
   }
 
   if (!dbReachable) {
