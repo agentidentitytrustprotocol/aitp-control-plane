@@ -2,8 +2,12 @@
 // exposition format:
 //   • gauge/counter lines for agents, sessions, webhook deliveries and
 //     per-type audit events (with label-quote escaping)
-//   • aitp_control_plane_db_up 1/0 and the "# DB unavailable" comment on
-//     DB failure — the scrape still returns 200
+//   • aitp_control_plane_db_up 1/0 and the message-free "# DB unavailable"
+//     comment on DB failure — the scrape still returns 200, and the exception
+//     message goes to pino rather than into the body (#112: this route is
+//     public and rate-limit exempt, and the format is line-oriented, so an
+//     interpolated message both leaked connection detail and could inject
+//     forged sample lines)
 //   • process-local metrics (rate-limit drops, circuit-breaker states,
 //     admin-audit insert failures, SSE backlog drops, SSE stream lifecycle,
 //     enrollment verification failures) are emitted even when the DB is down
@@ -16,6 +20,11 @@
 import { jest } from '@jest/globals';
 
 let dbFail = false;
+// The rejection the mocked select-chain throws. Configurable so a test can pin
+// what does NOT reach the body, and identity-comparable so a test can pin that
+// the real error object is what reaches the logger.
+let dbError = new Error('db down');
+const loggerWarnMock = jest.fn();
 let queuedResults: unknown[][] = [];
 let selectCallCount = 0;
 let dropTotals: Record<string, number> = {};
@@ -45,7 +54,7 @@ jest.mock('@/lib/db', () => ({
         groupBy: () => chain,
         then: (onFulfilled, onRejected) =>
           (dbFail
-            ? Promise.reject(new Error('db down'))
+            ? Promise.reject(dbError)
             : Promise.resolve(queuedResults[idx] ?? [])
           ).then(onFulfilled, onRejected),
       };
@@ -71,11 +80,16 @@ jest.mock('@/lib/registry/enroll-metrics', () => ({
 jest.mock('@/lib/audit/sse-metrics', () => ({
   getSseMetrics: () => sseMetrics,
 }));
+jest.mock('@/lib/logger', () => ({
+  logger: { warn: (...a: unknown[]) => loggerWarnMock(...a) },
+}));
 
 import { GET } from './route';
 
 beforeEach(() => {
   dbFail = false;
+  dbError = new Error('db down');
+  loggerWarnMock.mockReset();
   queuedResults = [];
   selectCallCount = 0;
   dropTotals = {};
@@ -320,7 +334,12 @@ describe('GET /api/metrics — DB unavailable', () => {
     expect(res.status).toBe(200);
     const text = await res.text();
 
-    expect(text).toContain('# DB unavailable: db down');
+    // The comment survives (docs/operations.md promises it next to db_up 0) but
+    // carries no detail, and the exception message is nowhere in the body.
+    expect(text).toContain(
+      '# DB unavailable: cause logged server-side, deliberately not published here',
+    );
+    expect(text).not.toContain('db down');
     expect(text).toContain('aitp_control_plane_db_up 0');
     // No DB-derived series when the scrape failed…
     expect(text).not.toContain('aitp_control_plane_agents_active');
@@ -349,5 +368,72 @@ describe('GET /api/metrics — DB unavailable', () => {
     expect(text).toContain(
       '# TYPE aitp_control_plane_enroll_verification_failures counter',
     );
+  });
+
+  it('logs the thrown error through pino instead of publishing it', async () => {
+    dbFail = true;
+    await GET();
+    expect(loggerWarnMock).toHaveBeenCalledTimes(1);
+    const [bindings, msg] = loggerWarnMock.mock.calls[0] as [
+      { err: unknown },
+      string,
+    ];
+    // The real error object, so pino's serializer keeps the stack and any pg
+    // `code`/`errno`. This is the half of #112 that must not be dropped along
+    // with the comment text: src/instrumentation.ts registers no
+    // onRequestError, so nothing else would record a DB outage on this path.
+    expect(bindings.err).toBe(dbError);
+    expect(typeof msg).toBe('string');
+  });
+
+  it('publishes no connection detail from a failed scrape', async () => {
+    // One rejection carrying every tell issue #112 names at once.
+    dbFail = true;
+    dbError = new Error(
+      'getaddrinfo ENOTFOUND db.internal.cluster.local; ' +
+        'password authentication failed for user "cp_prod"; ' +
+        'database "aitp_control_plane" does not exist; ' +
+        'connect ECONNREFUSED 10.2.0.9:5432',
+    );
+    const text = await (await GET()).text();
+    for (const tell of [
+      'ENOTFOUND',
+      'db.internal',
+      'cp_prod',
+      'authentication',
+      'ECONNREFUSED',
+      '10.2.0.9',
+      '5432',
+    ]) {
+      expect(text).not.toContain(tell);
+    }
+  });
+
+  it('cannot have sample lines injected through the error message', async () => {
+    // The second half of #112, which the issue does not name: this is a
+    // LINE-ORIENTED format and the message used to be interpolated unescaped
+    // into a body joined with '\n'. A newline in the message therefore forged
+    // samples rather than merely leaking — here a `db_up 1` that contradicts
+    // the route's own truthful `db_up 0`, which a parser taking the last value
+    // would believe. Asserted as a property of the output (no forged sample, no
+    // second db_up line) rather than as the absence of one string, so a future
+    // route that interpolates some other untrusted text fails this too.
+    dbFail = true;
+    dbError = new Error(
+      'boom\naitp_control_plane_db_up 1\naitp_control_plane_agents_active 999',
+    );
+    const text = await (await GET()).text();
+    expect(text).not.toContain('aitp_control_plane_db_up 1');
+    expect(text).toContain('aitp_control_plane_db_up 0');
+    expect(
+      text.split('\n').filter((l) => l.startsWith('aitp_control_plane_db_up')),
+    ).toHaveLength(1);
+    expect(text).not.toContain('aitp_control_plane_agents_active');
+    // Every line is either a comment or a sample built by this route.
+    for (const line of text.split('\n').filter(Boolean)) {
+      expect(line.startsWith('#') || line.startsWith('aitp_control_plane_')).toBe(
+        true,
+      );
+    }
   });
 });

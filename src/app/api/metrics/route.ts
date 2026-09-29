@@ -6,6 +6,7 @@ import {
   handshakeSessions,
   webhookDeliveries,
 } from '@/lib/db/schema';
+import { logger } from '@/lib/logger';
 import { rateLimiter } from '@/lib/rate-limit';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
@@ -76,8 +77,52 @@ export async function GET() {
       lines.push(`aitp_control_plane_audit_events{type="${labelType}"} ${r.c}`);
     }
   } catch (err) {
+    // The message is LOGGED, never published (#112). It used to be interpolated
+    // into a `# DB unavailable: <msg>` comment here, and the throw comes from
+    // the pg pool, so in a misconfigured or unreachable deployment it names
+    // infrastructure rather than SQL: `getaddrinfo ENOTFOUND
+    // <internal-db-host>`, `password authentication failed for user "<user>"`,
+    // `database "<name>" does not exist`, `connect ECONNREFUSED <host>:<port>`.
+    // This route is in BOTH `PUBLIC_PATHS` and `RATE_LIMIT_EXEMPT_PATHS`
+    // (src/proxy.ts), so that was an internal hostname or username handed to any
+    // anonymous caller who polls for the moment a deploy breaks.
+    //
+    // Two reasons, not one. The second is that the Prometheus text exposition
+    // format is LINE-ORIENTED and the message was interpolated unescaped into a
+    // body joined with '\n'. A message containing a newline therefore did not
+    // merely leak, it injected lines into the scrape: a message reading
+    // "boom\naitp_control_plane_db_up 1" puts a forged healthy sample next to
+    // this route's truthful `db_up 0`, and a parser taking the last value for a
+    // series reports the database as UP during an outage — the opposite of what
+    // the series exists to say. pg messages are not guaranteed single-line
+    // (Postgres composes message/detail/hint, and hostnames come from the
+    // environment), so this was a correctness hole in the format as well as a
+    // disclosure. metrics.test.ts pins it as a property of the output rather
+    // than as the absence of one string.
+    //
+    // Nothing is lost for the scraper: `aitp_control_plane_db_up 0` below is the
+    // signal, and docs/operations.md says so explicitly ("Alert on `db_up`, not
+    // on the absence of the others"). The message-free comment is still emitted
+    // — see below.
+    //
+    // Structure is the guard: this block flips a boolean and logs, and every
+    // output line is built outside it from literals, so `err` is not in scope
+    // anywhere `lines` is appended to. `warn` rather than `error` because the
+    // scrape still succeeds (200, with every process-local series intact) and a
+    // tight scrape interval would otherwise flood the log during an outage.
     dbOk = false;
-    lines.push('# DB unavailable: ' + (err instanceof Error ? err.message : String(err)));
+    logger.warn({ err }, 'metrics scrape: database query failed');
+  }
+
+  // Kept as a literal, with no detail. It is the human hint for whoever is
+  // curling this endpoint during an incident, it costs a scraper nothing
+  // (comments other than # HELP / # TYPE are ignored), and it keeps
+  // docs/operations.md's "`db_up 0` plus a `# DB unavailable` comment appears
+  // instead" true. Emitted here rather than in the catch so the line cannot be
+  // built from `err`, and positioned before the db_up block so scrape output
+  // ordering is unchanged from before the fix.
+  if (!dbOk) {
+    lines.push('# DB unavailable: cause logged server-side, deliberately not published here');
   }
 
   lines.push('# HELP aitp_control_plane_db_up Whether the database was reachable for this scrape');
