@@ -119,12 +119,14 @@ export function assertEnrollmentSecretUsable(raw: string | undefined): void {
  * nothing to say, otherwise a line to print and whether to die after printing
  * it.
  *
- * THE POLICY LIVES HERE, NOT AT THE CALL SITE, for one concrete reason:
+ * THE POLICY IS A PURE FUNCTION, separate from the acting on it
+ * (`enforceEnrollmentSecretAtBoot` below), for one concrete reason:
  * `jest.config.js` excludes `src/instrumentation.ts` from coverage ("OTel
  * bootstrap; exercised only at process start"), so anything decided there is
- * decided in a file no test measures. Keeping the decision a pure function
- * leaves the call site a `console.error` and a `process.exit` — the two things a
- * unit test genuinely cannot run — and puts the branch that matters under test.
+ * decided in a file no test measures. Splitting the verdict from the side
+ * effects lets a test assert the production gate and the exact rendered line
+ * without going anywhere near `process.exit`, and leaves `instrumentation.ts`
+ * holding a single function call.
  *
  * FATAL ONLY IN PRODUCTION, which is this repo's settled convention for a
  * required variable rather than a hedge: `API_KEYS` fails closed in prod and

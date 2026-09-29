@@ -101,9 +101,9 @@
       "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__1ak-eeo._.js",
-      "bytes": 1687,
-      "sha256": "254f58e95937fda61e59ff6125fc48a7365c8558b56e37ebc9271ac0c5c12bcb"
+      "path": "instrumentation/chunks/[root-of-the-server]__1f0_43k._.js",
+      "bytes": 1878,
+      "sha256": "952e623039708496f362b931dd84a40f64884c2eb8e488c50633e53a1ac32d84"
     },
     {
       "path": "instrumentation/chunks/[root-of-the-server]__1up5uol._.js",
@@ -116,9 +116,14 @@
       "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
     },
     {
+      "path": "instrumentation/chunks/src_lib_registry_enrollment-config_ts_0q5mrtz._.js",
+      "bytes": 3828,
+      "sha256": "ebb63d92d4cb7ff18af2737958b29f60134191083a125bcf3ac55ffc5954ae4b"
+    },
+    {
       "path": "instrumentation/instrumentation.js",
       "bytes": 179,
-      "sha256": "6ad7b9205f9130ff4a37671aa10f4b805ada09d0e820a781217af6fdf13085c4"
+      "sha256": "4ce9b0ca94ec7c3f97a880a2163e9b81b0600b6e62ab86240ed7d73b53ca4562"
     },
     {
       "path": "middleware/chunks/[externals]__1-7rkdt._.js",

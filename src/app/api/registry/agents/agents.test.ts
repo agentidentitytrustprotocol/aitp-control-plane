@@ -251,8 +251,10 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     });
 
     it('returns 503 for a short secret too, with the same opaque body', async () => {
-      // The second of the constructor's two throw sites, and the more
-      // dangerous one: its message embeds the observed length.
+      // The second unusable-secret case, and the more dangerous one: its message
+      // embeds the observed length. (It is no longer a second THROW SITE — the
+      // constructor has one, throwing EnrollmentConfigError for both cases. See
+      // src/lib/registry/enrollment-config.ts.)
       getServiceImpl = () => {
         throw new EnrollmentConfigError(
           'ENROLLMENT_SECRET must be at least 32 characters (got 9). ' +

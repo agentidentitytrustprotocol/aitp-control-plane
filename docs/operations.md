@@ -42,12 +42,12 @@ signing key, not a config toggle.
   logs a one-time warning.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
   enrollment tokens. Required, and **≥ 32 characters**. Callers never see it.
-  Unset or too short makes **both** `POST /api/registry/enroll` and
-  `POST /api/registry/agents` return `503 SERVER_MISCONFIGURED` for every
-  request, **in every environment** — not just production, and unlike `API_KEYS`
-  this is not a fail-safe on gated routes but the total unavailability of
-  enrollment *and* registration: one route cannot mint tokens, the other cannot
-  verify them.
+  Unset or too short takes out **both** `POST /api/registry/enroll` and
+  `POST /api/registry/agents` — and unlike `API_KEYS` this is not a fail-safe on
+  gated routes but the total unavailability of enrollment *and* registration: one
+  route cannot mint tokens, the other cannot verify them. On a server that is
+  running, both answer `503 SERVER_MISCONFIGURED` for every request; in
+  production the server does not get that far.
 
   **Validated at boot, and under `NODE_ENV=production` an unusable value is
   fatal:** the process prints one line naming both affected routes and exits `1`
@@ -63,7 +63,17 @@ signing key, not a config toggle.
   starts, because `.env.example` ships the variable empty and a hard stop would
   break `npm run dev` for anyone who only wants the discovery routes. Both
   routes' 503s are what covers that case, and they remain correct: a running
-  process must answer sanely.
+  process must answer sanely. Note `next start` defaults `NODE_ENV` to
+  production, so a local `npm start` gets the fatal path, not this one.
+
+  **The gate is `NODE_ENV === 'production'` exactly**, so a deployment that sets
+  `NODE_ENV` to something else — `staging`, say — gets the warning and starts. That
+  is deliberate consistency rather than an oversight: it is the same
+  `config.isProduction` every other production gate in this service keys on, and a
+  deployment with a non-`production` `NODE_ENV` has already lost more than this
+  one check — empty `API_KEYS` stops failing closed and *disables auth on gated
+  routes* instead. If you run a staging environment, set `NODE_ENV=production`
+  there and differentiate it some other way; the image does this for you.
 
   `/api/readyz` deliberately does **not** check it — see
   [Health, readiness & graceful shutdown](#health-readiness--graceful-shutdown)

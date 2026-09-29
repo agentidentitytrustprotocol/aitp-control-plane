@@ -107,10 +107,11 @@ jobs:
           #
           # Belt-and-braces, not load-bearing, and the same applies to the
           # Dockerfile's copies of these (see the comment there): Next does not
-          # run the instrumentation hook during a production build — its loader
-          # early-returns on NEXT_PHASE=phase-production-build — so the
-          # ENROLLMENT_SECRET boot check cannot fail this step. Measured: this
-          # build exits 0 with the variable unset.
+          # run the instrumentation hook during a production build —
+          # registerInstrumentation() returns early on
+          # NEXT_PHASE=phase-production-build — so the ENROLLMENT_SECRET boot
+          # check cannot fail this step. Measured: this build exits 0 with the
+          # variable unset.
           NODE_ENV: production
           CP_AID_SEED_HEX: '0000000000000000000000000000000000000000000000000000000000000001'
           ENROLLMENT_SECRET: ci-build-secret-min-thirty-two-characters

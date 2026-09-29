@@ -129,17 +129,13 @@ export async function POST(req: NextRequest) {
   // states the precedence in the control flow: a broken server cannot
   // evaluate anyone's manifest.
   //
-  // The guard discriminates BY CLASS, and that is a deliberate replacement for
-  // what this comment used to say. It used to read "safe to keep this narrow
-  // ONLY because that constructor has exactly two throw sites" — a comment in
-  // this file policing a line count in another one, where a third throw site
-  // added there silently re-opened the exact defect this guard fixed, pointed
-  // the other way. `EnrollmentConfigError` (see
-  // `src/lib/registry/enrollment-config.ts`) is now the contract: that class
-  // means the operator's configuration is unusable and the answer is 503;
-  // anything else out of this call is an internal fault and is RETHROWN, which
-  // is this route's own established idiom for the catch below — discriminate,
-  // map, rethrow the rest — applied one frame earlier.
+  // The guard discriminates BY CLASS: `EnrollmentConfigError` means the
+  // operator's configuration is unusable and the answer is 503, and anything
+  // else out of this call is an internal fault and is RETHROWN — this route's
+  // own idiom for the catch below (discriminate, map, rethrow the rest) applied
+  // one frame earlier. It replaced a narrow catch justified by counting throw
+  // sites in another file; `src/lib/registry/enrollment-config.ts` explains why
+  // that was fragile, once, so this does not have to.
   let service;
   try {
     service = getEnrollmentService();

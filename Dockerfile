@@ -26,7 +26,9 @@ ENV NEXT_OUTPUT=standalone
 # src/instrumentation.ts exits non-zero under NODE_ENV=production when
 # ENROLLMENT_SECRET is unusable (issue #99) — but it is a BOOT check and this is
 # a BUILD: Next does not run the instrumentation hook during a production build
-# (its loader early-returns on NEXT_PHASE=phase-production-build). Everything
+# (registerInstrumentation() in
+# next/dist/server/lib/router-utils/instrumentation-globals.external.js returns
+# early on NEXT_PHASE=phase-production-build). Everything
 # else here is lazier still: src/lib/config.ts only `console.warn`s,
 # EnrollmentService is constructed on first use, and CP_AID_SEED_HEX's production
 # throw lives inside initCpIdentity(), reached from a handler rather than at

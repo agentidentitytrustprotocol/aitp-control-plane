@@ -10,10 +10,12 @@
  * "Exactly once per server boot" is why the ENROLLMENT_SECRET check
  * below lives here rather than at `src/lib/config.ts` module scope:
  * this hook means BOOT, and Next deliberately does not run it during
- * the production build (its loader early-returns on
- * `NEXT_PHASE === 'phase-production-build'`). A check at config module
- * scope would fire whenever the first route module is evaluated, which
- * includes `next build` under NODE_ENV=production — turning the
+ * the production build. `registerInstrumentation()` in
+ * `next/dist/server/lib/router-utils/instrumentation-globals.external.js`
+ * returns early on `NEXT_PHASE === 'phase-production-build'`, and every
+ * server-side path funnels through it. A check at config module scope
+ * would instead fire whenever the first route module is evaluated,
+ * which includes `next build` under NODE_ENV=production — turning the
  * Dockerfile's throwaway build placeholders into load-bearing values.
  *
  * OpenTelemetry is disabled by default: set OTEL_ENABLED=true to turn
@@ -40,14 +42,20 @@ export async function register(): Promise<void> {
   // traffic.
   //
   // Everything about WHAT it does — the rule, the message, the
-  // production-only gate, the `console.error`, the `process.exit(1)` —
-  // lives in `enrollment-config.ts`, which is also the module
-  // `EnrollmentService`'s constructor validates through, so boot and the
-  // request path cannot disagree. Two further reasons it is not inlined
+  // production-only gate, the `console.error`/`console.warn` split and the
+  // `process.exit(1)` — lives in `enrollment-config.ts`, which is also the
+  // module `EnrollmentService`'s constructor validates through, so boot and
+  // the request path cannot disagree. Two further reasons it is not inlined
   // here: `jest.config.js` excludes this file from coverage, so a decision
   // made here is measured by nothing; and a literal `process.exit` in this
   // file makes the build warn that a Node API is unsupported on the Edge
   // runtime, about a line the guard above already makes unreachable there.
+  //
+  // That this call happens AT ALL, and happens before the shutdown hooks, is
+  // asserted by `src/instrumentation.test.ts` — the coverage exclusion above
+  // suppresses the measurement, not the test, and every CI path supplies a
+  // valid secret, so nothing else in the repo would notice this line going
+  // missing.
   //
   // Deliberately NOT in /api/readyz: a readiness probe is for conditions
   // that can CHANGE while a process runs, and this one cannot (the value is

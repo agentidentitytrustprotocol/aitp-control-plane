@@ -125,16 +125,14 @@ export async function POST(req: NextRequest) {
     // Hoisting also states the precedence in the control flow: a server that
     // cannot verify any token has no business judging this one.
     //
-    // This guard discriminates BY CLASS. It used to read "safe to keep this
-    // narrow ONLY because that constructor has exactly two throw sites" — a
-    // comment in this file policing a line count in another one, where a third
-    // throw site added there silently re-opened the exact defect this guard
-    // fixed. `EnrollmentConfigError` (see
-    // `src/lib/registry/enrollment-config.ts`) is now the contract: that class
-    // means the operator's configuration is unusable and the answer is 503;
-    // anything else out of this call is an internal fault and is RETHROWN, which
+    // This guard discriminates BY CLASS: `EnrollmentConfigError` means the
+    // operator's configuration is unusable and the answer is 503, and anything
+    // else out of this call is an internal fault and is RETHROWN, which
     // `withIdempotency` passes through untouched (it does not catch callback
-    // throws) for the framework to render as a 500.
+    // throws) for the framework to render as a 500. It replaced a narrow catch
+    // justified by counting throw sites in another file;
+    // `src/lib/registry/enrollment-config.ts` explains why that was fragile,
+    // once, so this does not have to.
     //
     // The CALLER-FACING half of that caveat still stands, unchanged, one frame
     // further down: `validateToken`/`verify` throw deliberate caller-facing

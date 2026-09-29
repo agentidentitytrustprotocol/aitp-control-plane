@@ -48,23 +48,15 @@ export class EnrollmentService {
 
   constructor(secret?: string) {
     const raw = secret ?? config.enrollmentSecret;
-    // ONE throw site, and it throws ONE class: `EnrollmentConfigError`, from
-    // `enrollment-config.ts`, which also owns the rule and both messages.
+    // ONE throw site, throwing ONE class: `EnrollmentConfigError`, from
+    // `enrollment-config.ts`, which also owns the rule, both messages, and the
+    // reasoning for all of it (including why the two registry routes no longer
+    // count throw sites in this file).
     //
-    // That module exists because this check now has a second caller — the boot
-    // hook in `src/instrumentation.ts`, which refuses to start a production
-    // process whose secret is unusable (issue #99). Two copies of "unset, or
-    // shorter than 32 characters" could disagree, and a boot check that passed
-    // what this constructor rejects would be worse than no boot check at all.
-    //
-    // It also retires the invariant both registry routes used to rest on — that
-    // this constructor has exactly two throw sites, so a bare `catch` around
-    // `getEnrollmentService()` could only be catching a configuration fault.
-    // That was a comment in two other files policing a line count in this one.
-    // The rule now is: a configuration fault is `EnrollmentConfigError` and the
-    // routes answer 503; anything else that throws here is an internal fault and
-    // must propagate as a 500. A new throw in this constructor therefore picks
-    // its own side, and picking wrongly is visible rather than silent.
+    // What matters HERE: a configuration fault is `EnrollmentConfigError` and
+    // both routes turn it into a 503; anything else thrown in this constructor is
+    // an internal fault and must propagate as a 500. A throw added here picks one
+    // of those two sides, and picking wrongly is visible rather than silent.
     assertEnrollmentSecretUsable(raw);
     this.secret = Buffer.from(raw);
   }
