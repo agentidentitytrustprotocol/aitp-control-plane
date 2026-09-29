@@ -241,6 +241,26 @@
  * `docker cp`, no code from the image. What it proves is CHANGE DETECTION — the shipped
  * routing table is the reviewed one — and not that the reviewed one is safe.
  *
+ *   THE MIDDLEWARE MANIFEST (check 26). A THIRD PINNED SURFACE, and the one that makes
+ * check 11 mean what it says. The router reads TWO middleware manifests and prefers
+ * `.next/server/middleware-manifest.json` over the `functions-config-manifest.json` check
+ * 11 pins (`router-utils/filesystem.js:278-288`): `middleware['/'].matchers` wins when
+ * populated, and the pinned file is the FALLBACK. So `middlewareMatchers` — the answer to
+ * four separate defeats of check 11 — is load-bearing only while the other manifest is
+ * empty, and nothing asserted that. An image populating it would move the coverage
+ * decision into a file nothing here read, and a narrowing surgical enough to keep the live
+ * probes answering leaves checks 8, 11, 12 and 13 green with the rest of the tree ungated —
+ * the same sampled-probe failure mode that made check 11 a pin in the first place, arriving
+ * through a door the pin does not cover. Check 26 closes it two ways: 26a FAILS, naming the
+ * observed value, if `middleware` or `functions` is populated at all, and 26b pins the
+ * manifest WHOLE so a Next release reshaping it is a review rather than a silent change.
+ * `functions` is in scope because `Object.keys` of it is `getEdgeFunctionsPages()`
+ * (`next-server.js:1030-1036`), which hands a matching /api route to the EDGE SANDBOX
+ * loading the `files` that manifest names — outside `bootGraph` by construction. Read cold
+ * like check 13's and 24's inputs. Filed out of #94 as aitp-control-plane#104 rather than
+ * folded into it, because a narrowed matcher is check 11's surface and not a routing-table
+ * question.
+ *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
  *     workflow (`package.json`'s `start` script) — and owns its own build,
@@ -440,6 +460,12 @@ const PROBE_MS = 120_000;
  * each under DEFAULT_DOCKER_MS, again against a container that never boots. Bounded the
  * same structural way, so it needs no PROBE_MS slot of its own and is not a meaningful
  * line in the budget either.
+ *
+ * Check 26's extraction of /app/.next/server/middleware-manifest.json adds a FOURTH such
+ * cycle, on the same terms: one `create`, one `cp`, one `rm`, no boot. It gets its own
+ * container rather than sharing check 24's on purpose — see `extractMiddlewareManifest` —
+ * and the trade is deliberate: a few seconds against two unrelated manifests' failures
+ * being separately named.
  */
 const WATCHDOG_MS = Number(process.env.AITP_VERIFY_IMAGE_WATCHDOG_MS) || 40 * 60_000;
 /**
@@ -1554,11 +1580,11 @@ process.stdout.write(JSON.stringify({ error: error, files: files }));
  *
  * NOT `middleware-manifest.json`, and the reason is PRECEDENCE rather than the one
  * this comment used to give. It said that file is `{"middleware":{},
- * "sortedMiddleware":[]}` in this image — true, and verified also in an image whose
- * gate IS attached — "so a check written against it would be vacuously green
+ * "sortedMiddleware":[]}` in this image — nearly true, and verified also in an image
+ * whose gate IS attached — "so a check written against it would be vacuously green
  * forever". The emptiness is right; the inference was backwards. The router reads
  * BOTH, and the empty one wins when it is non-empty
- * (`router-utils/filesystem.js:278-287`):
+ * (`router-utils/filesystem.js:278-288`):
  *
  *     if (middlewareManifest.middleware?.['/']?.matchers) { ...use those... }
  *     else if (functionsConfigManifest?.functions['/_middleware']) { ...use these... }
@@ -1566,12 +1592,20 @@ process.stdout.write(JSON.stringify({ error: error, files: files }));
  * So `functions-config-manifest.json` decides the gate's coverage only BECAUSE
  * `middleware-manifest.json` is empty and the fallback branch runs. An image that
  * POPULATED `middleware['/'].matchers` would move the decision into a file nothing
- * here reads, while this check went on pinning the now-unused one. Not measured, and
- * out of scope for the rewrite work that added checks 24/25 — a narrowed matcher is
- * checks 8/10/12/13's surface, not a routing-table question — but it is a real gap
- * and it is filed rather than left in a comment. The remedy is to pin
- * `middleware-manifest.json` whole, or at minimum to assert it is still empty, which
- * is what makes the fallback branch the one that runs.
+ * here reads, while this check went on pinning the now-unused one.
+ *
+ * THAT GAP IS NOW CLOSED BY CHECK 26 (aitp-control-plane#104), which reads the other
+ * manifest cold and does two things: it FAILS, naming the observed value, if
+ * `middleware` or `functions` is populated at all — the precondition that makes the
+ * fallback branch the one that runs — and it pins the manifest WHOLE, so a Next
+ * release reshaping it arrives as a review rather than silently. This probe therefore
+ * still reads only `functions-config-manifest.json`, and that is now a CHECKED
+ * assumption rather than an assumed one. Two corrections to the old note, both
+ * measured in the built image rather than argued: the file is
+ * `{"version":3,"middleware":{},"sortedMiddleware":[],"functions":{}}` — two keys more
+ * than the sentence above quoted, which is why check 26 pins it whole instead of
+ * asserting a literal — and its `functions` map is a second surface entirely, being
+ * `getEdgeFunctionsPages()` (`next-server.js:1030-1036`).
  */
 const PROBE_MIDDLEWARE = `
 const P = '/app/.next/server/functions-config-manifest.json';
@@ -2515,6 +2549,46 @@ async function extractGatePin(tag, platform) {
  * says.
  */
 const ROUTES_MANIFEST_PATH = '/app/.next/routes-manifest.json';
+
+/**
+ * Where the middleware manifest lives inside the image — check 26's subject.
+ *
+ * PINNED BECAUSE OF PRECEDENCE, NOT BECAUSE IT IS INFORMATIVE. This file is EMPTY in this
+ * image, and that emptiness is exactly why it matters: the router reads BOTH manifests and
+ * THIS one WINS when it is populated (`router-utils/filesystem.js:278-288`, verified
+ * against the installed Next 16.3.3):
+ *
+ *     if (middlewareManifest.middleware?.['/']?.matchers) { ...use those... }
+ *     else if (functionsConfigManifest?.functions['/_middleware']) { ...use these... }
+ *
+ * `functions-config-manifest.json` — the file `PROBE_MIDDLEWARE` reads and check 11 pins as
+ * `middlewareMatchers` — is the FALLBACK. So check 11's pin decides the gate's coverage only
+ * BECAUSE this file is empty, and nothing asserted that. An image that populated
+ * `middleware['/'].matchers` would move the coverage decision into a file nothing in this
+ * harness read, while check 11 went on pinning the now-unused one — and a surgical narrowing
+ * (`^/api/(?!sessions).*`) would leave checks 8, 11, 12 and 13 green, because the live gate
+ * probes cover `/api/audit`, `/api/webhooks`, `/api/health` and `POST /api/trust-anchors`
+ * and not the rest of the tree. That is the same "a sampled probe set is satisfiable by a
+ * narrowed matcher" failure mode that motivated pinning `middlewareMatchers` in the first
+ * place — see PROBE_MIDDLEWARE. Filed as aitp-control-plane#104 out of #94's rewrite work
+ * and closed by check 26.
+ *
+ * THE SECOND REASON, and it is why the pin is WHOLE rather than narrowed to the `middleware`
+ * key: THIS FILE'S `functions` MAP DECIDES WHETHER AN /api ROUTE RUNS AS AN EDGE FUNCTION.
+ * `getEdgeFunctionsPages()` is `Object.keys(middlewareManifest.functions)`
+ * (`next-server.js:1030-1036`), and `runApi` (`:675-691`) and `renderPageComponent`
+ * (`:797-820`) compare the matched route's pathname against that list and hand the request
+ * to `runEdgeFunction`, loading the `files` THIS MANIFEST NAMES in the edge sandbox. A file
+ * named there that no chunk loads is outside `bootGraph` by construction, so check 13 cannot
+ * see it. (Not to be confused with `functions-config-manifest.json`'s own `functions` key,
+ * which holds all thirty built routes. Two different files, two different `functions`.)
+ *
+ * Read cold — `docker create` + `docker cp`, container never started — for the reason
+ * `extractRewrites` gives: the artifact must not get to report on the manifests that decide
+ * its own routing.
+ */
+const MIDDLEWARE_MANIFEST_PATH = '/app/.next/server/middleware-manifest.json';
+
 /**
  * The three rewrite phases Next emits, in the order its router evaluates them.
  *
@@ -2617,14 +2691,20 @@ function normaliseRewrite(phase, entry) {
  * ARRAY order is preserved, deliberately: `has` conditions are ANDed and so order-free, but a
  * future keyed-by-position field would not be, and reordering an array is the kind of change
  * this pin should show.
+ *
+ * `canonicaliseJsonValue` below is the recursive key sort, and it has TWO users now: this
+ * function and check 26's middleware-manifest pin. It was named `canonicaliseRewriteValue`
+ * while it had one; the behaviour is unchanged and the rename is so the second user is not
+ * reading a rewrite-specific name. Both users want the same property — the pin's security
+ * content is which values ship, not the byte order of object keys.
  */
-function canonicaliseRewriteValue(v) {
-  if (Array.isArray(v)) return v.map(canonicaliseRewriteValue);
+function canonicaliseJsonValue(v) {
+  if (Array.isArray(v)) return v.map(canonicaliseJsonValue);
   if (v === null || typeof v !== 'object') return v;
   return Object.fromEntries(
     Object.keys(v)
       .sort()
-      .map((k) => [k, canonicaliseRewriteValue(v[k])]),
+      .map((k) => [k, canonicaliseJsonValue(v[k])]),
   );
 }
 
@@ -2633,11 +2713,11 @@ function rewriteLine(e) {
   return JSON.stringify(
     Object.fromEntries([
       ...(Object.prototype.hasOwnProperty.call(e, 'phase')
-        ? [['phase', canonicaliseRewriteValue(e.phase)]]
+        ? [['phase', canonicaliseJsonValue(e.phase)]]
         : []),
       ...keys
         .filter((k) => k !== 'phase')
-        .map((k) => [k, canonicaliseRewriteValue(e[k])]),
+        .map((k) => [k, canonicaliseJsonValue(e[k])]),
     ]),
   );
 }
@@ -3122,6 +3202,161 @@ async function extractRewrites(tag, platform) {
     // callback. Recorded like every other failure here rather than thrown.
     return bad(`could not open the image to read ${ROUTES_MANIFEST_PATH}: ${err.message}`);
   }
+}
+
+// ── the middleware manifest (check 26) ──────────────────────────────────────
+/**
+ * The shipped `middleware-manifest.json`, read out of the image with NO code from the image.
+ *
+ * WHY THIS FILE IS READ AT ALL — the reason is PRECEDENCE, and it is written out in full on
+ * `MIDDLEWARE_MANIFEST_PATH`. The short form: the router reads both middleware manifests and
+ * THIS one wins when populated, so check 11's pin on `functions-config-manifest.json` decides
+ * the gate's coverage only because this file is empty. Nothing asserted that until check 26.
+ *
+ * ITS OWN CONTAINER, not folded into `extractRewrites`, and the reason is the one
+ * `extractRewrites` itself gives for not folding into `extractGatePin`: two unrelated
+ * surfaces would then share one failure. A `routes-manifest.json` this harness cannot parse
+ * and a `middleware-manifest.json` it cannot parse are different findings with different
+ * remedies, and collapsing them would report one as the other. The cost is one more
+ * `docker create`/`cp`/`rm` cycle against a container that never boots — bounded
+ * structurally, not hopefully, exactly as the WATCHDOG_MS comment says of check 24's.
+ *
+ * IT NEVER THROWS, mirroring `extractRewrites` and `gate.regionError`: an unreadable manifest
+ * lands as check 26's named finding, and `--update-baseline` refuses to write rather than
+ * committing an unreadable state.
+ *
+ * ABSENCE IS A FAILURE, NOT AN EMPTY MANIFEST, and this one is worth being exact about
+ * because the two consumers disagree about it. `filesystem.js:231` reads the file with
+ * `.catch(()=>'{}')`, so a MISSING file makes the ROUTER silently take the fallback branch —
+ * which is the state this check exists to assert rather than assume. But
+ * `next-server.js:997-1003` does a bare `require(this.middlewareManifestPath)`, so the same
+ * missing file makes the RENDER SERVER throw. An image in that state is not one whose
+ * middleware manifest is "empty"; it is one this harness does not understand, and it says so.
+ */
+async function extractMiddlewareManifest(tag, platform) {
+  const bad = (error) => ({ manifest: null, error });
+  try {
+    return await withImageContainer(tag, platform, async ({ readFile }) => {
+      let text;
+      try {
+        text = (await readFile(MIDDLEWARE_MANIFEST_PATH)).toString('utf8');
+      } catch (err) {
+        return bad(
+          `${MIDDLEWARE_MANIFEST_PATH} could not be copied out of the image: ${err.message}\n` +
+            'That file takes RUNTIME PRECEDENCE over the ' +
+            '`functions-config-manifest.json` check 11 pins, so its absence is not "the ' +
+            'manifest is empty": `filesystem.js` reads it with `.catch(()=>({}))` and would ' +
+            'silently take the fallback branch, while `next-server.js` `require()`s it ' +
+            'unguarded and would throw. Either way this is not the standalone layout this ' +
+            'harness understands — a Next major, a bundler change, or an image that is not ' +
+            'the standalone output.',
+        );
+      }
+      let manifest;
+      try {
+        manifest = JSON.parse(text);
+      } catch (err) {
+        return bad(`${MIDDLEWARE_MANIFEST_PATH} is not valid JSON: ${err.message}`);
+      }
+      if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+        return bad(
+          `${MIDDLEWARE_MANIFEST_PATH} parsed to ${describeShape(manifest)} rather than a ` +
+            'manifest object.',
+        );
+      }
+      // THE TWO KEYS THE PRECONDITION IS ABOUT MUST BE PRESENT AND BE OBJECTS. Absent or
+      // differently shaped, the precondition cannot be evaluated — and "cannot be
+      // evaluated" must not read as "is satisfied". `middleware` absent would make
+      // `Object.keys(undefined)` throw; treating it as `{}` would be the quiet
+      // disposition on the security half that checks 5, 6 and 24 were each corrected
+      // away from. Next has emitted both keys on every version this harness has seen
+      // (`version: 3` today), so a manifest without them is a shape change, which is
+      // the fail-closed direction.
+      for (const k of MIDDLEWARE_MANIFEST_EMPTY_KEYS) {
+        const v = manifest[k];
+        if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+          return bad(
+            `\`${k}\` in ${MIDDLEWARE_MANIFEST_PATH} is ${describeShape(v)}, not an ` +
+              'object. Check 26 decides whether this manifest leaves the pinned matcher ' +
+              'set in charge by asking whether that map is empty, so a shape it cannot ' +
+              'read is one whose precondition it cannot evaluate — and it refuses rather ' +
+              'than reading an unevaluable precondition as a satisfied one.',
+          );
+        }
+      }
+      // Pinned as the PARSED value with keys recursively sorted, not as raw bytes.
+      // `canonicaliseJsonValue` for the same reason `rewriteLine` uses it: the pin's
+      // security content is which values ship, not how the committed JSON spells its key
+      // order, and a check that reds on a cosmetic re-spelling teaches re-pinning without
+      // reading. Whitespace is likewise not security content — `JSON.stringify(…, null, 2)`
+      // in the baseline would otherwise have to match Next's own formatting byte for byte.
+      return { manifest: canonicaliseJsonValue(manifest), error: null };
+    });
+  } catch (err) {
+    return bad(
+      `could not open the image to read ${MIDDLEWARE_MANIFEST_PATH}: ${err.message}`,
+    );
+  }
+}
+
+/**
+ * The maps in `middleware-manifest.json` that MUST be empty for this harness's other
+ * assertions to mean what they say. Check 26a is the assertion; this is the list.
+ *
+ *   `middleware` — `middleware['/'].matchers` is what `filesystem.js:278` prefers over the
+ * `functions-config-manifest.json` matchers check 11 pins. Populate it and the gate's
+ * COVERAGE is decided by a file check 11 does not read.
+ *   `functions` — `Object.keys(middlewareManifest.functions)` is `getEdgeFunctionsPages()`
+ * (`next-server.js:1030-1036`), which `runApi` (`:675-691`) and `renderPageComponent`
+ * (`:797-820`) use to hand a matching route to the EDGE SANDBOX, loading the `files` this
+ * manifest names. Populate it and a route's HANDLER is decided by a file check 13 cannot see,
+ * because a file no chunk loads is outside `bootGraph` by construction.
+ *
+ * `version` and `sortedMiddleware` are deliberately NOT here: they are pinned by the
+ * whole-manifest equality (check 26b) and neither is read by the server's routing path
+ * (`sortedMiddleware` appears nowhere under `next/dist/server/`, measured). The distinction
+ * is the point — this array is the POLICY FLOOR, and a floor that grows to cover every key
+ * in the file is the equality with extra steps.
+ */
+const MIDDLEWARE_MANIFEST_EMPTY_KEYS = ['middleware', 'functions'];
+
+/**
+ * Every populated entry in the maps above, named with its observed value.
+ *
+ * MODULE SCOPE BECAUSE BOTH THE VERIFICATION PATH (check 26a) AND THE WRITE PATH
+ * (`--update-baseline`) HAVE TO APPLY IT — the same discipline `ALLOWED_MATCHER_KEYS` records
+ * the hard way. Check 26 runs after the `--update-baseline` branch returns, so without the
+ * write-path call, pointing `--update-baseline` at an image whose `middleware['/'].matchers`
+ * was populated would RECORD it, print it as an ordinary field change and exit 0 — the exact
+ * hole D14 Decision 6 closed for the rewrite table. One predicate, two callers.
+ *
+ * IT REPORTS THE OBSERVED VALUE, not just the key. The whole point of failing rather than
+ * skipping (issue #104, following #94's `basePath`/`i18n` preconditions) is that the operator
+ * sees WHAT the manifest now says — a narrowed matcher regexp is legible only when it is on
+ * screen, and it is the thing they have to reason about.
+ *
+ * EMPTINESS IS TESTED AS "NO OWN KEYS", never as "`matchers` is an empty array", and that is
+ * measured rather than fastidious:
+ *   - `filesystem.js:278` is a plain TRUTHINESS test on `middleware['/'].matchers`, and
+ *     `getMiddlewareRouteMatcher([])` returns a matcher that matches NOTHING
+ *     (`middleware-route-matcher.js` is a `for...of` returning false). So `matchers: []`
+ *     takes the FIRST branch and attaches the gate to no path at all.
+ *   - `middleware['/']` present WITHOUT `matchers` still changes which CODE runs:
+ *     `next-server.js:1005-1028` branches on `manifest.middleware['/']` being truthy and
+ *     stops calling `loadNodeMiddleware()`, dispatching through `getEdgeFunctionInfo` and the
+ *     edge sandbox instead.
+ * A check written against the array would pass the first and miss the second.
+ */
+function middlewareManifestOffenders(manifest) {
+  const out = [];
+  for (const k of MIDDLEWARE_MANIFEST_EMPTY_KEYS) {
+    const map = manifest?.[k];
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) continue;
+    for (const entry of Object.keys(map)) {
+      out.push(`  \`${k}[${JSON.stringify(entry)}]\` = ${JSON.stringify(map[entry])}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -4604,6 +4839,19 @@ async function main() {
   // routes-manifest this harness cannot parse should still let the rest of the run report.
   const rewrites = await extractRewrites(opts.tag, platform);
 
+  // The middleware manifest (check 26). Gathered here for the SAME correctness reason the
+  // rewrite table is: the --update-baseline branch below returns before check 26 runs, so a
+  // manifest read inside the check could never be written to the baseline at all.
+  //
+  // Read the same cold way — `docker create` + `docker cp`, container never started — and
+  // its failure is likewise RECORDED rather than fatal. It exists because this file takes
+  // RUNTIME PRECEDENCE over the `functions-config-manifest.json` that check 11 pins
+  // (`filesystem.js:278-288`): check 11's pin decides the gate's coverage only because this
+  // manifest is empty, and until check 26 nothing asserted that. See
+  // MIDDLEWARE_MANIFEST_PATH, and aitp-control-plane#104.
+  const middlewareManifestRead = await extractMiddlewareManifest(opts.tag, platform);
+  const middlewareManifest = middlewareManifestRead.manifest;
+
   // These two run BEFORE any check, so they must tolerate a failed probe without
   // throwing — the whole point of the named-check machinery is that a probe
   // failure becomes checks 3/5/6 reporting it, not an abort that also skips the
@@ -4895,6 +5143,55 @@ async function main() {
         );
       }
     }
+    // The same two rules again, for check 26's manifest. Unreadable first: a baseline cannot
+    // pin a manifest that could not be read, and writing the other fields while leaving
+    // `middlewareManifest` out would put an unreadable state in the committed file, which
+    // check 26 would then report as "this baseline predates check 26" — an unreadable manifest
+    // recorded as an absent one, the conflation this harness refuses everywhere else.
+    if (middlewareManifestRead.error) {
+      fail(
+        'refusing to write a baseline: the middleware manifest could not be read out of this ' +
+          `image.\n  ${middlewareManifestRead.error}\n\n` +
+          'That file takes RUNTIME PRECEDENCE over the `functions-config-manifest.json` whose ' +
+          'matchers are pinned as `middlewareMatchers` above, so a manifest this harness ' +
+          'cannot read is one in which the gate\'s whole coverage decision is invisible. Fix ' +
+          'the image or the extraction before pinning anything from it.',
+      );
+    }
+    // AND THE POLICY, at write time — the D14 Decision 6 rule applied to the second manifest.
+    //
+    // Check 26 lives after this branch returns, so without this gate, `--update-baseline`
+    // against an image whose `middleware['/'].matchers` was populated would WRITE the
+    // populated manifest, print it as an ordinary field change and exit 0. The next plain run
+    // would red check 26a, so it would never be a shipping fail-open — but an operation that
+    // reports success over a moved gate-coverage decision teaches the one reflex this flag's
+    // discipline cannot survive.
+    //
+    // NO OVERRIDE FLAG, deliberately, and the reason is not caution: if Next has begun
+    // populating this file, the remedy is NOT to record it. `middlewareMatchers` would then be
+    // pinned out of a file the router no longer consults, and the fix is to move check 11's
+    // pin — a reviewed harness change, not a consent flag. Same shape as check 25's write gate,
+    // and the same accepted cost D14 Decision 4 took for a legitimate `/api/old → /api/new`.
+    {
+      const populated = middlewareManifestOffenders(middlewareManifest);
+      if (populated.length) {
+        fail(
+          `refusing to write a baseline: the middleware manifest in this image populates ` +
+            `${populated.length} entr${populated.length === 1 ? 'y' : 'ies'} that must be ` +
+            'empty:\n' +
+            populated.join('\n') +
+            '\n\nThis is check 26a applied at write time. A populated `middleware[\'/\']` ' +
+            "moves the gate's COVERAGE decision out of the `functions-config-manifest.json` " +
+            'that `middlewareMatchers` is pinned from and into this file ' +
+            '(`filesystem.js:278-288`), and a populated `functions` entry hands that route to ' +
+            'the EDGE SANDBOX with the `files` this manifest names — a file outside ' +
+            '`bootGraph` by construction. Recording either would pin the moved decision as ' +
+            'the expected state and report success while doing it. There is no consent flag: ' +
+            'if Next now populates this file legitimately, check 11 is pinning a manifest the ' +
+            'router no longer consults, and THAT is what has to be fixed.',
+        );
+      }
+    }
     // The structural gate above is necessary but NOT sufficient, and the hole is
     // demonstrable: an image with the whole `.next/node_modules/@opentelemetry`
     // scope deleted passes checks 1-4 (check 2 used to be vacuous; check 3 only
@@ -4979,6 +5276,36 @@ async function main() {
         for (const s of nowRewriteLines) console.log(`    ${s}`);
       } else {
         show('rewrites', rw);
+      }
+      // ONE OBJECT, so it prints as a before/after rather than an added/removed set — the
+      // whole manifest is four keys and fits on a line a human reads. Canonicalised on BOTH
+      // sides so a re-spelling of the committed JSON's key order reads as unchanged, which is
+      // the same property check 26b's comparison has.
+      //
+      // NO CONSENT FLAG FOR THIS FIELD, and the asymmetry is deliberate rather than an
+      // oversight: the DANGEROUS direction here is POPULATION, and the write-time policy above
+      // refuses that outright with no override. What is left — a Next bump moving `version`,
+      // or a new empty map appearing — is exactly the benign framework drift
+      // `--allow-gate-change` exists NOT to be spent on. A consent demanded for routine drift
+      // stops being read, which is the one thing that discipline cannot survive (see the
+      // GATE-CHANGE GATE below, and D14 Decision 6 on why `rewrites` is not covered either).
+      {
+        const prevLine = Object.prototype.hasOwnProperty.call(prev, 'middlewareManifest')
+          ? JSON.stringify(canonicaliseJsonValue(prev.middlewareManifest))
+          : null;
+        const nowLine = JSON.stringify(middlewareManifest);
+        if (prevLine === null) {
+          console.log(
+            '  middlewareManifest: not pinned yet (this baseline predates check 26)\n' +
+              `    + ${nowLine}`,
+          );
+        } else if (prevLine !== nowLine) {
+          console.log('  middlewareManifest:');
+          console.log(`    - ${prevLine}`);
+          console.log(`    + ${nowLine}`);
+        } else {
+          console.log('  middlewareManifest: unchanged');
+        }
       }
 
       const removed = [
@@ -5178,6 +5505,25 @@ async function main() {
         'nothing in middlewareMatchers, apiRoutes or apiRouteCount. Check 24 asserts this ' +
         'table WHOLE, so adding, removing, reordering or editing a rewrite is a reviewable ' +
         'diff here instead of an invisible change. ' +
+        '`middlewareManifest` is .next/server/middleware-manifest.json, pinned WHOLE, and the ' +
+        'reason is PRECEDENCE rather than informativeness — it is EMPTY in this image and that ' +
+        'emptiness is exactly the point. The router reads BOTH middleware manifests and THIS ' +
+        'one WINS when populated (router-utils/filesystem.js:278-288), so the ' +
+        'functions-config-manifest.json that middlewareMatchers comes from decides the gate\'s ' +
+        'coverage only BECAUSE this file is empty. An image that populated ' +
+        'middleware[\'/\'].matchers would move that decision into a file nothing here read, ' +
+        'while check 11 went on pinning the now-unused one, and a narrowing surgical enough to ' +
+        'keep the live gate probes green would leave checks 8, 11, 12 and 13 green with the ' +
+        'rest of the tree ungated. Its `functions` map is a second surface: ' +
+        'Object.keys(it) is getEdgeFunctionsPages(), which hands a matching /api route to the ' +
+        'EDGE SANDBOX loading the files THIS manifest names — a file no chunk loads is outside ' +
+        'bootGraph by construction, so check 13 cannot see it. Check 26 therefore does two ' +
+        'things: 26a FAILS, naming the observed value, if `middleware` or `functions` is ' +
+        'populated at all (the precondition that makes the fallback branch the one that runs), ' +
+        'and 26b asserts the whole manifest equals this pin, so a Next `version` bump or a new ' +
+        'key arrives as a review rather than silently. NOT to be confused with ' +
+        'functions-config-manifest.json, whose own `functions` key holds all thirty built ' +
+        'routes; two different files. ' +
         '`bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, ' +
         'and they cover the gate\'s whole LOAD PATH rather than just its own chunk: ' +
         'bootGraph is server.js plus every file the middleware and instrumentation ' +
@@ -5207,10 +5553,13 @@ async function main() {
         'Review every line by hand: a new entry means a new external or a new native ' +
         'binary shipped, a missing entry means one stopped shipping, and any change to ' +
         'middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes, ' +
-        'apiRouteCount or rewrites is a security review — the first changes what the gate ' +
+        'apiRouteCount, rewrites or middlewareManifest is a security review — the first ' +
+        'changes what the gate ' +
         'covers, the next three change the code it runs and the environment it runs in, ' +
-        'the next two mean a route appeared, vanished or was renamed, and the last means a ' +
-        'request can now reach a handler by a path the gate may never see.',
+        'the next two mean a route appeared, vanished or was renamed, the next means a ' +
+        'request can now reach a handler by a path the gate may never see, and the last ' +
+        'means the file that OVERRIDES middlewareMatchers at runtime is no longer the empty ' +
+        'one those matchers are load-bearing because of.',
       _regenerate: 'node scripts/verify-image.mjs --update-baseline',
       tracedExternals,
       nativeModules,
@@ -5243,6 +5592,25 @@ async function main() {
       // normaliseRewrite: the file has a precedent both ways, so do not "fix" one to match
       // the other.
       rewrites: rewrites.entries,
+      // ── check 26: the middleware manifest ────────────────────────────────
+      //
+      // `.next/server/middleware-manifest.json` from the image, pinned WHOLE with keys
+      // recursively sorted. PINNED BECAUSE OF PRECEDENCE, NOT BECAUSE IT SAYS ANYTHING: it is
+      // `{"version":3,"middleware":{},"sortedMiddleware":[],"functions":{}}` in this image, and
+      // that emptiness is precisely why the pin matters. `filesystem.js:278-288` prefers
+      // `middleware['/'].matchers` over the `functions-config-manifest.json` matchers pinned as
+      // `middlewareMatchers` above, so that field decides the gate's coverage only while this
+      // file stays empty.
+      //
+      // WHOLE rather than narrowed to the `middleware` key, because the same file's `functions`
+      // map is `getEdgeFunctionsPages()` and decides whether an /api route is dispatched to the
+      // edge sandbox with manifest-named `files` — outside `bootGraph` by construction. Both
+      // surfaces live in one file, so one equality covers both, and check 26a additionally
+      // FAILS on either being populated rather than merely diffing it.
+      //
+      // Arch-invariant: no arch token, no content hash, so one pin serves amd64 and arm64 —
+      // the same property `normaliseRewrite` documents for compiled `regex` strings.
+      middlewareManifest,
       // ── check 13: the gate-code pin ──────────────────────────────────────
       //
       // The gate's LOAD PATH: server.js, the files `.next/server/middleware.js` loads,
@@ -5300,6 +5668,11 @@ async function main() {
     // the request lands, but the source is all the middleware ever sees.
     console.log(`  rewrites (${rewrites.entries.length}):`);
     for (const e of rewrites.entries) console.log(`    ${rewriteLine(e)}`);
+    // Printed WHOLE, on one line, because the whole file is four keys — and because the
+    // question a reviewer has to ask of it is binary and visible at a glance: are `middleware`
+    // and `functions` still `{}`? If either is not, check 26a has already refused to write and
+    // this line never prints.
+    console.log(`  middlewareManifest: ${JSON.stringify(middlewareManifest)}`);
     console.log(`  bootGraph (${gate.graph.length} file(s), middleware entry module ${gate.entryId}):`);
     for (const g of gate.graph) console.log(`    ${g.sha256}  ${String(g.bytes).padStart(7)}  ${g.path}`);
     console.log(`  nextTreeSha: ${gate.nextTree.sha256} (${gate.nextTree.count} files)`);
@@ -5777,6 +6150,208 @@ async function main() {
     );
   });
 
+  // ── check 26: the middleware manifest leaves check 11's pin in charge ─────
+  //
+  // WHY THIS CHECK EXISTS, and the reason is PRECEDENCE rather than informativeness — the
+  // distinction matters because a comment in this file once had it exactly backwards.
+  //
+  // Check 11 pins the gate's matcher set out of `functions-config-manifest.json`, and that is
+  // the right file to pin — but only because of a precondition nothing asserted. The router
+  // reads BOTH middleware manifests and prefers the other one
+  // (`router-utils/filesystem.js:278-288`, verified against the installed Next 16.3.3):
+  //
+  //     if (middlewareManifest.middleware?.['/']?.matchers) { ...use those... }
+  //     else if (functionsConfigManifest?.functions['/_middleware']) { ...use these... }
+  //
+  // So `middlewareMatchers` is load-bearing only while `middleware-manifest.json` is empty.
+  // The old justification for not reading that file said it is
+  // `{"middleware":{},"sortedMiddleware":[]}` in this image "so a check written against it
+  // would be vacuously green forever". The emptiness is right — measured, in the built image,
+  // where the file is actually
+  // `{"version":3,"middleware":{},"sortedMiddleware":[],"functions":{}}` — but the inference
+  // was backwards: the empty file is precisely WHY the pinned one decides anything. That
+  // comment was corrected in #103; this check is the gap it was hiding
+  // (aitp-control-plane#104).
+  //
+  // WHAT THE ATTACK WOULD LOOK LIKE. An image populating `middleware['/'].matchers` moves the
+  // coverage decision into a file nothing here read, while check 11 goes on pinning the
+  // now-unused one. A narrowing surgical enough to keep the live probes green
+  // (`^/api/(?!sessions|tcts|delegations|pinned-keys).*`) leaves checks 8, 11, 12 and 13 green
+  // — the gate probes cover `/api/audit`, `/api/webhooks`, `/api/health` and
+  // `POST /api/trust-anchors` and not the rest of the tree. That is the same "a sampled probe
+  // set is satisfiable by a narrowed matcher" failure mode that made check 11 a pin rather
+  // than a satisfaction test in the first place, arriving through a door the pin does not
+  // cover.
+  //
+  // TWO HALVES, and the split is the design — the same shape as check 13's, not belt and
+  // braces:
+  //
+  //   26a THE PRECONDITION. `middleware` and `functions` must each be an EMPTY map, and a
+  //       violation FAILS naming the observed value rather than skipping — the disposition
+  //       #94 chose for check 25's `basePath`/`i18n` preconditions, for the same reason: a
+  //       precondition that is assumed rather than asserted is how a floor becomes decoration.
+  //       This is the half that closes the direction that matters, and it has NO consent flag
+  //       anywhere, including on the write path.
+  //
+  //   26b THE EQUALITY. The whole manifest against the committed pin. 26a alone would leave
+  //       `version` and `sortedMiddleware` free, so a Next release that reshapes this manifest
+  //       — the event that would most plausibly move the precedence rule itself — could arrive
+  //       silently. Pinning the file whole makes it arrive as a diff. This is also why the pin
+  //       is not narrowed to the `middleware` key: `functions` here is `getEdgeFunctionsPages()`
+  //       (`next-server.js:1030-1036`), and `runApi` (`:675-691`) hands a matching /api route
+  //       to the EDGE SANDBOX loading the `files` this manifest names — a file no chunk loads
+  //       is outside `bootGraph` by construction, so check 13 cannot see it.
+  //
+  // Called in the STATIC HALF, immediately after checks 24 and 25 and for the same reason
+  // (D14 Decision 7): it is a pure function of one copied file plus the committed baseline,
+  // and a check about what the gate covers must not be reachable only after Postgres health,
+  // migrations and two container boots. The id is APPENDED, never renumbered — the file's
+  // standing rule, because renumbering would bury a security addition in a rename and the
+  // historical "13/13 green" counts above are part of the evidence.
+  //
+  // THE ACCEPTED COST, stated rather than discovered: a Next release that legitimately
+  // populates this manifest reds 26a with no override flag. That is correct, not an
+  // inconvenience — at that moment check 11 is pinning a file the router no longer consults,
+  // and the remedy is to move that pin. The same trade check 25 makes, and the same one D14
+  // Decision 4 accepted for a future `/api/old → /api/new` rewrite.
+  //
+  // FOR WHOEVER PICKS UP #105: the harness now pins three of the manifests the standalone
+  // router reads — `functions-config-manifest.json` (as `middlewareMatchers`),
+  // `routes-manifest.json`'s rewrite table (as `rewrites`), and this one whole. The remaining
+  // unpinned surface is `routes-manifest.json`'s `dataRoutes`/`dynamicRoutes`/`staticRoutes`.
+  // The frame is "every manifest the router reads is either pinned or has a written reason why
+  // not", so that it stays a list rather than a series of rediscoveries.
+  await runCheck(
+    26,
+    'the middleware manifest is empty, so the pinned matcher set is what the gate uses',
+    async () => {
+      // A MANIFEST THIS HARNESS COULD NOT READ IS NOT ONE IT MAY BLESS — the same disposition
+      // check 24 takes, and reported before either half so an unreadable file is never
+      // mistaken for an empty one.
+      if (middlewareManifestRead.error) {
+        fail(
+          'the shipped middleware manifest could not be read out of the image:\n' +
+            `  ${middlewareManifestRead.error}\n\n` +
+            'This check establishes that the gate\'s coverage is decided by the matcher set ' +
+            'check 11 pins. It cannot do that against a manifest it cannot read, because the ' +
+            'override it exists to detect would be invisible in exactly that state.',
+        );
+      }
+      // ── 26a: THE PRECONDITION ─────────────────────────────────────────────
+      //
+      // First, because when both halves fail this is the finding that matters and the one
+      // with an actionable remedy. `middlewareManifestOffenders` is shared with the write
+      // path, so a populated manifest cannot be recorded into the baseline and then judged
+      // against it — the hole `ALLOWED_MATCHER_KEYS` records from check 11's own history.
+      const populated = middlewareManifestOffenders(middlewareManifest);
+      if (populated.length) {
+        fail(
+          `the shipped middleware manifest populates ${populated.length} entr` +
+            `${populated.length === 1 ? 'y' : 'ies'} that this harness requires to be empty:\n` +
+            populated.join('\n') +
+            '\n\nWHY THIS FAILS RATHER THAN BEING PINNED AS THE NEW NORMAL. The router reads ' +
+            'BOTH middleware manifests and this one WINS when populated ' +
+            '(`router-utils/filesystem.js:278-288`):\n' +
+            "  if (middlewareManifest.middleware?.['/']?.matchers) { ...use those... }\n" +
+            "  else if (functionsConfigManifest?.functions['/_middleware']) { ...use these... }\n" +
+            `So \`middlewareMatchers\` in ${BASELINE_PATH} — the matcher set check 11 asserts ` +
+            'WHOLE, and the answer to four separate defeats of that check — is what the gate ' +
+            'uses only while `middleware` here is empty. A populated `middleware[\'/\']` moves ' +
+            'the coverage decision into THIS file, and a narrowing surgical enough to keep the ' +
+            'live probes answering (they cover /api/audit, /api/webhooks, /api/health and ' +
+            'POST /api/trust-anchors, not the rest of the tree) leaves checks 8, 11, 12 and 13 ' +
+            'green with the remaining routes served with no auth, no rate limiting and no ' +
+            'CORS.\n' +
+            'A populated `functions` entry is the other surface in the same file: ' +
+            '`Object.keys(functions)` is `getEdgeFunctionsPages()` ' +
+            '(`next-server.js:1030-1036`), and `runApi` (`:675-691`) hands a matching /api ' +
+            'route to the EDGE SANDBOX loading the `files` THIS manifest names — a file no ' +
+            'chunk loads is outside `bootGraph`, so check 13 cannot see it.\n' +
+            'Emptiness is tested as NO KEYS, not as an empty `matchers` array, and that is ' +
+            'measured: the branch above is a plain truthiness test and ' +
+            '`getMiddlewareRouteMatcher([])` matches NOTHING, so `matchers: []` takes the first ' +
+            "branch and attaches the gate to no path at all; and a `middleware['/']` with no " +
+            '`matchers` at all still changes which CODE runs ' +
+            '(`next-server.js:1005-1028`).\n' +
+            'THERE IS NO RE-PIN FOR THIS and no consent flag, deliberately. If Next has begun ' +
+            'populating this manifest legitimately, then check 11 is pinning a file the router ' +
+            'no longer consults, and the fix is to MOVE THAT PIN — a reviewed harness change. ' +
+            'Recording the populated manifest would pin the moved decision as expected and ' +
+            'leave check 11 asserting a file that decides nothing.',
+        );
+      }
+      // ── 26b: THE EQUALITY ─────────────────────────────────────────────────
+      //
+      // FAILS CLOSED ON ABSENCE. `?? {}` here would mean "expected an empty manifest", which
+      // is the quiet disposition checks 5, 6 and 24 were each corrected away from — and it
+      // would pass against a baseline that never pinned this file at all. An absent key means
+      // a baseline predating check 26, not a manifest with nothing in it.
+      const want = baseline.middlewareManifest;
+      if (want === null || typeof want !== 'object' || Array.isArray(want)) {
+        fail(
+          `${BASELINE_PATH} has no \`middlewareManifest\` object (it is ` +
+            `${describeShape(want)}). That is the pin on ` +
+            `${MIDDLEWARE_MANIFEST_PATH}, the file that takes RUNTIME PRECEDENCE over the ` +
+            'matchers pinned as `middlewareMatchers`, so without it this check would be ' +
+            'vacuous — and treating the absence as "expected an empty manifest" would pass ' +
+            'against a baseline that never pinned the file. An older baseline predates this ' +
+            `check: regenerate with \`${REPIN_CMD}\`.`,
+        );
+      }
+      // A MALFORMED PIN IS NAMED AS ONE, not reported as image drift — check 24's rule, for
+      // the same reason: a wrong diagnosis on a security check costs more than the lines it
+      // takes to separate the cases. Here the pin must at least carry the two maps the
+      // precondition is about, or 26a is silently asserting a shape the pin does not describe.
+      const missingMaps = MIDDLEWARE_MANIFEST_EMPTY_KEYS.filter((k) => {
+        const v = want[k];
+        return v === null || typeof v !== 'object' || Array.isArray(v);
+      });
+      if (missingMaps.length) {
+        fail(
+          `${BASELINE_PATH}'s \`middlewareManifest\` is an object, but ` +
+            `${missingMaps.map((k) => `\`${k}\``).join(' and ')} ` +
+            `${missingMaps.length === 1 ? 'is' : 'are'} not a map: ` +
+            missingMaps.map((k) => `${k} is ${describeShape(want[k])}`).join(', ') +
+            `.\n\nThose are the keys 26a's precondition is about, so a pin that does not ` +
+            'carry them describes a manifest shape this check cannot reason about. That is a ' +
+            'malformed PIN, not a changed image — the baseline is generated, never hand-' +
+            `edited, so regenerate it with \`${REPIN_CMD}\`.`,
+        );
+      }
+      // Canonical on BOTH sides, so re-spelling the committed JSON's key order reads as equal.
+      // Same argument as `rewriteLine`: the pin's security content is which values ship, not
+      // the byte order of object keys, and a check that reds on a cosmetic edit teaches people
+      // to re-pin without reading — the one habit this file cannot afford. The IMAGE side is
+      // already canonical (see `extractMiddlewareManifest`); the baseline side is whatever the
+      // committed file happens to hold.
+      const wantLine = JSON.stringify(canonicaliseJsonValue(want));
+      const gotLine = JSON.stringify(middlewareManifest);
+      if (wantLine !== gotLine) {
+        fail(
+          'the shipped middleware manifest is not the pinned one:\n' +
+            `  pinned: ${wantLine}\n` +
+            `  image:  ${gotLine}\n` +
+            locatedDiff(wantLine, gotLine, 60) +
+            '\n\nBoth maps this check requires to be empty ARE empty — 26a passed — so this is ' +
+            'the rest of the manifest moving: a `version` bump, a changed `sortedMiddleware`, ' +
+            'or a key Next did not emit before. That is the case this half exists for, because ' +
+            'a Next release reshaping this manifest is the event most likely to move the ' +
+            'PRECEDENCE RULE itself (`filesystem.js:278-288`) — which would make check 11 pin ' +
+            'the wrong file. Read the new shape against that branch before re-pinning, then ' +
+            `regenerate with \`${REPIN_CMD}\`.`,
+        );
+      }
+      return (
+        `${JSON.stringify(middlewareManifest)} — ` +
+        `${MIDDLEWARE_MANIFEST_EMPTY_KEYS.map((k) => `\`${k}\``).join(' and ')} both empty, so ` +
+        "`filesystem.js`'s fallback branch runs and the gate's coverage is the " +
+        '`middlewareMatchers` check 11 pins; and the manifest equals the committed pin whole. ' +
+        `Read from ${MIDDLEWARE_MANIFEST_PATH} by \`docker cp\` against a container that was ` +
+        'never started, so no code from the image ran'
+      );
+    },
+  );
+
   // ── the cross-arch inventory artifact ────────────────────────────────────
   //
   // WHAT THIS IS FOR, and why it is a file rather than a check. Both arches
@@ -5794,8 +6369,9 @@ async function main() {
   // WHAT `structuralChecksFailed` DOES AND DOES NOT COVER. It is written HERE, before the
   // live substrate is stood up, so it can only ever report on the checks that have RUN by
   // this point — the structural half, which is the half whose findings this file's contents
-  // come from. That is checks 1-6 and checks 24-25 — the rewrite-table pin and its policy
-  // floor — which keep the ids they were appended with but are CALLED in the static half on
+  // come from. That is checks 1-6 and checks 24-26 — the rewrite-table pin, its policy
+  // floor, and the middleware-manifest pin — which keep the ids they were appended with but
+  // are CALLED in the static half on
   // purpose, because a routing-bypass check must not be reachable only after Postgres
   // health, migrations and two container boots. (This sentence used to say "checks 1-6" and
   // was corrected when 24 and 25 landed; keep it in step with the CALL SITES above rather
