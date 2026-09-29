@@ -250,6 +250,57 @@ components:
             the database `SELECT 1`. Human-facing diagnostic text only; it has
             no stable wording and must not be parsed.
 
+    HealthFailure:
+      description: >-
+        The `503` body of `GET /api/health`. Like `ReadinessFailure`, deliberately
+        **not** composed from `Error` and deliberately carrying no `code`: it is a
+        probe response read by an orchestrator, not an API error handed to a client
+        that would branch on a machine code.
+
+
+        Exactly one condition produces it — the database ping failed — so a `503`
+        here means "process up, database unreachable". It is *not* a drain signal:
+        this route never consults the shutdown flag that flips `/api/readyz`, so
+        liveness keeps answering `200` for as long as the process is alive and the
+        database is reachable. Note that this repo points its platform healthcheck
+        at `/api/health` (`railway.json`), so a sustained `503` here is what fails
+        a deploy's healthcheck; the drain case belongs to `/api/readyz` alone.
+
+
+        The `200` body is these same four fields with `ok: true` and `db: ok` — one
+        object literal, built before the status is chosen — so a probe may key off
+        `ok` (or the status) alone and ignore the rest. The `200` is not declared
+        separately for the same reason `/api/readyz`'s is not: the schema
+        requirement this file holds itself to is about error responses.
+      type: object
+      required: [ok, service, aid, db]
+      properties:
+        ok:
+          type: boolean
+          const: false
+          description: Always `false` on a `503`, and always `true` on the `200`.
+        service:
+          type: string
+          const: aitp-control-plane
+          description: >-
+            Constant service identifier, so a shared or proxied probe path makes it
+            obvious which service answered.
+        aid:
+          type: string
+          example: "aid:pubkey:z:abc..."
+          description: >-
+            The control plane's own AID, read from its cached manifest. Present on
+            the `503` too: it comes from process-local identity rather than from a
+            query, so a database outage does not remove it. (This is also the one
+            probe that touches CP identity at all — `/api/readyz` does not.)
+        db:
+          type: string
+          const: error
+          description: >-
+            Always `error` on a `503` and `ok` on the `200`. The database ping is
+            the only check this probe makes, which is why it is the only field that
+            can disagree with `ok`.
+
     Agent:
       type: object
       required: [aid, displayName, handshakeEndpoint, offeredCaps, status]
@@ -503,6 +554,29 @@ paths:
       security: []
       responses:
         "200": { description: OK }
+        "503":
+          description: >-
+            The database ping failed. The process itself is up — that is what this
+            probe reports — so this is "up, but cannot serve anything that needs the
+            database", not a crashed instance.
+
+
+            The body is **not** the shared `Error` shape and carries no `code` —
+            see `HealthFailure` for why, and for the `200`'s shape, which is the
+            same four fields.
+
+
+            Undeclared here until #107, which is a gap worth naming: an operator
+            configuring alerts from this file alone would have had no way to know
+            that a non-`200` from the liveness probe is a documented, classified
+            answer with a readable body rather than an unhandled fault.
+
+
+            Unlike `/api/readyz`, this route does not consult the shutdown flag, so
+            a drain never produces a `503` here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthFailure" }
 
   /api/readyz:
     get:

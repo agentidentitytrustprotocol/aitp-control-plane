@@ -35,7 +35,7 @@ spec rather than restate it.
 
   `POST /api/revocation/entries` was the one exception, returning `{ "error": ..., "code": "INSERT_FAILED" }` with a raw database message in `error`. That code is **gone**; a client that special-cased it can delete that branch. The input mistakes that used to surface that way are now `400 BODY_INVALID` instead (see [Revocation](#revocation)).
 
-  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
+  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, aid, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
 
 ## Authentication
 
@@ -75,8 +75,8 @@ Cached responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7). An emp
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | public | Liveness + DB ping. Stays `200` during a SIGTERM drain. |
-| GET | `/api/readyz` | public | Readiness (DB reachable, identity initialized). `503` once draining. |
+| GET | `/api/health` | public | Liveness + DB ping. `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. |
+| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity, which is `/api/health`'s business. |
 | GET | `/api/metrics` | public | Prometheus text format |
 
 ### Discovery
