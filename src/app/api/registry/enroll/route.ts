@@ -175,9 +175,22 @@ export async function POST(req: NextRequest) {
     // caller-facing text about a token the caller supplied, not an
     // undiscriminated catch-all.
     //
-    // revocation/entries/route.ts is the one that remains: it maps any throw to
-    // 500 INSERT_FAILED with the raw database message. That one is not a
-    // precedent this block follows either.
+    // revocation/entries/route.ts was the last one open — it mapped any throw to
+    // 500 INSERT_FAILED with the raw database message. That was #98, and it is
+    // fixed, which closes this class repo-wide.
+    //
+    // It is worth recording HOW it differed, because it is the case this block's
+    // shape does not cover. That route had no lib-thrown error type to
+    // discriminate: the only thing in its try was a database insert, so an
+    // instanceof ladder had nothing to match on and the "known" half of the idiom
+    // was empty. What it did have was two failure modes that looked like server
+    // faults but were the caller's — a `revokedAt` outside what timestamptz can
+    // parse, and a `reason` containing U+0000 — both decidable from the request
+    // body. So the fix hoisted those into request validation (the agents/route.ts
+    // move above, not this one) and left the insert observed-but-unanswered:
+    // logged, then rethrown. Deleting its catch-all WITHOUT hoisting them first
+    // would have turned two caller errors into opaque 500s, which is why "just
+    // rethrow" is not on its own a complete answer to a catch-all.
     if (err instanceof ManifestRejectedError) {
       // We rejected it, deliberately, and it is the caller's fault. No
       // verifyCode: the SDK is not what rejected this. The cpCode is

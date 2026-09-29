@@ -342,8 +342,30 @@ components:
       required: [jti]
       properties:
         jti: { type: string, format: uuid }
-        reason: { type: string }
-        revokedAt: { type: string, format: date-time }
+        reason:
+          type: string
+          maxLength: 500
+          description: >-
+            Free-form operator note. Must not contain a NUL (U+0000) — that is
+            the one code point neither the `reason` column nor the `jsonb` audit
+            payload can store, and it is rejected `400 BODY_INVALID`. Other
+            control characters (newline, tab) are fine. Not expressible in JSON
+            Schema, hence the prose.
+        revokedAt:
+          type: string
+          format: date-time
+          description: >-
+            Defaults to now. Must fall between `1970-01-01T00:00:00.000Z` and
+            `9999-12-31T23:59:59.999Z`, or `400 BODY_INVALID`. The two ends have
+            different reasons: above the upper bound the value is not a writable
+            `timestamp with time zone` at all, while below the epoch it is
+            storable but cannot be republished faithfully, since the signed
+            revocation list carries `revoked_at` as seconds since that epoch. The
+            bound applies to the UTC instant, not to the digits sent, so
+            `1970-01-01T00:00:00+01:00` is `1969-12-31T23:00Z` and is rejected.
+            RFC 3339 `date-time` already forbids the expanded-year forms
+            (`+010000-…`), so a spec-validating client is constrained before it
+            reaches the server.
 
     Webhook:
       type: object
@@ -937,12 +959,30 @@ paths:
         "201": { description: Added }
         "400":
           description: >-
-            `code` is `JTI_INVALID` when `jti` is absent or not a UUID, or
-            `BODY_INVALID` when the body is not JSON, `reason` is not a string or
-            exceeds 500 characters, or `revokedAt` is not a parseable date.
+            `code` is one of three values. `JTI_INVALID` when `jti` is missing or
+            not a UUID. `IDEMPOTENCY_KEY_INVALID` when an `Idempotency-Key` header
+            is present but empty, over 255 characters, or contains control
+            characters — this one comes from the idempotency layer and so is
+            common to every endpoint accepting that header, not specific to this
+            route. `BODY_INVALID` for every rejection of the body itself: not
+            JSON; `reason` not a string, over 500 characters, or containing a NUL
+            (U+0000); `revokedAt` unparseable or outside
+            `1970-01-01T00:00:00.000Z` .. `9999-12-31T23:59:59.999Z`. See
+            `RevocationEntryRequest` for the last two.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            An internal fault — in practice a database one, since the caller-caused
+            failures above are all decided before any SQL runs. Documented because
+            it is reachable **by design** rather than only by accident: this route
+            rethrows a database error instead of answering with it, so the message
+            (which names tables, columns and types) cannot reach the client. The
+            body is whatever the framework renders and is **not** the shared
+            `Error` shape, which is why no schema is declared here. This replaced
+            a `500` carrying `{"error": "<postgres message>", "code":
+            "INSERT_FAILED"}`; that code no longer exists.
 
   /api/webhooks:
     get:
