@@ -155,6 +155,10 @@ const RUN_ID = `rev-flow-${randomUUID()}`;
 
 const jti1 = randomUUID();
 const jti2 = randomUUID();
+// For the revokedAt boundary check below — the only place the route's
+// years-0001-9999 bound is measured against a real server rather than a mock.
+const boundaryMinJti = randomUUID();
+const boundaryMaxJti = randomUUID();
 const parentTctJti = randomUUID();
 const childDelegationJti = randomUUID();
 const grandchildDelegationJti = randomUUID();
@@ -173,10 +177,15 @@ const secondIdentityAid = AitpAgent.fromSeed(Buffer.alloc(32, 0x11)).aid;
 
 describe('integration: revocation entry → signed well-known list → delegation cascade', () => {
   afterAll(async () => {
-    const allJtis = [jti1, jti2, parentTctJti];
+    const allJtis = [jti1, jti2, parentTctJti, boundaryMinJti, boundaryMaxJti];
     await db
       .delete(revocationEntries)
-      .where(sql`${revocationEntries.jti} in (${jti1}, ${jti2}, ${parentTctJti})`);
+      .where(
+        sql`${revocationEntries.jti} in (${sql.join(
+          allJtis.map((j) => sql`${j}`),
+          sql`, `,
+        )})`,
+      );
     await db
       .delete(delegations)
       .where(
@@ -188,7 +197,10 @@ describe('integration: revocation entry → signed well-known list → delegatio
     await db
       .delete(auditEvents)
       .where(
-        sql`${auditEvents.type} = 'tct.revoked' and ${auditEvents.payload}->>'jti' in (${jti1}, ${jti2}, ${parentTctJti})`,
+        sql`${auditEvents.type} = 'tct.revoked' and ${auditEvents.payload}->>'jti' in (${sql.join(
+          allJtis.map((j) => sql`${j}`),
+          sql`, `,
+        )})`,
       );
     await db
       .delete(adminAuditLog)
@@ -332,6 +344,51 @@ describe('integration: revocation entry → signed well-known list → delegatio
     const longReason = await postRevocation({ jti: randomUUID(), reason: 'x'.repeat(501) });
     expect(longReason.status).toBe(400);
     expect((await longReason.json()).code).toBe('BODY_INVALID');
+  });
+
+  // The route bounds `revokedAt` to years 0001-9999 because that is exactly the
+  // range in which `toISOString()` output is parseable as `timestamptz`. The unit
+  // tests mock the database and so can only pin the JavaScript constants; this is
+  // the one place the bound is checked against a real server. If a future Postgres
+  // narrows the range, or the constants drift, one of these 201s becomes a
+  // propagated 500 and this fails loudly rather than silently.
+  //
+  // Equality is asserted in SQL, using Postgres's own parse and comparison, which
+  // is the thing under test — not a JS re-parse of whatever text format the driver
+  // hands back for year 0001.
+  it('stores both ends of the accepted revokedAt range', async () => {
+    const cases = [
+      [boundaryMinJti, '0001-01-01T00:00:00.000Z'],
+      [boundaryMaxJti, '9999-12-31T23:59:59.999Z'],
+    ] as const;
+    for (const [jti, revokedAt] of cases) {
+      const res = await postRevocation({ jti, revokedAt, reason: 'boundary' });
+      expect(res.status).toBe(201);
+      expect((await res.json()).revokedAt).toBe(revokedAt);
+
+      const rows = await db
+        .select({ jti: revocationEntries.jti })
+        .from(revocationEntries)
+        .where(
+          sql`${revocationEntries.jti} = ${jti} and ${revocationEntries.revokedAt} = ${revokedAt}::timestamptz`,
+        );
+      expect(rows).toHaveLength(1);
+    }
+  });
+
+  // The complement (#98): one step outside that range is rejected by the route
+  // with a 400 naming the rule, rather than handed to Postgres to reject with a
+  // message that names the column's type.
+  it('rejects an out-of-range revokedAt without letting Postgres answer', async () => {
+    const res = await postRevocation({
+      jti: randomUUID(),
+      revokedAt: '+010000-01-01T00:00:00Z',
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe('BODY_INVALID');
+    expect(body.error).toMatch(/years 0001-9999/);
+    expect(body.error).not.toContain('timestamp with time zone');
   });
 
   it('revoking a TCT cascades to its delegation chain, visible via GET /api/delegations', async () => {
