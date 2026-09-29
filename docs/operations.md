@@ -1561,7 +1561,10 @@ from a scrape — that guarantee is specific to `enroll_verification_failures`;
 ## Health, readiness & graceful shutdown
 
 - **`GET /api/health`** — liveness + DB ping. Stays `200` even while draining.
-- **`GET /api/readyz`** — readiness (DB reachable, identity initialized).
+- **`GET /api/readyz`** — readiness: not draining, and the database answers
+  `SELECT 1`. (It does **not** check identity, despite what this line used to
+  say — `initCpIdentity()` is reached from the manifest handler, not from here.
+  See the section below for what else it deliberately leaves out.)
 
 On SIGTERM the process enters a drain window: `/api/readyz` flips to
 `503 { "ready": false, "reason": "shutting_down" }` so a load balancer pulls the

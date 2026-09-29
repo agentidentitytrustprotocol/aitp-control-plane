@@ -261,17 +261,20 @@ describe('enforceEnrollmentSecretAtBoot', () => {
   // would take the Jest worker down with it and report as a crashed suite.
   let exitSpy: jest.SpiedFunction<typeof process.exit>;
   let errorSpy: jest.SpiedFunction<typeof console.error>;
+  let warnSpy: jest.SpiedFunction<typeof console.warn>;
 
   beforeEach(() => {
     exitSpy = jest
       .spyOn(process, 'exit')
       .mockImplementation(((_code?: number) => undefined) as never);
     errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     exitSpy.mockRestore();
     errorSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('is completely silent when the secret is usable', () => {
@@ -281,10 +284,11 @@ describe('enforceEnrollmentSecretAtBoot', () => {
       mod.enforceEnrollmentSecretAtBoot();
     });
     expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
-  it('prints and exits non-zero on a production boot with no secret', () => {
+  it('logs at ERROR and exits non-zero on a production boot with no secret', () => {
     // The whole point of issue #99: the deploy fails here, loudly, before any
     // traffic — rather than reporting ready and 503ing every enrollment.
     withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: undefined }, (mod) => {
@@ -295,14 +299,20 @@ describe('enforceEnrollmentSecretAtBoot', () => {
     // 1, not 0: a zero exit reads as a clean shutdown to an orchestrator, and
     // railway.json's restartPolicyType is ON_FAILURE.
     expect(exitSpy).toHaveBeenCalledWith(1);
+    // The level carries the verdict, so the two cases must not be confusable.
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('prints but does NOT exit outside production', () => {
+  it('logs at WARN and does NOT exit outside production', () => {
+    // The level follows the verdict, the same split config.ts makes for an empty
+    // API_KEYS. Emitting this at error level would page someone for a dev box
+    // that is behaving exactly as documented.
     withEnv({ NODE_ENV: 'development', ENROLLMENT_SECRET: 'too-short' }, (mod) => {
       mod.enforceEnrollmentSecretAtBoot();
     });
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('Starting anyway');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain('Starting anyway');
+    expect(errorSpy).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
   });
 

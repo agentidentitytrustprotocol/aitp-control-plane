@@ -193,9 +193,12 @@ export function enrollmentSecretBootFailure(): {
  * made there is measured by nothing, while this function is tested — including
  * the exit, with `process.exit` spied.
  *
- * `console.error` rather than the pino logger, matching `config.ts`'s precedent
- * for boot-time configuration messages and keeping the fatal path free of a
- * dependency that could itself fail to load.
+ * `console.*` rather than the pino logger, matching `config.ts`'s precedent for
+ * boot-time configuration messages and keeping the fatal path free of a
+ * dependency that could itself fail to load. The LEVEL follows the verdict —
+ * `error` when the process is about to die, `warn` when it is starting anyway —
+ * which is the same split `config.ts` makes for an empty `API_KEYS`. Emitting the
+ * non-fatal case at error level would page someone for a dev box.
  *
  * `process.exit(1)` rather than throwing: Next wraps a throw from `register()`
  * and rethrows it into its own bootstrap, and what the standalone server does
@@ -208,7 +211,19 @@ export function enrollmentSecretBootFailure(): {
 export function enforceEnrollmentSecretAtBoot(): void {
   const failure = enrollmentSecretBootFailure();
   if (failure === null) return;
-  // eslint-disable-next-line no-console
-  console.error(failure.message);
-  if (failure.fatal) process.exit(1);
+  // if/else rather than an early `process.exit` followed by the warn: TypeScript
+  // types `process.exit` as `never`, so a fall-through would be unreachable in
+  // production — but a test that mocks `process.exit` (the only way to assert the
+  // fatal path without killing the Jest worker) makes it return, and the fatal
+  // message was then ALSO emitted at warn level. Caught by the test asserting the
+  // two levels are exclusive. Control flow that is only correct because a
+  // function never returns is control flow waiting to be mocked.
+  if (failure.fatal) {
+    // eslint-disable-next-line no-console
+    console.error(failure.message);
+    process.exit(1);
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(failure.message);
+  }
 }
