@@ -96,7 +96,7 @@
  *     `Set.prototype.has` shim in it served four un-probed routes anonymously with all 13
  *     checks the harness then had passing. (Every "13/13" and "n of 13" in this file is a
  *     record of a defeat measured against the harness AS IT STOOD AT THE TIME, not against
- *     today's 25 checks. They are kept verbatim because the count is part of the evidence.)
+ *     today's 26 checks. They are kept verbatim because the count is part of the evidence.)
  *     Complete over the COMPILED CHUNK GRAPH the gate's loaders reach, including
  *     bytes outside the gate function (deny(), applyCors(), the config parser). It is NOT
  *     complete over everything that executes — see WHAT IS OUT OF SCOPE.
@@ -6381,7 +6381,7 @@ async function main() {
   // that fails check 13 or check 20 emits `structuralChecksFailed: []`, and that is correct
   // rather than misleading: the field is scoped by its name. It is NOT a summary of the
   // run. Do not read an empty array here as "the run passed" — the job's exit code is the
-  // only thing that says that. (Moving the write into a `finally` after all 25 checks would
+  // only thing that says that. (Moving the write into a `finally` after all 26 checks would
   // widen the field, and would also mean no inventory at all from a run that died in the
   // live phase, which is the one this file is most often wanted for.)
   if (opts.inventoryOut) {
