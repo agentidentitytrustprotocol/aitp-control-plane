@@ -25,7 +25,10 @@
 //     route has always used for this condition.
 //   • a server that cannot construct EnrollmentService at all (unset/short
 //     ENROLLMENT_SECRET) -> 503 SERVER_MISCONFIGURED, with no config detail
-//     in the body, and without ever calling the service
+//     in the body, and without ever calling the service — recognized by the
+//     EnrollmentConfigError class, so any OTHER throw from
+//     getEnrollmentService() is rethrown as a 500 rather than blamed on the
+//     operator's environment
 //
 //   • instrumentation: exactly one `logger.warn` per classified failure,
 //     carrying only the code pair and a length-capped request id — never the
@@ -66,6 +69,12 @@ jest.mock('@/lib/registry/enroll-metrics', () => ({
 }));
 
 import { POST } from './route';
+// NOT mocked, deliberately, unlike `@/lib/registry/enrollment` above: the route
+// tests this class with `instanceof`, so the test and the route must be holding
+// the same class object. Mocking the module — or reconstructing a look-alike
+// error here — would make every 503 case below pass for the wrong reason, or
+// fail for one.
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { ManifestRejectedError } from '@/lib/registry/verify-error';
 import { NextRequest } from 'next/server';
 
@@ -325,7 +334,7 @@ describe('POST /api/registry/enroll', () => {
     // answered 400 MANIFEST_INVALID, telling the whole fleet to stop retrying
     // and fix manifests that were never the problem.
     getServiceImpl = () => {
-      throw new Error('ENROLLMENT_SECRET is required');
+      throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
     };
     const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
     expect(res.status).toBe(503);
@@ -340,7 +349,7 @@ describe('POST /api/registry/enroll', () => {
 
   it('returns 503 for a short secret too, with the same opaque body', async () => {
     getServiceImpl = () => {
-      throw new Error(
+      throw new EnrollmentConfigError(
         'ENROLLMENT_SECRET must be at least 32 characters (got 9). Generate with: ...',
       );
     };
@@ -350,6 +359,27 @@ describe('POST /api/registry/enroll', () => {
     expect(body.code).toBe('SERVER_MISCONFIGURED');
     expect(body.error).not.toContain('ENROLLMENT_SECRET');
     expect(body.error).not.toContain('32');
+  });
+
+  it('RETHROWS a non-configuration throw from getEnrollmentService', async () => {
+    // The point of discriminating by class, and the behaviour that replaced a
+    // comment in route.ts counting throw sites in another file. Before this, ANY
+    // throw out of getEnrollmentService() became 503 SERVER_MISCONFIGURED — so a
+    // bug, a broken dependency or an exhausted resource would tell an operator
+    // to go and check an env var that was perfectly fine, and would tell the
+    // caller to retry later on a fault that retrying will not clear.
+    //
+    // A plain Error is the specific case that used to be indistinguishable:
+    // that is exactly what the constructor threw before EnrollmentConfigError
+    // existed, so this assertion is also what stops a future refactor from
+    // silently reverting the class contract to prose.
+    getServiceImpl = () => {
+      throw new Error('native binding failed to load');
+    };
+    await expect(POST(makeReq(JSON.stringify({ manifest: {} })))).rejects.toThrow(
+      'native binding failed to load',
+    );
+    expect(verifyAndIssueTokenMock).not.toHaveBeenCalled();
   });
 
   describe('observability', () => {
@@ -443,7 +473,7 @@ describe('POST /api/registry/enroll', () => {
 
     it('does not count a 503: a broken server is not a verification failure', async () => {
       getServiceImpl = () => {
-        throw new Error('ENROLLMENT_SECRET is required');
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
       };
       const res = await POST(badManifestReq());
       expect(res.status).toBe(503);
@@ -565,7 +595,7 @@ describe('POST /api/registry/enroll', () => {
     // Precedence check: pre-validation still runs first, so a misconfigured
     // server does not mask a genuinely malformed request with a 503.
     getServiceImpl = () => {
-      throw new Error('ENROLLMENT_SECRET is required');
+      throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
     };
     const res = await POST(makeReq('not json'));
     expect(res.status).toBe(400);
