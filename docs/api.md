@@ -29,7 +29,7 @@ spec rather than restate it.
   big). Such a field is always optional and additive — absent means "not
   applicable here", never "unknown".
 
-  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
+  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`; the other two — `DELETE /api/registry/agents/:aid` and `DELETE /api/webhooks/:id` — answer `200` with a one-line confirmation body (`{"aid": ..., "status": "deregistered"}` and `{"id": ..., "deleted": true}`). Do not assume one shape for "a DELETE on this API": until #107 `openapi.yaml` claimed all four were `204`, and that went unnoticed because this sentence named the `204` pair without naming the other two.
 
   A `500` **never** carries the shape above. Every internal fault reaches you as a framework response whose body is whatever the framework renders — not JSON, and not the `{error, code}` contract — so do not parse it and do not branch on it. The status is the whole signal: retry, and if it persists, the server's operator has the detail in their logs. Routes reach this state deliberately, by rethrowing anything they cannot classify (`POST /api/registry/enroll`, `POST /api/revocation/entries`), which is what keeps internal detail — database messages especially — out of client-facing bodies by construction.
 
@@ -98,7 +98,7 @@ The CP's own manifest has an 86400s TTL and is kept fresh automatically — it r
 | GET | `/api/registry/agents/:aid` | public | Fetch one agent |
 | GET | `/api/registry/agents/:aid/manifest` | public | Fetch the cached signed manifest (raw JSON) |
 | GET | `/api/registry/agents/:aid/export` | API key | Bundle agent + sessions + TCTs + recent events |
-| DELETE | `/api/registry/agents/:aid` | API key | Deregister |
+| DELETE | `/api/registry/agents/:aid` | API key | Deregister. `200` with `{aid, status: "deregistered"}` — a status flip, not a row deletion. |
 
 #### `POST /api/registry/enroll`
 
@@ -294,7 +294,7 @@ Consumers of the signed list should verify it with the `aitp` SDK's `verifyRevoc
 | GET | `/api/webhooks` | API key | List subscriptions |
 | POST | `/api/webhooks` | API key | Create |
 | PATCH | `/api/webhooks/:id` | API key | Update |
-| DELETE | `/api/webhooks/:id` | API key | Remove |
+| DELETE | `/api/webhooks/:id` | API key | Remove (`200` with `{id, deleted: true}`, not `204`) |
 | GET | `/api/webhooks/:id/circuit-breaker` | API key | Current breaker state snapshot |
 | POST | `/api/webhooks/:id/circuit-breaker/reset` | API key | Manually re-arm a breaker stuck open |
 
