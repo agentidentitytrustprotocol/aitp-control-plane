@@ -91,9 +91,11 @@ jobs:
       - name: Integration tests
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
-          # >= 32 chars. NOT enforced at boot — EnrollmentService is constructed
-          # lazily on the first enrollment request, so a bad value here fails
-          # the enroll tests rather than startup.
+          # >= 32 chars. A bad value here fails the enroll tests, not startup:
+          # integration tests call route handlers directly under Jest and never
+          # boot a Next server, so the boot-time check (src/instrumentation.ts,
+          # production-only) never runs in this step. EnrollmentService is still
+          # constructed lazily on the first request that needs it.
           ENROLLMENT_SECRET: ci-integration-secret-min-thirty-two-chars
           CP_AID_SEED_HEX: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
           CP_BASE_URL: http://localhost:4000
@@ -102,6 +104,13 @@ jobs:
       - name: Next build (smoke test)
         env:
           # Production-required vars must be set for `next build`.
+          #
+          # Belt-and-braces, not load-bearing, and the same applies to the
+          # Dockerfile's copies of these (see the comment there): Next does not
+          # run the instrumentation hook during a production build — its loader
+          # early-returns on NEXT_PHASE=phase-production-build — so the
+          # ENROLLMENT_SECRET boot check cannot fail this step. Measured: this
+          # build exits 0 with the variable unset.
           NODE_ENV: production
           CP_AID_SEED_HEX: '0000000000000000000000000000000000000000000000000000000000000001'
           ENROLLMENT_SECRET: ci-build-secret-min-thirty-two-characters
