@@ -166,6 +166,90 @@ components:
                 (per-key); like `verifyCode`, not an `enum` — buckets are an
                 internal partitioning this service may re-cut.
 
+    PayloadTooLargeError:
+      description: >-
+        The `413` body of `POST /api/events`. Composed from `Error` — same
+        pattern as `RateLimitError` — plus an optional `eventType` naming the
+        single event that blew the cap.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            eventType:
+              type: string
+              example: handshake.complete
+              description: >-
+                The `type` of the one event whose `payload` exceeded the
+                per-event cap.
+
+
+                **Present on exactly one of the four `413` paths.** The route
+                rejects a batch for four distinct reasons, all carrying
+                `code: PAYLOAD_TOO_LARGE`: a declared `Content-Length` over the
+                batch byte cap, an actual streamed body over that same cap
+                (checked on the bytes, because `Content-Length` is spoofable
+                and omittable under chunked encoding), more events in one batch
+                than the event-count ceiling, and a single event's `payload`
+                over the per-event byte cap. Only the last of those can name an
+                offender, so only it sets this field.
+
+
+                Its absence therefore means "the whole batch was too big, no
+                one event is to blame" — not "we do not know which". That
+                follows the rule `docs/api.md` states for every optional
+                machine-readable detail field on this API: absent means "not
+                applicable here", never "unknown".
+
+
+                Note the batch is rejected whole either way. Partial acceptance
+                would force the caller to reconcile which events landed, which
+                defeats the point of batching, so `eventType` is a diagnostic
+                pointing at what to shrink — not a report of what was dropped
+                from an otherwise-successful ingest.
+
+    ReadinessFailure:
+      description: >-
+        The `503` body of `GET /api/readyz`. Deliberately **not** composed from
+        `Error` and deliberately not carrying a `code`: this is a Kubernetes-style
+        probe response consumed by a load balancer, not an API error handed to a
+        client that would branch on a machine code. Declaring `Error` here would
+        either misdescribe the route or force a `code` into it that nothing reads.
+
+
+        **Exactly one of `reason` or `error` is present.** `reason` means the
+        instance is unready on purpose (a drain); `error` means a readiness
+        check threw. Never both, and a `503` never has neither.
+      type: object
+      required: [ready]
+      properties:
+        ready:
+          type: boolean
+          const: false
+          description: >-
+            Always `false` on a `503`, and always `true` on the `200`. A probe
+            may key off this field alone and ignore the rest of the body.
+        reason:
+          type: string
+          example: shutting_down
+          description: >-
+            Why the instance took itself out of rotation, when the cause is a
+            deliberate state rather than a fault. Currently only
+            `shutting_down` — a `SIGTERM` has been received and the LB should
+            drain this pod, which stays *running* (`/api/health` deliberately
+            keeps answering `200` through the drain; only readiness flips).
+
+
+            Not an `enum`, and this one is expected to grow: any future
+            precondition that can fail *known-ly* rather than by exception adds
+            a value here. Treat an unrecognised `reason` as "not ready, for a
+            reason this client need not understand".
+        error:
+          type: string
+          description: >-
+            The exception message from the readiness check that threw — today
+            the database `SELECT 1`. Human-facing diagnostic text only; it has
+            no stable wording and must not be parsed.
+
     Agent:
       type: object
       required: [aid, displayName, handshakeEndpoint, offeredCaps, status]
