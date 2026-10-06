@@ -225,6 +225,21 @@ export async function POST(req: NextRequest) {
     // After the ManifestRejectedError branch above, that is also exactly the
     // test for "is this the caller's fault at all" — so its absence here means
     // the failure was neither a rejection we made nor one the SDK made.
+    //
+    // That "⇔" is now ENFORCED rather than inferred, which is issue #102. It
+    // used to be a duck-type: any thrown value carrying a plausible string
+    // `.code` was read as an SDK verdict. Node's own errors satisfy that shape,
+    // and `verifyAndIssueToken` calls `randomUUID`, `Buffer.from` and
+    // `createHmac` to mint the token — *after* the SDK has already accepted the
+    // manifest — so a server-side crypto fault was answered
+    // `400 MANIFEST_INVALID {verifyCode: "ERR_CRYPTO_INVALID_DIGEST"}`: the
+    // caller blamed for our fault, an internal message echoed to an
+    // unauthenticated caller, and a code published as the SDK's that the SDK
+    // never produced. `sdkVerifyCode` now answers only for a value
+    // `enrollment.ts` marked at the `verifyManifestJson` call site, so every one
+    // of those sites falls through to the rethrow below and renders a 500.
+    // docs/api.md's "`verifyCode` is present if and only if the SDK was what
+    // rejected the manifest" was false before this and is true after it.
     const verifyCode = sdkVerifyCode(err);
     if (verifyCode === undefined) {
       // Not a manifest problem at all — a bug, a broken dependency, an
