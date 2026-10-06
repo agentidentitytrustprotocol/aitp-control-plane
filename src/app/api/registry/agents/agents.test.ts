@@ -18,8 +18,8 @@
 //       - the checks that FOLLOW the guard (MANIFEST_EXPIRED, the namespace
 //         check) answer 503 on that same server. That half was true only by
 //         straight-line control flow and would have survived a reordering
-//         silently (issue #100); the same claim is asserted over real HTTP by
-//         scripts/verify-enrollment-config.mjs.
+//         silently (issue #100). This is a unit-level pin only; an
+//         end-to-end check against a booted server is still open on #100.
 //   • 401 TOKEN_INVALID when validateToken throws — and the message is
 //     asserted verbatim, because it is deliberately echoed to the caller and
 //     an over-broad redaction would otherwise remove their only signal.
