@@ -50,7 +50,7 @@ describe('integration: revocation list fails closed on a failing database', () =
     jest.resetModules();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     routeGet = require('@/app/api/well-known/aitp-revocation-list/route').GET;
-    producerPool = g.__dbPool as pg.Pool;
+    producerPool = g.__dbPool as unknown as pg.Pool;
   });
 
   afterAll(async () => {
