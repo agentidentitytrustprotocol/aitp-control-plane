@@ -84,6 +84,13 @@ signing key, not a config toggle.
   and `development`/`test` must keep working. Treat that line in a deployed instance's
   logs as a misconfiguration.
 
+  *Measured limit:* `next start` and the image's standalone `server.js` both
+  **overwrite `NODE_ENV` with `production` before any app code runs** (`server.js` opens
+  with `process.env.NODE_ENV = 'production'`), so on those two launch paths a stray
+  value is already neutralised by Next and this line cannot fire. It covers launchers
+  that bypass them — `next dev`, a custom server, a test runner — and the trim covers
+  the rest of the module-scope reads.
+
   `/api/readyz` deliberately does **not** check it — see
   [Health, readiness & graceful shutdown](#health-readiness--graceful-shutdown)
   for why. Still verify an enrollment after any deploy that changes the value:
