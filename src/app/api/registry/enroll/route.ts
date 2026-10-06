@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { childLogger } from '@/lib/logger';
 import { recordEnrollFailure } from '@/lib/registry/enroll-metrics';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import {
   ManifestRejectedError,
   sdkVerifyCode,
@@ -128,23 +129,41 @@ export async function POST(req: NextRequest) {
   // states the precedence in the control flow: a broken server cannot
   // evaluate anyone's manifest.
   //
-  // This second catch is safe to keep this narrow ONLY because that
-  // constructor has exactly two throw sites and no other statement in it can
-  // fail. If you add anything to `EnrollmentService`'s constructor that can
-  // throw for a different reason, this guard must be re-thought — otherwise
-  // it becomes the same catch-all bug pointed the other way.
+  // The guard discriminates BY CLASS: `EnrollmentConfigError` means the
+  // operator's configuration is unusable and the answer is 503, and anything
+  // else out of this call is an internal fault and is RETHROWN — this route's
+  // own idiom for the catch below (discriminate, map, rethrow the rest) applied
+  // one frame earlier. It replaced a narrow catch justified by counting throw
+  // sites in another file; `src/lib/registry/enrollment-config.ts` explains why
+  // that was fragile, once, so this does not have to.
   let service;
   try {
     service = getEnrollmentService();
-  } catch {
+  } catch (err) {
+    if (!(err instanceof EnrollmentConfigError)) {
+      // Not a configuration fault, so not ours to translate. Let the framework
+      // render a 500 and keep internal detail out of the body by construction.
+      // Answering 503 SERVER_MISCONFIGURED here instead would blame the
+      // operator's environment for, say, a bug or an exhausted resource — and
+      // send them looking at an env var that is perfectly fine.
+      throw err;
+    }
     // 503 + SERVER_MISCONFIGURED matches src/proxy.ts's existing precedent for
     // a missing required secret, and docs/api.md already lists 503 as
     // "misconfigured / draining". Two deliberate divergences from that
     // precedent: the message is fixed rather than naming the env var (the
-    // caller is unauthenticated and cannot act on it either way), and the
-    // guard is UNCONDITIONAL rather than production-only — enroll is a public
-    // route, nothing validates this secret at startup, and a server without it
-    // cannot serve enrollment in any environment.
+    // caller is unauthenticated and cannot act on it either way — `err` is
+    // bound above only to test its class, and nothing from it reaches this
+    // body), and the guard is UNCONDITIONAL rather than production-only.
+    //
+    // That second one now matters MORE than when it was written, not less.
+    // Since issue #99 a production boot with an unusable secret exits non-zero
+    // (`src/instrumentation.ts`), so in production this branch is close to
+    // unreachable — but the boot check is deliberately production-gated, which
+    // leaves non-production servers reaching it exactly as before, and leaves
+    // anything holding a service built with an explicit bad secret reaching it
+    // in any environment. A running process must still answer sanely; catching
+    // the fault earlier does not replace answering it.
     return Response.json(
       {
         error: 'enrollment is temporarily unavailable on this server',
@@ -166,12 +185,31 @@ export async function POST(req: NextRequest) {
     // (UnsafeWebhookUrlError) and events/history/route.ts (InvalidFilterError),
     // which all do this.
     //
-    // "Of that set" is the scoping that matters: other routes in this service
-    // still have undiscriminated catch-alls — agents/route.ts maps any throw to
-    // 401 TOKEN_INVALID with err.message in the body, and
-    // revocation/entries/route.ts maps any throw to 500 INSERT_FAILED with the
-    // raw database message. Both are known and tracked separately; neither is a
-    // precedent this block follows.
+    // "Of that set" is the scoping that matters. agents/route.ts used to be
+    // named here as an undiscriminated catch-all: it mapped any throw — the
+    // EnrollmentService constructor's included — to 401 TOKEN_INVALID with
+    // err.message in the body. That was #91, and it is fixed: that route now
+    // hoists getEnrollmentService() into its own guard exactly as this one
+    // does, and the err.message its 401 still echoes is deliberate
+    // caller-facing text about a token the caller supplied, not an
+    // undiscriminated catch-all.
+    //
+    // revocation/entries/route.ts was the last one open — it mapped any throw to
+    // 500 INSERT_FAILED with the raw database message. That was #98, and it is
+    // fixed, which closes this class repo-wide.
+    //
+    // It is worth recording HOW it differed, because it is the case this block's
+    // shape does not cover. That route had no lib-thrown error type to
+    // discriminate: the only thing in its try was a database insert, so an
+    // instanceof ladder had nothing to match on and the "known" half of the idiom
+    // was empty. What it did have was two failure modes that looked like server
+    // faults but were the caller's — a `revokedAt` outside what timestamptz can
+    // parse, and a `reason` containing U+0000 — both decidable from the request
+    // body. So the fix hoisted those into request validation (the agents/route.ts
+    // move above, not this one) and left the insert observed-but-unanswered:
+    // logged, then rethrown. Deleting its catch-all WITHOUT hoisting them first
+    // would have turned two caller errors into opaque 500s, which is why "just
+    // rethrow" is not on its own a complete answer to a catch-all.
     if (err instanceof ManifestRejectedError) {
       // We rejected it, deliberately, and it is the caller's fault. No
       // verifyCode: the SDK is not what rejected this. The cpCode is

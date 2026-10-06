@@ -7,6 +7,16 @@ on:
     branches: [main]
   # Allow manual runs from the Actions tab (e.g. to re-publish the image).
   workflow_dispatch:
+    inputs:
+      # Opt-in, and the INPUT is the point rather than a bare `workflow_dispatch`
+      # condition: plain manual dispatch already exists to re-publish the image, and
+      # without an input every such re-publish would pay for a full QEMU-emulated
+      # image verification. Default false keeps existing manual runs identical.
+      verify_image_arm64:
+        description: 'Also verify the shipped image on linux/arm64 (slow, QEMU)'
+        type: boolean
+        required: false
+        default: false
 
 # Cancel in-flight runs on the same ref when a new commit lands.
 concurrency:
@@ -81,9 +91,11 @@ jobs:
       - name: Integration tests
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5433/aitp_control_plane_test
-          # >= 32 chars. NOT enforced at boot — EnrollmentService is constructed
-          # lazily on the first enrollment request, so a bad value here fails
-          # the enroll tests rather than startup.
+          # >= 32 chars. A bad value here fails the enroll tests, not startup:
+          # integration tests call route handlers directly under Jest and never
+          # boot a Next server, so the boot-time check (src/instrumentation.ts,
+          # production-only) never runs in this step. EnrollmentService is still
+          # constructed lazily on the first request that needs it.
           ENROLLMENT_SECRET: ci-integration-secret-min-thirty-two-chars
           CP_AID_SEED_HEX: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
           CP_BASE_URL: http://localhost:4000
@@ -92,6 +104,14 @@ jobs:
       - name: Next build (smoke test)
         env:
           # Production-required vars must be set for `next build`.
+          #
+          # Belt-and-braces, not load-bearing, and the same applies to the
+          # Dockerfile's copies of these (see the comment there): Next does not
+          # run the instrumentation hook during a production build —
+          # registerInstrumentation() returns early on
+          # NEXT_PHASE=phase-production-build — so the ENROLLMENT_SECRET boot
+          # check cannot fail this step. Measured: this build exits 0 with the
+          # variable unset.
           NODE_ENV: production
           CP_AID_SEED_HEX: '0000000000000000000000000000000000000000000000000000000000000001'
           ENROLLMENT_SECRET: ci-build-secret-min-thirty-two-characters
@@ -194,11 +214,269 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Looks INSIDE the shipped standalone image — the artifact that actually
+  # deploys. Statically it proves the native NAPI binary loads under the image's
+  # own arch and libc, that the OpenTelemetry tree was traced in, that every
+  # traced external present is a symlink that resolves, and that the `.node`
+  # inventory matches scripts/image-artifact-baseline.json including the arch
+  # token. It then RUNS the image against an ephemeral Postgres on a private
+  # network, applies the repo's own migrations, asserts /api/health reports
+  # `db: "ok"` and the AID that CP_AID_SEED_HEX derives to, and asserts THE REQUEST
+  # GATE IS ATTACHED in the standalone artifact.
+  #
+  # That last part is why this job exists. `verify:gate` in build-and-test covers
+  # the gate, but only under `next start` — which next.config.ts records as
+  # incompatible with `output: 'standalone'`, so it proves the gate in a
+  # configuration the image never runs. Demonstrated, not assumed: an image built
+  # with src/proxy.ts renamed to a filename Next does not recognise passes every
+  # static check and the health check, then serves the admin audit log to an
+  # unauthenticated caller — `200 {"entries":[],"count":0}` where a 401 belongs.
+  # That image builds green and docker-build-check would ship it.
+  #
+  # It ALSO pins the manifest that OVERRIDES that matcher set at runtime. The router reads
+  # TWO middleware manifests and prefers `.next/server/middleware-manifest.json` over the
+  # `functions-config-manifest.json` the matcher pin comes from, so the pin is load-bearing
+  # only while the other file is empty — and nothing asserted that until #104. Measured on a
+  # thin-overlay image: one edit to that one file (`middleware: {"/": {"matchers": []}}`)
+  # left an anonymous GET /api/audit answering 200 with the admin audit log and no
+  # x-request-id while the matcher pin and the compiled-gate pin both stayed GREEN. So the
+  # manifest is now pinned whole AND a populated `middleware`/`functions` map fails with no
+  # re-pin available, because if Next ever populates it legitimately the fix is to move the
+  # matcher pin rather than record the file.
+  #
+  # The gate's matcher set is PINNED against the committed baseline rather than
+  # tested for what it satisfies, because three successive satisfaction-tests were
+  # each defeated by a one-line matcher edit: '/api/audit' alone; then the three
+  # paths the probes happened to hit; then '/api/:path([^0-9]+)', which matches
+  # every route name but no real id, ungating all ten dynamic routes. The last one
+  # left the source UNCHANGED — a `missing: [{type:"header",key:"cookie"}]`
+  # condition, which Next enforces at runtime, so any request with a cookie read
+  # /api/audit anonymously. Unknown matcher keys therefore fail closed.
+  #
+  # It also pins THE COMPILED GATE ITSELF as an exact equality — the gate's compiled
+  # bytes, the transitive chunk closure its loaders reach plus server.js, an aggregate
+  # digest over node_modules/next, and the image's Env/Entrypoint/Cmd/WorkingDir/User.
+  # That is the layer with no behavioural substitute: five successive attempts to
+  # establish the gate's correctness by SENDING REQUESTS were each defeated by a
+  # dimension the requests held constant (the gate body, the verb, the route population,
+  # the presence of an `Origin` header, the length of a path segment), and the last three
+  # are caught by this equality and by nothing else in this repo. It is also the one
+  # check whose extraction runs no code from the image at all — `docker create` plus
+  # `docker cp` against a container that is never started — because an image carrying
+  # `ENV NODE_OPTIONS=--require=/app/lie.js` was measured preloading its own code into
+  # every probe run from it.
+  #
+  # It then verifies the SIGNING PATH — the revocation list's Ed25519 signature
+  # checked two independent ways over the raw served bytes, plus the assertion that
+  # the container did NOT log `revocation DB read failed`, because the producer
+  # publishes an empty-but-validly-signed list on a failed DB read and every other
+  # assertion in that group passes against it — the CORS BUILD-FREEZE (the served
+  # origin must equal the runtime value and differ from the one the Dockerfile bakes,
+  # parsed out of the Dockerfile rather than hardcoded), and the OTEL_ENABLED=true
+  # PATH in a second container, where the gate/signing/CORS assertions are all re-run
+  # and the SDK is proven to have actually started. Span EXPORT is out of scope.
+  #
+  # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
+  # wrong architecture, or whose traced externals had stopped resolving, or whose
+  # compiled request gate had been rewritten while `src/proxy.ts` stayed untouched,
+  # would build green and ship. docker-build-check only answers "does it build" —
+  # nothing else looks inside the image at all, and `verify:gate` builds its own
+  # server from source, so it is structurally blind to every one of the five
+  # recorded gate defeats.
+  #
+  # NO `if:` ON PURPOSE, and this is not cosmetic. docker-publish publishes on
+  # workflow_dispatch too (its condition excludes only pull_request), and in
+  # GitHub Actions a SKIPPED `needs` dependency skips its dependents. Gating this
+  # job to "pull_request or push" — the obvious reading — would silently turn
+  # every manual re-publish into a skipped docker-publish.
+  #
+  # LAYER CACHE: deliberately NONE, and the harness says so in its own output.
+  # `cache-from: type=gha` works in docker-build-check only because
+  # docker/build-push-action injects ACTIONS_RUNTIME_TOKEN / ACTIONS_CACHE_URL
+  # from the action runtime. A bare `docker buildx build` spawned by a node
+  # script inherits neither, so buildx WARNS and builds cold rather than failing
+  # — a green job quietly paying for a full uncached build while a reader assumes
+  # a cache hit. Building cold on purpose, and sizing timeout-minutes for it, is
+  # honest; smuggling the runtime credentials in is the other acceptable answer.
+  verify-image:
+    name: Verify shipped image (amd64)
+    runs-on: ubuntu-latest
+    # Must EXCEED the harnesses' own ceilings (25-minute build timeout + 40-minute
+    # post-build watchdog = 65, plus verify-sse-stream's 10-minute watchdog on the
+    # same image = 75) or GitHub kills the job first and neither harness gets to
+    # print which of its two timeouts it was — losing exactly the distinction those
+    # separate timeouts exist to give. Keep this above their sum, with room for
+    # checkout, setup-node, npm ci and setup-buildx on top. The watchdog grew from
+    # 25 to 40 when the OTEL_ENABLED=true container added a second app boot, and
+    # this job grew from 75 to 90 when the SSE step was added; if either moves
+    # again, this number moves with it.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Needed for drizzle-kit only. The harness applies the repo's own migrations
+      # from the HOST, because the runtime image bundles no drizzle-kit — without
+      # them src/lib/revocation/producer.ts publishes an empty-but-validly-signed
+      # list and the live checks would pass against a broken database.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # --tag is passed EXPLICITLY, even though it is the harness's default, because
+      # the step below reuses this exact image. An invisible coupling to a default
+      # would break silently the day someone changed it; spelled out, the two steps
+      # are visibly about the same artifact.
+      - name: Verify the shipped image
+        run: >-
+          npm run verify:image --
+          --platform linux/amd64
+          --tag aitp-control-plane:verify-image
+          --inventory-out image-inventory-amd64.json
+
+      # A SECOND HARNESS AGAINST THE SAME IMAGE, not a second job, and the reason is
+      # the build: `verify:image` deliberately leaves the image in the local daemon,
+      # so this step costs seconds instead of a second cold multi-minute build. It is
+      # a separate FILE (three harnesses, three configurations — see the header of
+      # scripts/verify-sse-stream.mjs) sharing one BUILD.
+      #
+      # WHAT IT ADDS that nothing else in CI covers: it opens real SSE connections to
+      # the shipped standalone server and MEASURES the time to the first response
+      # byte. Issue #89 was a stream that wrote nothing at connect, so Next never
+      # called res.flushHeaders() and clients got no status line at all until the 15 s
+      # heartbeat — a defect entirely invisible to a unit test of the route (which
+      # receives a Response object, never a socket) and to `verify:image` (which
+      # asserts on structure and on non-streaming responses). It also pins the
+      # prelude's bytes, the absence of content-encoding under
+      # `Accept-Encoding: gzip, br` (only meaningful with Next's real compression
+      # middleware in the path), the keepalive interval on the wire, and the
+      # 503 SSE_CAPACITY refusal in a second container.
+      #
+      # Being a step in THIS job rather than a job of its own also means docker-publish
+      # — which `needs: verify-image` — is gated on it for free.
+      - name: Verify the SSE streaming contract in the same image
+        run: >-
+          npm run verify:sse --
+          --platform linux/amd64
+          --tag aitp-control-plane:verify-image
+          --no-build
+
+      # ALWAYS, not only on success. Both arches normalise to the same shape, so the
+      # whole value of this file is the case where they legitimately DIVERGE — and a
+      # divergence is exactly when the job is red. An artifact that only appears on
+      # green would be missing from every run that needed it.
+      - name: Upload the normalised artifact inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-inventory-amd64
+          path: image-inventory-amd64.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The arm64 arm of the same harness, opt-in via the workflow_dispatch input above.
+  # It BOOTS AND EXERCISES the app under QEMU, not just builds it, so it is much
+  # slower than docker-build-check-arm64 and has no business on the PR path.
+  #
+  # INFORMATIONAL BY CONSTRUCTION, and that is a GitHub constraint rather than a
+  # choice: a conditionally-skipped job cannot be a required check, because GitHub
+  # treats a skipped required check as permanently pending. Same status as
+  # docker-build-check-arm64. The amd64 leg above runs unconditionally and *can* be
+  # required.
+  #
+  # DELETE THIS JOB AND: arm64 is first exercised by docker-publish AFTER merge,
+  # which is the wrong side of the merge button for anything arch-specific — native
+  # binary resolution above all (see #54). The published image is multi-arch; without
+  # this, half of what ships is never run before it ships.
+  verify-image-arm64:
+    name: Verify shipped image (arm64, opt-in)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_image_arm64
+    # Higher than the amd64 leg's 90 and than docker-build-check-arm64's 45: this one
+    # pays QEMU emulation for the BUILD (the harness allows 60 minutes for an
+    # emulated build, against 25 native) and then boots two app containers and a
+    # Postgres on top of it, plus the SSE harness's two more containers and its own
+    # 10-minute watchdog. 60 + 40 + 10 = 110, so 135 leaves room for setup on top.
+    timeout-minutes: 135
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Note what is NOT emulated: Postgres runs native even here, because only
+      # container-to-container TCP crosses the boundary and emulating the database
+      # would slow the run for no assertion gained. The IMAGE UNDER TEST is arm64,
+      # which is the thing this job is about.
+      - name: Verify the shipped image
+        run: >-
+          npm run verify:image --
+          --platform linux/arm64
+          --tag aitp-control-plane:verify-image
+          --inventory-out image-inventory-arm64.json
+
+      # The SSE streaming contract on the emulated arch too — see the amd64 leg for
+      # what it covers and why it reuses that job's image rather than building again.
+      # The flush budget is 1 s against 7-27 ms measured natively, so QEMU has ~37x of
+      # headroom at the worst connection observed; the cold one also pays for the route's
+      # first chunk load under emulation, which is the thinner margin of the two. If
+      # that ever stops being true the harness prints both measured numbers, and on an
+      # emulated platform its breach message says so and points at check 3's frame 0
+      # — a prelude means "slow", a heartbeat means #89 — so the call is made on data
+      # rather than on a guess. This leg is opt-in, so a flake here cannot block a
+      # merge.
+      - name: Verify the SSE streaming contract in the same image
+        run: >-
+          npm run verify:sse --
+          --platform linux/arm64
+          --tag aitp-control-plane:verify-image
+          --no-build
+
+      - name: Upload the normalised artifact inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-inventory-arm64
+          path: image-inventory-arm64.json
+          retention-days: 14
+          if-no-files-found: warn
+
   docker-publish:
     name: Build & push image to GHCR
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: build-and-test
+    # GATED ON verify-image, and this is the real payoff of that job existing.
+    # Before this line, an image whose request gate had silently DETACHED would
+    # publish to GHCR on a green build-and-test — because build-and-test proves the
+    # gate under `next start`, a configuration the image never runs. Fail-closed is
+    # correct here: it makes the harness's own reliability a release concern, which is
+    # why that harness has a watchdog and unconditional teardown.
+    #
+    # The arm64 leg is deliberately NOT in `needs`: it is conditionally skipped, and a
+    # skipped `needs` dependency skips its dependents, so listing it would block every
+    # publish that did not opt into a QEMU run.
+    needs: [build-and-test, verify-image]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

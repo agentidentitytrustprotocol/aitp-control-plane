@@ -1,11 +1,41 @@
-// Unit tests for /api/registry/agents — covers Plan items
-//   • Bug 6   — POST rejects a manifest expiring within 5 minutes
-//   • 2.4    — GET ?include_manifest=true inlines the full ManifestEnvelope
-//   • 2.2    — GET ?namespace=<X> forwards the filter into listAgents
-//   • 2.3    — GET responses always carry agentManifestHint
+// Unit tests for /api/registry/agents. Behaviours covered:
+//
+// POST — token and server-fault handling
+//   • 503 SERVER_MISCONFIGURED when EnrollmentService cannot be constructed
+//     (unset or too-short ENROLLMENT_SECRET) — a server fault, not the
+//     caller's, and the body names no configuration. Asserted for BOTH
+//     unusable-secret cases, with explicit no-leak assertions rather than
+//     implied ones.
+//   • …and its complement: a throw from getEnrollmentService() that is NOT an
+//     EnrollmentConfigError is RETHROWN, not laundered into a 503. The guard
+//     discriminates by class; it used to catch everything and justify itself by
+//     counting throw sites in another file.
+//   • Precedence: a malformed body and a missing manifest.aid still answer
+//     400 BODY_INVALID on a misconfigured server, so a broken deployment
+//     never masks a genuinely bad request.
+//   • 401 TOKEN_INVALID when validateToken throws — and the message is
+//     asserted verbatim, because it is deliberately echoed to the caller and
+//     an over-broad redaction would otherwise remove their only signal.
+//   • 401 TOKEN_REPLAYED when the jti was already consumed.
+//
+// POST — manifest handling
+//   • 400 MANIFEST_EXPIRED for a manifest expiring inside the 5-minute guard.
+//   • 400 BODY_INVALID for a non-string manifest.extensions.namespace. This is
+//     one of the two 400s that follow the service construction rather than
+//     preceding it, so on a misconfigured server it answers 503 instead —
+//     as it answered 401 before the guard existed.
+//   • 201 + persistence, event publish and webhook dispatch on success.
+//
+// GET
+//   • ?include_manifest=true inlines the full ManifestEnvelope, and
+//     manifestJson is omitted when the flag is absent.
+//   • ?namespace=<X> forwards the filter into listAgents.
+//   • responses always carry agentManifestHint.
 //
 // All upstream services are mocked so the tests stay fast and don't
 // need Postgres, the playground, or a real CP-issued enrollment token.
+// No test sets an Idempotency-Key, which is what keeps @/lib/db out of the
+// picture: withIdempotency only queries when the header is present.
 
 import { jest } from '@jest/globals';
 import type { Agent } from '@/lib/db/schema';
@@ -24,10 +54,15 @@ jest.mock('@/lib/registry/store', () => ({
   listAgents: (f: unknown) => listAgentsMock(f),
   upsertAgent: (i: unknown) => upsertAgentMock(i),
 }));
+// Indirected through a mutable `let` rather than returning a fixed object, so
+// a test can simulate a server that cannot construct EnrollmentService at all
+// (an unset/short ENROLLMENT_SECRET). That is a different failure class from
+// anything validateToken can throw, and with a fixed object literal there was
+// no seam to express it. Same shape as enroll.test.ts.
+let getServiceImpl: () => { validateToken: (...args: unknown[]) => unknown };
+
 jest.mock('@/lib/registry/enrollment', () => ({
-  getEnrollmentService: () => ({
-    validateToken: (...args: unknown[]) => validateTokenMock(...args),
-  }),
+  getEnrollmentService: () => getServiceImpl(),
 }));
 jest.mock('@/lib/registry/jti-store', () => ({
   consumeEnrollmentJti: (jti: string, exp: number) =>
@@ -47,6 +82,12 @@ jest.mock('@/lib/webhooks/service', () => ({
 }));
 
 import { GET, POST } from './route';
+// NOT mocked, deliberately, unlike `@/lib/registry/enrollment` above: the route
+// tests this class with `instanceof`, so the test and the route must be holding
+// the same class object. Mocking the module — or reconstructing a look-alike
+// error here — would make every 503 case below pass for the wrong reason, or
+// fail for one.
+import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { NextRequest } from 'next/server';
 
 function makeReq(path: string, init?: RequestInit): NextRequest {
@@ -76,6 +117,9 @@ function fakeAgent(over: Partial<Agent> = {}): Agent {
 }
 
 beforeEach(() => {
+  getServiceImpl = () => ({
+    validateToken: (...args: unknown[]) => validateTokenMock(...args),
+  });
   listAgentsMock.mockReset();
   listAgentsMock.mockResolvedValue([]);
   upsertAgentMock.mockReset();
@@ -167,9 +211,137 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       }),
     );
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { code: string };
+    const body = (await res.json()) as { code: string; error: string };
     expect(body.code).toBe('TOKEN_INVALID');
+    // The message is pinned verbatim, not just the code. validateToken's
+    // messages are deliberate caller-facing text about a credential the caller
+    // supplied, and the 503 guard above this path exists precisely so that
+    // server-fault detail never lands here. An over-broad "redact everything"
+    // change would strip the caller's only signal about why their token
+    // failed; this assertion is what makes that a test failure.
+    expect(body.error).toBe('signature invalid');
     expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+
+  describe('when EnrollmentService cannot be constructed', () => {
+    it('answers 503 SERVER_MISCONFIGURED for an unset ENROLLMENT_SECRET', async () => {
+      // A missing/short ENROLLMENT_SECRET is the server's fault. Before this it
+      // answered 401 TOKEN_INVALID with the env var name in the response body,
+      // telling the whole fleet to stop retrying and re-enroll over tokens
+      // that were never the problem.
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
+      };
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: envelope(3600),
+        }),
+      );
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as Record<string, string>;
+      expect(body.code).toBe('SERVER_MISCONFIGURED');
+      // Explicit no-leak assertions, not implied ones: the body must carry
+      // neither the env var name nor the underlying message.
+      expect(body.error).not.toContain('ENROLLMENT_SECRET');
+      expect(body.error).not.toContain('required');
+      expect(validateTokenMock).not.toHaveBeenCalled();
+      expect(upsertAgentMock).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for a short secret too, with the same opaque body', async () => {
+      // The second unusable-secret case, and the more dangerous one: its message
+      // embeds the observed length. (It is no longer a second THROW SITE — the
+      // constructor has one, throwing EnrollmentConfigError for both cases. See
+      // src/lib/registry/enrollment-config.ts.)
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError(
+          'ENROLLMENT_SECRET must be at least 32 characters (got 9). ' +
+            'Generate with: node -e "..."',
+        );
+      };
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: envelope(3600),
+        }),
+      );
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as Record<string, string>;
+      expect(body.code).toBe('SERVER_MISCONFIGURED');
+      expect(body.error).not.toContain('ENROLLMENT_SECRET');
+      expect(body.error).not.toContain('32');
+      expect(body.error).not.toContain('9');
+      expect(upsertAgentMock).not.toHaveBeenCalled();
+    });
+
+    it('still rejects a malformed body with 400 before constructing the service', async () => {
+      // Precedence check: the JSON pre-validation runs first, so a
+      // misconfigured server does not mask a genuinely malformed request
+      // behind a 503.
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
+      };
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: 'not json',
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('BODY_INVALID');
+    });
+
+    it('still rejects a missing manifest.aid with 400 before constructing the service', async () => {
+      // The route's second pre-validation, which has no enroll analogue —
+      // enroll only checks that `manifest` is an object.
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
+      };
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: JSON.stringify({ manifest: {} }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('BODY_INVALID');
+    });
+
+    it('RETHROWS a non-configuration throw instead of calling it misconfigured', async () => {
+      // The point of discriminating by class, and the behaviour that replaced a
+      // comment in route.ts counting throw sites in another file. Before this,
+      // ANY throw out of getEnrollmentService() became 503 SERVER_MISCONFIGURED
+      // — so a bug or an exhausted resource would send an operator to check an
+      // env var that was fine. A plain Error is the specific case that used to be
+      // indistinguishable: it is what the constructor threw before
+      // EnrollmentConfigError existed.
+      //
+      // It propagates all the way out of withIdempotency, which does not catch
+      // callback throws, so the framework renders a 500 — and nothing is
+      // persisted against an idempotency key (this request sets no
+      // Idempotency-Key header at all, and neither 500 nor 503 is cacheable).
+      getServiceImpl = () => {
+        throw new Error('native binding failed to load');
+      };
+      await expect(
+        POST(
+          makeReq('/api/registry/agents', {
+            method: 'POST',
+            headers: { authorization: 'Bearer ok-token' },
+            body: envelope(3600),
+          }),
+        ),
+      ).rejects.toThrow('native binding failed to load');
+      expect(validateTokenMock).not.toHaveBeenCalled();
+      expect(upsertAgentMock).not.toHaveBeenCalled();
+    });
   });
 
   it('returns 401 TOKEN_REPLAYED when the jti was already consumed (P0-3)', async () => {

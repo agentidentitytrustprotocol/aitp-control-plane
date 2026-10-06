@@ -155,6 +155,11 @@ const RUN_ID = `rev-flow-${randomUUID()}`;
 
 const jti1 = randomUUID();
 const jti2 = randomUUID();
+// For the revokedAt boundary checks below — the only place the route's accepted
+// window is measured against a real server, both for storage and for what the
+// signed list republishes, rather than against a mock.
+const boundaryMinJti = randomUUID();
+const boundaryMaxJti = randomUUID();
 const parentTctJti = randomUUID();
 const childDelegationJti = randomUUID();
 const grandchildDelegationJti = randomUUID();
@@ -173,10 +178,15 @@ const secondIdentityAid = AitpAgent.fromSeed(Buffer.alloc(32, 0x11)).aid;
 
 describe('integration: revocation entry → signed well-known list → delegation cascade', () => {
   afterAll(async () => {
-    const allJtis = [jti1, jti2, parentTctJti];
+    const allJtis = [jti1, jti2, parentTctJti, boundaryMinJti, boundaryMaxJti];
     await db
       .delete(revocationEntries)
-      .where(sql`${revocationEntries.jti} in (${jti1}, ${jti2}, ${parentTctJti})`);
+      .where(
+        sql`${revocationEntries.jti} in (${sql.join(
+          allJtis.map((j) => sql`${j}`),
+          sql`, `,
+        )})`,
+      );
     await db
       .delete(delegations)
       .where(
@@ -188,7 +198,10 @@ describe('integration: revocation entry → signed well-known list → delegatio
     await db
       .delete(auditEvents)
       .where(
-        sql`${auditEvents.type} = 'tct.revoked' and ${auditEvents.payload}->>'jti' in (${jti1}, ${jti2}, ${parentTctJti})`,
+        sql`${auditEvents.type} = 'tct.revoked' and ${auditEvents.payload}->>'jti' in (${sql.join(
+          allJtis.map((j) => sql`${j}`),
+          sql`, `,
+        )})`,
       );
     await db
       .delete(adminAuditLog)
@@ -332,6 +345,75 @@ describe('integration: revocation entry → signed well-known list → delegatio
     const longReason = await postRevocation({ jti: randomUUID(), reason: 'x'.repeat(501) });
     expect(longReason.status).toBe(400);
     expect((await longReason.json()).code).toBe('BODY_INVALID');
+  });
+
+  // The route bounds `revokedAt` to [1970-01-01Z, 9999-12-31T23:59:59.999Z]. The
+  // unit tests mock the database, so they can pin the bound's behaviour but not
+  // the two claims it rests on, both of which are properties of the real stack:
+  // that Postgres stores the extremes, and that the signed list republishes them
+  // FAITHFULLY. The second is the one that matters and the one a mock cannot see —
+  // the producer re-parses the driver's TIMESTAMPTZ text with `new Date(...)`, so
+  // a stored value and a published value are not the same assertion.
+  //
+  // Storage equality is asserted in SQL, using Postgres's own parse and
+  // comparison rather than a JS re-parse of the driver's text format.
+  it('stores both ends of the accepted revokedAt range', async () => {
+    const cases = [
+      [boundaryMinJti, '1970-01-01T00:00:00.000Z'],
+      [boundaryMaxJti, '9999-12-31T23:59:59.999Z'],
+    ] as const;
+    for (const [jti, revokedAt] of cases) {
+      const res = await postRevocation({ jti, revokedAt, reason: 'boundary' });
+      expect(res.status).toBe(201);
+      expect((await res.json()).revokedAt).toBe(revokedAt);
+
+      const rows = await db
+        .select({ jti: revocationEntries.jti })
+        .from(revocationEntries)
+        .where(
+          sql`${revocationEntries.jti} = ${jti} and ${revocationEntries.revokedAt} = ${revokedAt}::timestamptz`,
+        );
+      expect(rows).toHaveLength(1);
+    }
+  });
+
+  // The half that actually justifies the lower bound. A year-0001 revocation
+  // stores fine but the producer's `new Date('0001-01-01 00:00:00+00')` returns
+  // 2001 (V8's legacy two-digit-year rule), so it would be SIGNED and served with
+  // a date ~2000 years wrong — silently, because signRevocationList only rejects
+  // NaN. The floor keeps that out, and this asserts the published seconds match
+  // the instant we sent for both extremes.
+  it('publishes both boundary entries in the signed list with the correct instant', async () => {
+    const env = await fetchList();
+    for (const [jti, revokedAt] of [
+      [boundaryMinJti, '1970-01-01T00:00:00.000Z'],
+      [boundaryMaxJti, '9999-12-31T23:59:59.999Z'],
+    ] as const) {
+      const entry = env.revocation_list.entries.find((e) => e.jti === jti);
+      expect(entry).toBeDefined();
+      expect(entry!.revoked_at).toBe(Math.floor(new Date(revokedAt).getTime() / 1000));
+    }
+    expect(verifyEnvelopeSignature(env)).toBe(true);
+  });
+
+  // The complement (#98): outside the range the route answers 400 naming the
+  // rule, rather than handing the value to Postgres and relaying its message.
+  // Year 0001 is included deliberately — Postgres would have accepted it, so this
+  // pins that the bound is ours and is about the published artifact, not just
+  // about what the column can hold.
+  it('rejects an out-of-range revokedAt without letting Postgres answer', async () => {
+    for (const revokedAt of [
+      '+010000-01-01T00:00:00Z',
+      '0001-01-01T00:00:00.000Z',
+      '1969-12-31T23:59:59.999Z',
+    ]) {
+      const res = await postRevocation({ jti: randomUUID(), revokedAt });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/1970-01-01.*9999-12-31/);
+      expect(body.error).not.toContain('timestamp with time zone');
+    }
   });
 
   it('revoking a TCT cascades to its delegation chain, visible via GET /api/delegations', async () => {

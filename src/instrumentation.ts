@@ -3,8 +3,20 @@
  * boot (Node.js or Edge runtime), before any route handler executes.
  * Use it to wire up OpenTelemetry so spans from route handlers, pg
  * pool calls, and outbound fetch (webhook deliveries) are exported
- * to the configured OTLP collector, and to register process-level
- * shutdown hooks.
+ * to the configured OTLP collector, to validate configuration that must
+ * not be discovered one request at a time, and to register
+ * process-level shutdown hooks.
+ *
+ * "Exactly once per server boot" is why the ENROLLMENT_SECRET check
+ * below lives here rather than at `src/lib/config.ts` module scope:
+ * this hook means BOOT, and Next deliberately does not run it during
+ * the production build. `registerInstrumentation()` in
+ * `next/dist/server/lib/router-utils/instrumentation-globals.external.js`
+ * returns early on `NEXT_PHASE === 'phase-production-build'`, and every
+ * server-side path funnels through it. A check at config module scope
+ * would instead fire whenever the first route module is evaluated,
+ * which includes `next build` under NODE_ENV=production — turning the
+ * Dockerfile's throwaway build placeholders into load-bearing values.
  *
  * OpenTelemetry is disabled by default: set OTEL_ENABLED=true to turn
  * it on. The SDK imports are dynamic so a deployment with OTel
@@ -18,6 +30,43 @@
 
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+  // FIRST, before anything else is started. A deployment whose
+  // ENROLLMENT_SECRET is unset or too short used to boot, report ready,
+  // pass its health checks, and then answer 503 SERVER_MISCONFIGURED to
+  // every POST /api/registry/enroll and every POST /api/registry/agents
+  // for as long as it ran — with no counter and no log line anywhere in
+  // the process to say so (issue #99; see docs/operations.md's metrics
+  // section for why that silence is deliberate on the request path).
+  // This turns that into one loud failure at deploy time, before any
+  // traffic.
+  //
+  // Everything about WHAT it does — the rule, the message, the
+  // production-only gate, the `console.error`/`console.warn` split and the
+  // `process.exit(1)` — lives in `enrollment-config.ts`, which is also the
+  // module `EnrollmentService`'s constructor validates through, so boot and
+  // the request path cannot disagree. Two further reasons it is not inlined
+  // here: `jest.config.js` excludes this file from coverage, so a decision
+  // made here is measured by nothing; and a literal `process.exit` in this
+  // file makes the build warn that a Node API is unsupported on the Edge
+  // runtime, about a line the guard above already makes unreachable there.
+  //
+  // That this call happens AT ALL, and happens before the shutdown hooks, is
+  // asserted by `src/instrumentation.test.ts` — the coverage exclusion above
+  // suppresses the measurement, not the test, and every CI path supplies a
+  // valid secret, so nothing else in the repo would notice this line going
+  // missing.
+  //
+  // Deliberately NOT in /api/readyz: a readiness probe is for conditions
+  // that can CHANGE while a process runs, and this one cannot (the value is
+  // snapshotted at import and the service memoizes on success), so failing
+  // readiness on it could only ever mean "this process should never have
+  // started" — while pulling the replica out of rotation for every route
+  // over a fault that breaks two. See docs/operations.md.
+  const { enforceEnrollmentSecretAtBoot } = await import(
+    './lib/registry/enrollment-config'
+  );
+  enforceEnrollmentSecretAtBoot();
 
   // Shutdown hooks must always be wired — even with OTel off — so
   // readiness drains correctly on SIGTERM.

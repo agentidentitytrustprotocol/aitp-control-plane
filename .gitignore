@@ -32,3 +32,9 @@ PROGRESS.md
 ASSUMPTIONS.md
 DECISIONS.md
 .drive.lock
+
+# Agent worktrees: a full second checkout of this repo, `node_modules` and all,
+# parked under the working tree. Exactly the `git add -A` hazard the comment
+# above describes (DECISIONS.md O2) — one found here was 630 MB. Deliberately
+# NOT all of `.claude/`, so a committed `.claude/settings.json` stays possible.
+/.claude/worktrees/

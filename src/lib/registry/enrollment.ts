@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
+import { assertEnrollmentSecretUsable } from './enrollment-config';
 import { ManifestRejectedError } from './verify-error';
 
 // Same 5-min window as src/app/api/registry/agents/route.ts, so a caller does
@@ -47,15 +48,16 @@ export class EnrollmentService {
 
   constructor(secret?: string) {
     const raw = secret ?? config.enrollmentSecret;
-    if (!raw) {
-      throw new Error('ENROLLMENT_SECRET is required');
-    }
-    if (raw.length < 32) {
-      throw new Error(
-        `ENROLLMENT_SECRET must be at least 32 characters (got ${raw.length}). ` +
-          'Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
-      );
-    }
+    // ONE throw site, throwing ONE class: `EnrollmentConfigError`, from
+    // `enrollment-config.ts`, which also owns the rule, both messages, and the
+    // reasoning for all of it (including why the two registry routes no longer
+    // count throw sites in this file).
+    //
+    // What matters HERE: a configuration fault is `EnrollmentConfigError` and
+    // both routes turn it into a 503; anything else thrown in this constructor is
+    // an internal fault and must propagate as a 500. A throw added here picks one
+    // of those two sides, and picking wrongly is visible rather than silent.
+    assertEnrollmentSecretUsable(raw);
     this.secret = Buffer.from(raw);
   }
 

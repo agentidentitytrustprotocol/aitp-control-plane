@@ -104,7 +104,7 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | ------------------ | ------------------- | ------------------------------------------------------------------ |
 | `DATABASE_URL`     | yes                 | Postgres connection string (from the Railway Postgres plugin).     |
 | `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. |
-| `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. Unset/short ⇒ `/api/registry/enroll` 503s on every request, in every environment. Not validated at boot and not covered by `/api/readyz`, so a bad value deploys green — smoke-test an enrollment. |
+| `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. **Validated at boot: the image runs with `NODE_ENV=production`, so an unset/short value prints one `[aitp-cp] FATAL:` line and exits 1** — the healthcheck never passes, the Railway deploy fails, and the previous deployment keeps serving. (A bad value no longer deploys green; before this it 503'd `/api/registry/enroll` **and** `/api/registry/agents` on every request for as long as the release ran.) Still smoke-test an enrollment *and* a registration after changing it: boot proves the secret is usable, not that it matches the one existing tokens were minted under. |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
 | `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
 | `CP_BASE_URL`      | recommended         | Public base URL; used in the manifest's handshake endpoint.        |

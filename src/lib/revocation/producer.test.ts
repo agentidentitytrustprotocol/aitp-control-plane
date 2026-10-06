@@ -36,11 +36,37 @@ jest.mock('../config', () => ({
   config: { revocationListTtlSecs: 777 },
 }));
 
+/**
+ * The logger is mocked so the DB-failure WARNING TEXT can be asserted.
+ *
+ * That text is not cosmetic: `scripts/verify-image.mjs` greps the shipped
+ * container's logs for it, and its absence is the single assertion standing between
+ * that harness's five revocation checks and total vacuity — the fallback below
+ * publishes an EMPTY BUT VALIDLY SIGNED list, so a broken database passes a
+ * signature check, an issuer check and a tamper check alike. Reword the message in
+ * `producer.ts` and that harness goes green against an image whose database access
+ * is entirely broken. Measured, not theorised. This test is the pin.
+ */
+const warnCalls: { obj: unknown; msg: string }[] = [];
+jest.mock('../logger', () => ({
+  logger: {
+    warn: (obj: unknown, msg: string) => {
+      warnCalls.push({ obj, msg });
+    },
+    info: () => {},
+    error: () => {},
+    debug: () => {},
+  },
+}));
+
 import { revocationProducer } from './producer';
+/** The substring `scripts/verify-image.mjs` greps for. Keep the two in step. */
+const HARNESS_GREPPED_WARNING = 'revocation DB read failed';
 
 beforeEach(() => {
   revocationProducer.invalidate();
   signCalls.length = 0;
+  warnCalls.length = 0;
   rowsToReturn = [];
   dbShouldThrow = false;
 });
@@ -116,5 +142,26 @@ describe('revocationProducer.getEnvelopeJson', () => {
     expect(envelope).toBe('envelope-1');
     expect(signCalls.length).toBe(1);
     expect(signCalls[0].entries).toEqual([]);
+  });
+
+  // THE PIN ON THE FALLBACK'S WARNING TEXT. Read the comment on the logger mock
+  // above before touching this: `scripts/verify-image.mjs` asserts this exact
+  // substring is ABSENT from a healthy container's logs, and that assertion is the
+  // only thing that distinguishes a correctly-signed list from the empty-but-signed
+  // one the branch above produces. A reword here without a matching change there
+  // turns five image checks green against a broken database, silently.
+  it('logs a warning containing the substring verify-image.mjs greps for, at warn level', async () => {
+    dbShouldThrow = true;
+    await revocationProducer.getEnvelopeJson();
+    expect(warnCalls.length).toBe(1);
+    expect(warnCalls[0].msg).toContain(HARNESS_GREPPED_WARNING);
+    // `err` must be carried, or an operator sees "the DB read failed" with no cause.
+    expect(warnCalls[0].obj).toHaveProperty('err');
+  });
+
+  it('logs NO such warning on the healthy path', async () => {
+    rowsToReturn = [];
+    await revocationProducer.getEnvelopeJson();
+    expect(warnCalls.filter((c) => c.msg.includes(HARNESS_GREPPED_WARNING))).toEqual([]);
   });
 });

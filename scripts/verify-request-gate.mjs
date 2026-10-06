@@ -382,28 +382,47 @@ async function probe(base, route) {
  * REACHED the handler, which is the definition of public here.
  *
  * CAVEAT, and the reason this docstring no longer claims the `code` is unique
- * to the gate: `src/app/api/registry/enroll/route.ts` also answers
- * `503 SERVER_MISCONFIGURED` — from its own handler — when `ENROLLMENT_SECRET`
- * is unset or too short. So that status/code pair is no longer proof the
- * request was stopped by the proxy.
+ * to the gate: TWO handlers also answer `503 SERVER_MISCONFIGURED` from their
+ * own code when `ENROLLMENT_SECRET` is unset or too short —
+ * `src/app/api/registry/enroll/route.ts` (which cannot mint tokens) and, since
+ * #91, `src/app/api/registry/agents/route.ts` (which cannot verify them). Both
+ * construct the same `EnrollmentService`. So that status/code pair is no longer
+ * proof the request was stopped by the proxy.
  *
  * This harness stays correct for THREE independent reasons, each on its own
  * sufficient — so check 10 misreports only if all three break together:
- *   1. `probe()` sends GET and enroll is POST-only, so the framework answers
- *      405 before any handler code runs.
- *   2. `probe()` sends no body, so even a POST stops at the route's own
- *      `400 BODY_INVALID` pre-validation — which runs BEFORE
- *      `getEnrollmentService()`, and therefore before the 503 can fire.
+ *   1. `probe()` sends GET. Enroll is POST-only, so the framework answers 405
+ *      before any handler code runs. `/api/registry/agents` DOES have a GET
+ *      handler, but that handler never constructs `EnrollmentService` — it only
+ *      lists agents — so the 503 is unreachable by this probe whatever that
+ *      handler returns. (Do not "improve" this to claim the agents GET returns
+ *      200 here: `boot()` sets no DATABASE_URL explicitly and inherits whatever
+ *      the ambient env has, so that GET may reach a database or may not — in CI
+ *      it does not (the service container is on 5433, and the workflow step
+ *      passes no env), on a dev box with a local Postgres it may. Its outcome is
+ *      not guaranteed either way, which is exactly the point: `classify()` maps
+ *      anything that is neither of its two patterns to `public`, and
+ *      `scripts/request-gate-baseline.json` pins `public`.)
+ *   2. `probe()` sends no body, so even a POST stops at each route's own
+ *      `400 BODY_INVALID` pre-validation — which in BOTH routes runs BEFORE
+ *      `getEnrollmentService()`, and therefore before the 503 can fire. On the
+ *      agents route that ordering is deliberate and load-bearing, not
+ *      incidental: its guard sits inside the `withIdempotency` callback
+ *      specifically to keep the body checks ahead of it.
  *   3. `boot()` always supplies a valid 43-char ENROLLMENT_SECRET, so the 503
- *      has no reason to fire at all.
+ *      has no reason to fire at all — and since issue #99 it could not: the
+ *      server is booted with NODE_ENV=production, where an unusable secret makes
+ *      the process exit non-zero at startup instead of serving. This harness
+ *      would fail as "server did not come up", not as a misclassified probe.
  * (Reaching the 503 would additionally need a body parsing to
- * `{manifest: <object>}`, which `probe()` cannot send.)
+ * `{manifest: <object>}` — plus, on the agents route, a `manifest.aid` — which
+ * `probe()` cannot send.)
  *
  * If all of that ever stops holding, check 10 fails as
- * `/api/registry/enroll: public -> gate-misconfigured`, sending a reader to
- * `proxy.ts` to debug a fault that is actually in the route's own config. The
- * durable fix then is to scope this classification by route, or to give the gate
- * a `code` no handler shares.
+ * `/api/registry/enroll: public -> gate-misconfigured` (or the same for
+ * `/api/registry/agents`), sending a reader to `proxy.ts` to debug a fault that
+ * is actually in the route's own config. The durable fix then is to scope this
+ * classification by route, or to give the gate a `code` no handler shares.
  */
 function classify(r) {
   if (r.status === 401 && r.body?.code === 'INVALID_API_KEY') return 'gated';

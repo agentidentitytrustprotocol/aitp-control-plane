@@ -31,7 +31,11 @@ spec rather than restate it.
 
   HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
 
-  A `500` is the one status that **may or may not** carry the shape above, so do not assume a body: `POST /api/revocation/entries` returns `{ "error": ..., "code": "INSERT_FAILED" }`, while an unhandled internal fault — such as the deliberate rethrow on `POST /api/registry/enroll` — reaches you as a framework `500` with an **empty body**.
+  A `500` **never** carries the shape above. Every internal fault reaches you as a framework response whose body is whatever the framework renders — not JSON, and not the `{error, code}` contract — so do not parse it and do not branch on it. The status is the whole signal: retry, and if it persists, the server's operator has the detail in their logs. Routes reach this state deliberately, by rethrowing anything they cannot classify (`POST /api/registry/enroll`, `POST /api/revocation/entries`), which is what keeps internal detail — database messages especially — out of client-facing bodies by construction.
+
+  `POST /api/revocation/entries` was the one exception, returning `{ "error": ..., "code": "INSERT_FAILED" }` with a raw database message in `error`. That code is **gone**; a client that special-cased it can delete that branch. The input mistakes that used to surface that way are now `400 BODY_INVALID` instead (see [Revocation](#revocation)).
+
+  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
 
 ## Authentication
 
@@ -42,7 +46,7 @@ spec rather than restate it.
 | `POST /api/registry/agents` | `Authorization: Bearer <enrollment-token>` (the token returned by `/enroll`, single-use) |
 | All other gated routes | `Authorization: Bearer <API_KEY>` from the `API_KEYS` allowlist |
 
-`ENROLLMENT_SECRET` is the **server-side** HMAC key the CP uses to mint and verify enrollment tokens. Callers never present it directly.
+`ENROLLMENT_SECRET` is the **server-side** HMAC key the CP uses to mint and verify enrollment tokens. Callers never present it directly. A production server whose value is unset or shorter than 32 characters refuses to start, so the `503 SERVER_MISCONFIGURED` below is something you should now only see from a non-production deployment — see [operations.md](operations.md#authentication--exposure).
 
 In production, an empty `API_KEYS` causes gated routes to return `503 SERVER_MISCONFIGURED` — fail-safe against accidental exposure. In non-production, an empty `API_KEYS` disables auth on gated routes (a boot-time warning is logged).
 
@@ -157,7 +161,10 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 - `expires_at` is **Unix seconds**. It must be ≥ 5 minutes in the future or you get `400 MANIFEST_EXPIRED` — the same code and the same message [`/enroll`](#post-apiregistryenroll) returns for this condition, because enroll applies the same 5-minute guard first specifically to save you the round trip. You can still reach this check, though, so handle it: the two guards each read their own clock, so a manifest sitting near the 5-minute boundary can pass enroll and fail here seconds later, and the two implementations disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
 - **Namespace** is taken from the `X-Aitp-Namespace` header (wins) or `manifest.extensions.namespace`, defaulting to `default`.
 - The token is consumed atomically; a second presentation returns `401 TOKEN_REPLAYED`. An invalid/expired token or AID mismatch returns `401 TOKEN_INVALID`.
+- `503 SERVER_MISCONFIGURED` means the server has no usable `ENROLLMENT_SECRET` and cannot verify *anyone's* enrollment token — the same operator fault [`/enroll`](#post-apiregistryenroll) reports for the same reason. Your token is not the problem, and the body deliberately carries no configuration detail.
 - A missing `manifest.aid`, or a non-string `manifest.extensions.namespace`, returns `400 BODY_INVALID`.
+
+The `4xx`/`5xx` split is meaningful here, as it is on `/enroll`: a `400` means *your* request is the problem and retrying it unchanged will not help, a `401` means *your token* is the problem, and a `503` means the **server** is broken and the same request is worth retrying once the deployment is fixed. Your token survives it — a `503` does not consume the `jti` — but only two things make reusing it viable: the token's 5-minute lifetime has to still be running, and the operator has to have *restored* the secret rather than rotated it. Generating a new `ENROLLMENT_SECRET` (the usual fix) invalidates every token minted under the old one, so a retry then gets `401 TOKEN_INVALID` and you must re-enroll. The reuse case that used to pay off was the partial rollout — one replica missing the env, fixed by giving it the same value the others already have — and in production that case no longer reaches you: a replica with an unusable secret exits at boot instead of serving `503`s, so the partial rollout fails as a deploy rather than as an intermittent error on one replica. It still applies to a non-production deployment, which starts anyway by design. Note the ordering: a malformed body or a missing `manifest.aid` is still rejected with `400` even on a misconfigured server, so a broken deployment never masks a genuinely bad request; the later checks (`MANIFEST_EXPIRED`, the namespace check) sit behind the `503`.
 
 Response `201`: `{ "aid": "...", "displayName": "...", "registeredAt": "..." }`. Emits an `agent.registered` audit event.
 
@@ -268,6 +275,15 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 ```
 
 `jti` must be a UUID; `reason` ≤ 500 chars; `revokedAt` is optional ISO-8601 (defaults to now). Invalid input → `400 JTI_INVALID` / `400 BODY_INVALID`. Recording a revocation also flips the matching `issuedTcts.revoked` flag and cascades to descendant delegations. The signed list at `/.well-known/aitp-revocation-list` refreshes every `REVOCATION_LIST_TTL_SECS` seconds.
+
+Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits:
+
+- **`revokedAt` must fall between `1970-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`.** The two ends have different reasons. Above the upper bound the value is not a `timestamp with time zone` this server can write at all. Below the epoch the value *can* be stored but cannot be republished faithfully — the signed list at `/.well-known/aitp-revocation-list` carries `revoked_at` as seconds since the epoch, which a revocation predating that epoch cannot express. The bound applies to the **UTC instant**, not the digits you sent: `1970-01-01T00:00:00+01:00` is `1969-12-31T23:00Z` and is rejected.
+- **`reason` must not contain a NUL (U+0000).** Other control characters — newline, tab — are fine; only U+0000 is unstorable. Send it as `\u0000` and you get a `400`; send a raw NUL byte and the body is not valid JSON, so you get a `400` from the parser instead.
+
+Both used to reach the database and come back as a `500` carrying the Postgres message verbatim. A genuine database fault is now a framework `500` with no `{error, code}` body at all, per [Conventions](#conventions) — never a coded body you can parse.
+
+One wrinkle worth knowing if you use `Idempotency-Key` here: the `BODY_INVALID` for a non-JSON body is decided before the idempotency layer and so is never cached, while the field-level `400`s above are decided inside it and are. Same code, different replay behavior.
 
 Consumers of the signed list should verify it with the `aitp` SDK's `verifyRevocationList(envelopeJson, expectedIssuerAid)` and branch on the thrown error's `.code` (`signature_invalid`, `issuer_mismatch`, `version_unknown`, `expired`, `malformed`), never on its message text — that contract holds from `aitp` `0.6.0` onward, the release that first shipped `verifyRevocationList` with a typed `.code`.
 
