@@ -150,6 +150,129 @@ describe('POST /api/pinned-keys', () => {
     expect(((await res.json()) as { error: string }).error).toMatch(/expiresAt/);
   });
 
+  // The window is what this route can WRITE: `toISOString()` leaves the
+  // four-digit-year form outside 0000-9999 and Postgres cannot parse the
+  // expanded form, and Postgres has no year zero, so the floor sits a year
+  // above where the serialization changes. Both ends are pinned by the
+  // millisecond either side, so widening or narrowing the bound fails here
+  // rather than in production.
+  describe('expiresAt range', () => {
+    const INSIDE = [
+      ['the low bound exactly', '0001-01-01T00:00:00.000Z'],
+      ['the high bound exactly', '9999-12-31T23:59:59.999Z'],
+      ['a year Postgres stores but the epoch would exclude', '0099-12-31T23:59:59.999Z'],
+      ['a pre-epoch instant', '1969-12-31T23:59:59.999Z'],
+    ] as const;
+
+    const OUTSIDE = [
+      // One millisecond under the floor. Renders as `0000-12-31T…`, which
+      // `new Date` is perfectly happy with and Postgres answers 22008.
+      ['one ms below the low bound', '0000-12-31T23:59:59.999Z'],
+      // One millisecond over the ceiling — `toISOString()` would emit
+      // `+010000-01-01T00:00:00.000Z` (22009).
+      ['one ms above the high bound', '+010000-01-01T00:00:00.000Z'],
+      // Negative years reach Postgres as `-000001-…` (22007).
+      ['a negative year', '-000001-12-31T23:59:59.999Z'],
+      // The JS extremes, which the NaN check does not catch.
+      ['the maximum Date', '+275760-09-13T00:00:00.000Z'],
+      ['the minimum Date', '-271821-04-20T00:00:00.000Z'],
+      // The bound is on the UTC instant, not the digits: these two read as
+      // in-range years but are 0000-12-31T10:00Z and +010000-01-01T00:59Z.
+      ['year 0001 pushed below zero by a +14:00 offset', '0001-01-01T00:00:00.000+14:00'],
+      ['year 9999 pushed past it by a -01:00 offset', '9999-12-31T23:59:59.999-01:00'],
+    ] as const;
+
+    it.each(OUTSIDE)('rejects %s with 400 BODY_INVALID and no insert', async (_w, v) => {
+      const res = await post({ aid: 'aid:pubkey:abc', pubkey: GOOD_PUBKEY, expiresAt: v });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/expiresAt must be between/);
+      // The whole point: decided from the body, before any SQL runs.
+      expect(insertedValues).toHaveLength(0);
+    });
+
+    it.each(INSIDE)('accepts %s', async (_w, v) => {
+      selectResults = [[keyRow()]];
+      const res = await post({ aid: 'aid:pubkey:abc', pubkey: GOOD_PUBKEY, expiresAt: v });
+      expect(res.status).toBe(201);
+      expect(insertedValues).toHaveLength(1);
+      // Stored normalized, and still inside the window after normalization.
+      const stored = (insertedValues[0] as { expiresAt: string }).expiresAt;
+      expect(stored).toBe(new Date(v).toISOString());
+      expect(stored).toMatch(/^\d{4}-/);
+    });
+  });
+
+  // `label` is varchar(128), not unbounded text, so both a 129th character
+  // (22001) and a U+0000 (22021) are values the column cannot hold. Same
+  // unguarded insert, same misclassified 500.
+  describe('label', () => {
+    it('accepts exactly 128 characters', async () => {
+      selectResults = [[keyRow()]];
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'x'.repeat(128),
+      });
+      expect(res.status).toBe(201);
+      expect(insertedValues).toHaveLength(1);
+    });
+
+    it('rejects 129 characters with 400 BODY_INVALID and no insert', async () => {
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'x'.repeat(129),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/label exceeds 128/);
+      expect(insertedValues).toHaveLength(0);
+    });
+
+    // Postgres counts varchar(n) in code points, so these 65 astral
+    // characters — 130 UTF-16 units, 260 bytes — fit in varchar(128). A
+    // `.length` check would reject them; that would be a fabricated 400.
+    it('counts code points, not UTF-16 units: 65 astral characters fit', async () => {
+      selectResults = [[keyRow()]];
+      const label = '\u{1F600}'.repeat(65);
+      expect(label.length).toBe(130); // the trap this guards against
+      const res = await post({ aid: 'aid:pubkey:abc', pubkey: GOOD_PUBKEY, label });
+      expect(res.status).toBe(201);
+      expect(insertedValues).toHaveLength(1);
+    });
+
+    it('rejects a NUL character, reachable through the \\u0000 JSON escape', async () => {
+      // Built by parsing the escape, which is how a real caller sends it —
+      // a raw NUL byte is invalid JSON and dies at req.json() instead.
+      const parsed = JSON.parse('{"label":"ops\\u0000team"}') as { label: string };
+      expect(parsed.label).toContain('\u0000');
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: parsed.label,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('BODY_INVALID');
+      expect(body.error).toMatch(/NUL/);
+      expect(insertedValues).toHaveLength(0);
+    });
+
+    it('allows other control characters — a newline in operator prose stores fine', async () => {
+      selectResults = [[keyRow()]];
+      const res = await post({
+        aid: 'aid:pubkey:abc',
+        pubkey: GOOD_PUBKEY,
+        label: 'ops\n\tteam',
+      });
+      expect(res.status).toBe(201);
+      expect((insertedValues[0] as { label: string }).label).toBe('ops\n\tteam');
+    });
+  });
+
   it('upserts and returns 201 with the stored row (namespace defaults, expiresAt normalized to ISO)', async () => {
     selectResults = [[keyRow({ label: 'ops' })]]; // re-read after upsert
     const res = await post({
