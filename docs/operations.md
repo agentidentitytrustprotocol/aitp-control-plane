@@ -1379,6 +1379,28 @@ retries:
 Inspect or reset a breaker via `GET /api/webhooks/:id/circuit-breaker` and
 `POST /api/webhooks/:id/circuit-breaker/reset` (see [`api.md`](api.md#webhooks)).
 
+## Trust-anchor JWKS refresh
+
+A background job (started at boot from `src/instrumentation.ts`, interval
+`unref`'d) caches each OIDC trust anchor's JWKS in `trust_anchors.jwks_cache`;
+`GET /api/trust-anchors/:id/jwks` serves it. Every `JWKS_REFRESH_INTERVAL_MS` it
+refreshes anchors whose cache is missing or older than `JWKS_STALE_AFTER_MS`,
+using the anchor's `jwksUrl`, else `<issuerUrl>/.well-known/openid-configuration`
+-> `jwks_uri`. A failed refresh logs `jwks-refresher: refresh failed for trust
+anchor` and keeps the previous cache (so the endpoint can serve a stale keyset
+while the issuer is down; check `X-JWKS-Cached-At`). Replicas refresh
+independently (idempotent; no lock).
+
+- **`JWKS_REFRESH_ENABLED`** (default true), **`JWKS_REFRESH_INTERVAL_MS`**
+  (default 900000), **`JWKS_STALE_AFTER_MS`** (default 3600000),
+  **`JWKS_FETCH_TIMEOUT_MS`** (default 10000).
+- **Egress.** The CP now makes outbound requests to operator-supplied issuer URLs.
+  Each fetch (including the discovered `jwks_uri`) must be http(s) — https only in
+  production — and every resolved address must be public (same rule as webhook
+  targets); redirects are refused and bodies over 1 MiB are rejected.
+  `WEBHOOK_URL_ALLOWLIST` does not apply. The CP needs outbound HTTPS to your
+  issuers; an anchor it cannot reach stays `JWKS_NOT_CACHED`.
+
 ## Data retention
 
 A periodic sweep keeps storage bounded. It is multi-instance safe via a Postgres

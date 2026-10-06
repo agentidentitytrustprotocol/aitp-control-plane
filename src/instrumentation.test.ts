@@ -42,6 +42,12 @@ jest.mock('./lib/shutdown', () => ({
   },
 }));
 
+jest.mock('./lib/trust-anchors/jwks-refresher', () => ({
+  startJwksRefresher: () => {
+    calls.push('startJwksRefresher');
+  },
+}));
+
 import { register } from './instrumentation';
 
 const savedRuntime = process.env.NEXT_RUNTIME;
@@ -78,7 +84,11 @@ describe('register', () => {
     // A process that is about to exit should not first install signal handlers,
     // and the operator should read the fatal line first rather than third.
     await register();
-    expect(calls).toEqual(['enforceEnrollmentSecretAtBoot', 'registerShutdownHooks']);
+    expect(calls).toEqual([
+      'enforceEnrollmentSecretAtBoot',
+      'startJwksRefresher',
+      'registerShutdownHooks',
+    ]);
   });
 
   it('still registers shutdown hooks with OTel off, so readiness drains', async () => {

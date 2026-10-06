@@ -68,6 +68,11 @@ export async function register(): Promise<void> {
   );
   enforceEnrollmentSecretAtBoot();
 
+  // Background JWKS cache refresh for OIDC trust anchors (no-op when
+  // JWKS_REFRESH_ENABLED=false; idempotent; its interval is unref'd).
+  const { startJwksRefresher } = await import('./lib/trust-anchors/jwks-refresher');
+  startJwksRefresher();
+
   // Shutdown hooks must always be wired — even with OTel off — so
   // readiness drains correctly on SIGTERM.
   const { registerShutdownHooks } = await import('./lib/shutdown');

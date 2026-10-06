@@ -340,6 +340,7 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 | GET | `/api/trust-anchors/:id` | API key | Fetch one |
 | PATCH | `/api/trust-anchors/:id` | API key | Update `issuerUrl` / `jwksUrl` / `label` |
 | DELETE | `/api/trust-anchors/:id` | API key | Remove (`204`) |
+| GET | `/api/trust-anchors/:id/jwks` | API key | The CP-cached JWKS for the anchor, for agents that cannot reach the issuer. `X-JWKS-Cached-At` carries the cache time; `Cache-Control: max-age=300`. `400 ID_INVALID` (not a UUID), `404 NOT_FOUND`, `503 JWKS_NOT_CACHED` (with `Retry-After: 60`) until the background refresher has fetched it once or if every fetch has failed. |
 
 ### Pinned keys
 
