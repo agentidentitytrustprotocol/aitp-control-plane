@@ -10,9 +10,16 @@
 //     EnrollmentConfigError is RETHROWN, not laundered into a 503. The guard
 //     discriminates by class; it used to catch everything and justify itself by
 //     counting throw sites in another file.
-//   • Precedence: a malformed body and a missing manifest.aid still answer
-//     400 BODY_INVALID on a misconfigured server, so a broken deployment
-//     never masks a genuinely bad request.
+//   • Precedence, BOTH directions, which is the whole ordering guarantee
+//     docs/api.md publishes for this route:
+//       - a malformed body and a missing manifest.aid still answer
+//         400 BODY_INVALID on a misconfigured server, so a broken deployment
+//         never masks a genuinely bad request; and
+//       - the checks that FOLLOW the guard (MANIFEST_EXPIRED, the namespace
+//         check) answer 503 on that same server. That half was true only by
+//         straight-line control flow and would have survived a reordering
+//         silently (issue #100). This is a unit-level pin only; an
+//         end-to-end check against a booted server is still open on #100.
 //   • 401 TOKEN_INVALID when validateToken throws — and the message is
 //     asserted verbatim, because it is deliberately echoed to the caller and
 //     an over-broad redaction would otherwise remove their only signal.
@@ -312,6 +319,82 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { code: string };
       expect(body.code).toBe('BODY_INVALID');
+    });
+
+    // ── the OTHER half of the ordering guarantee ──────────────────────────
+    //
+    // The two tests above pin "400 BEFORE 503": the pre-validations run ahead of
+    // the guard, so a broken deployment never masks a genuinely malformed
+    // request. The two below pin the complement — "503 BEFORE 400" for every
+    // check that FOLLOWS the guard — and that half had nothing holding it.
+    //
+    // docs/api.md publishes both halves as one sentence ("a malformed body or a
+    // missing manifest.aid is still rejected with 400 even on a misconfigured
+    // server … the later checks (MANIFEST_EXPIRED, the namespace check) sit
+    // behind the 503"), and route.ts's guard comment states the same thing as
+    // the reason the guard sits INSIDE the withIdempotency callback rather than
+    // above it. Until now that second half was true only by straight-line
+    // control flow: hoisting the guard one statement lower — or lifting either
+    // later check one statement higher — would invert the published precedence
+    // and every existing test would still pass.
+    //
+    // Both assert the complementary code is ABSENT, not merely that the status
+    // is 503. `expect(status).toBe(503)` alone would also pass if the route
+    // started answering 503 for the expiry itself, which is a different bug
+    // wearing the same status.
+    it('answers 503 rather than 400 MANIFEST_EXPIRED for a check BEHIND the guard', async () => {
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
+      };
+      // Inside the 5-minute registration window, i.e. a manifest this route
+      // WOULD reject with 400 MANIFEST_EXPIRED on a healthy server — asserted as
+      // exactly that by the (Plan Bug 6) test above, which is what makes this
+      // one a precedence test rather than a restatement.
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: envelope(60),
+        }),
+      );
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('SERVER_MISCONFIGURED');
+      expect(body.code).not.toBe('MANIFEST_EXPIRED');
+      // The expiry guard lives after validateToken, so reaching it at all would
+      // have meant validating a token on a server that cannot verify any.
+      expect(validateTokenMock).not.toHaveBeenCalled();
+    });
+
+    it('answers 503 rather than 400 BODY_INVALID for the namespace check BEHIND the guard', async () => {
+      getServiceImpl = () => {
+        throw new EnrollmentConfigError('ENROLLMENT_SECRET is required');
+      };
+      // A non-string manifest.extensions.namespace: the route's LAST 400, and
+      // the one that most looks like a pre-validation (it is decidable from the
+      // body alone) while actually sitting behind the guard. Asserted as a 400
+      // on a healthy server by the '(Plan 2.2)' test below.
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: JSON.stringify({
+            manifest: {
+              aid: 'aid:pubkey:fake',
+              display_name: 'fake',
+              handshake_endpoint: 'https://fake.example.com/handshake',
+              offered_capabilities: ['demo.echo'],
+              expires_at: Math.floor(Date.now() / 1000) + 3600,
+              extensions: { namespace: { tenant: 'x' } },
+            },
+          }),
+        }),
+      );
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('SERVER_MISCONFIGURED');
+      expect(body.code).not.toBe('BODY_INVALID');
+      expect(upsertAgentMock).not.toHaveBeenCalled();
     });
 
     it('RETHROWS a non-configuration throw instead of calling it misconfigured', async () => {
