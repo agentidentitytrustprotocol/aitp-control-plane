@@ -248,7 +248,7 @@ describe('POST /api/pinned-keys', () => {
       // Built by parsing the escape, which is how a real caller sends it —
       // a raw NUL byte is invalid JSON and dies at req.json() instead.
       const parsed = JSON.parse('{"label":"ops\\u0000team"}') as { label: string };
-      expect(parsed.label).toContain(' ');
+      expect(parsed.label).toContain('\u0000');
       const res = await post({
         aid: 'aid:pubkey:abc',
         pubkey: GOOD_PUBKEY,
