@@ -101,19 +101,29 @@
       "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__1f0_43k._.js",
-      "bytes": 1878,
-      "sha256": "952e623039708496f362b931dd84a40f64884c2eb8e488c50633e53a1ac32d84"
+      "path": "instrumentation/chunks/[root-of-the-server]__026qxyn._.js",
+      "bytes": 1454,
+      "sha256": "be03265e22a37bedf7274028f74dfe9a119bace963194647c664e5d0fcd2b9c3"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__1up5uol._.js",
-      "bytes": 1495,
-      "sha256": "8b44a4fd0ae0152567cb0a54ef14c0dfc57036b82be0dd5a472b90a47df80b9d"
+      "path": "instrumentation/chunks/[root-of-the-server]__0fj2rm1._.js",
+      "bytes": 1571,
+      "sha256": "70766702416aac734877b625550dfe282de4ab341193c9474d80b248b6643d3a"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__114-5q0._.js",
+      "bytes": 2110,
+      "sha256": "e9684e0fcb5d40e319c144265b0cf24a5b325e038d495140ea58a4da480ef6d9"
     },
     {
       "path": "instrumentation/chunks/[turbopack]_runtime.js",
       "bytes": 36624,
       "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
+    },
+    {
+      "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7.js",
+      "bytes": 10159,
+      "sha256": "ad62a0d102f86f9013af971fb61c9511e1bc6f28b5f2c8b8573945fa004bc934"
     },
     {
       "path": "instrumentation/chunks/src_lib_registry_enrollment-config_ts_0q5mrtz._.js",
@@ -123,7 +133,7 @@
     {
       "path": "instrumentation/instrumentation.js",
       "bytes": 179,
-      "sha256": "4ce9b0ca94ec7c3f97a880a2163e9b81b0600b6e62ab86240ed7d73b53ca4562"
+      "sha256": "2f36ed10cbef5bb37690d9b703b24251c3627b5028da011bd4a43149d83d0451"
     },
     {
       "path": "middleware/chunks/[externals]__06hzl-k._.js",
