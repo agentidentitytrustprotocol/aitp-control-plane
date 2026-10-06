@@ -343,14 +343,14 @@
       "sha256": "4ce9b0ca94ec7c3f97a880a2163e9b81b0600b6e62ab86240ed7d73b53ca4562"
     },
     {
-      "path": "middleware/chunks/[externals]__1-7rkdt._.js",
-      "bytes": 1209,
-      "sha256": "86588cc61eee312c986c0d9cb72cd11ea5159d002e68d6ecd1b2ef0530af8e50"
+      "path": "middleware/chunks/[externals]__06hzl-k._.js",
+      "bytes": 1272,
+      "sha256": "4a408bb2af49355e765d69231e6190d14f8c34c60226c5ef69106a7398a3b8cc"
     },
     {
-      "path": "middleware/chunks/[root-of-the-server]__1e654z8._.js",
-      "bytes": 231266,
-      "sha256": "af91e74eebe1714633e4848df2e8dabb6a944d1af86990cee200d24c263e50d8"
+      "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
+      "bytes": 236128,
+      "sha256": "2e1d16d8dfd97283186d7283e81e3d18c5b70ebd56314bb97fdfc58b498bed8a"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -360,7 +360,7 @@
     {
       "path": "middleware/middleware.js",
       "bytes": 221,
-      "sha256": "c3e19f57ac58f28973d3b3b4a48defe1fb783a65a64762b267b46a24fc94ad31"
+      "sha256": "34aebe7138d760b8bd80ba43a64176f01369f2c297c68efc4f1c6dbed57d6248"
     },
     {
       "path": "server.js",
@@ -368,7 +368,7 @@
       "sha256": "a555d336cb6f0aa6ab526d1324670c553d196c95d1931bcf744c48f62f1b94a4"
     }
   ],
-  "nextTreeSha": "614a11fb058d7f563dcc09428f6762bc8fe2dec336ab69c4fdcc9457bffa3fab",
+  "nextTreeSha": "542dc6ca8f7801037fc572ba549e1fa8cf083a7cf21ceb1571874c75d872a536",
   "imageConfig": {
     "Env": [
       "HOSTNAME=0.0.0.0",
@@ -390,6 +390,6 @@
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
     "bytes": 2837,
-    "sha256": "ab45e68e31494029a316679973e4d365365a561f0aa16dbe4167701c1e2c986c"
+    "sha256": "e46733878401cfc494235132179aca586aab80853db3d13a604dc5570a8a494d"
   }
 }
