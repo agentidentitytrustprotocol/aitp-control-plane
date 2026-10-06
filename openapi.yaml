@@ -699,6 +699,9 @@ paths:
           description: >-
             The enrollment token was rejected. `code` is `TOKEN_INVALID` — wrong
             scope, expired, `sub` not matching `manifest.aid`, missing `jti`,
+            token not bound to the submitted manifest (its `msh` claim, the
+            SHA-256 of the exact `/enroll` body bytes, is missing or differs
+            from this request body's digest),
             malformed, bad signature, or an unparseable payload — or
             `TOKEN_REPLAYED`, meaning a still-valid token was presented a second
             time: the `jti` is consumed atomically on first use, so a captured
