@@ -1886,6 +1886,31 @@ function regexAllowedAt(text, p) {
 }
 
 /**
+ * End offset (exclusive) of a template substitution whose body starts at `k`, i.e. just
+ * past `${`. Scans code, skipping literals through the same `skipLiteralAt` the rest of
+ * the harness uses, and returns just past the `}` that closes the substitution.
+ */
+function skipTemplateSubstitution(text, k) {
+  const n = text.length;
+  let depth = 0;
+  while (k < n) {
+    const skipped = skipLiteralAt(text, k);
+    if (skipped >= 0) {
+      k = skipped;
+      continue;
+    }
+    const c = text[k];
+    if (c === '{') depth++;
+    else if (c === '}') {
+      if (depth === 0) return k + 1;
+      depth--;
+    }
+    k++;
+  }
+  throw new Error('unterminated template substitution');
+}
+
+/**
  * End offset of the string, template, regex literal or comment starting at `p`, or
  * -1 if none does.
  *
@@ -1909,26 +1934,23 @@ function skipLiteralAt(text, p) {
     throw new Error(`unterminated string literal at offset ${p}`);
   }
   if (c === '`') {
-    // Template literals nest: `${ }` may contain further templates. Track the
-    // substitution depth so a `}` closing a substitution is not read as the end.
+    // A template literal's `${ }` substitution holds ARBITRARY code — braces, strings,
+    // regexes, further templates — so it is scanned as code with its own brace depth,
+    // not counted by `{`/`}` alone. Next 16.3.8 compiles a template whose substitution is
+    // a whole function body (`${function(t){...}(...)}`); the earlier flat depth counter
+    // read that function's closing brace as the end of the substitution, lost the
+    // template's end, and made the gate's module look unterminated.
     let k = p + 1;
-    let depth = 0;
     while (k < n) {
       if (text[k] === '\\') {
         k += 2;
         continue;
       }
       if (text[k] === '$' && text[k + 1] === '{') {
-        depth++;
-        k += 2;
+        k = skipTemplateSubstitution(text, k + 2);
         continue;
       }
-      if (depth > 0 && text[k] === '}') {
-        depth--;
-        k++;
-        continue;
-      }
-      if (depth === 0 && text[k] === '`') return k + 1;
+      if (text[k] === '`') return k + 1;
       k++;
     }
     throw new Error(`unterminated template literal at offset ${p}`);
