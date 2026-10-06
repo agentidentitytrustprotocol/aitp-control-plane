@@ -2,8 +2,9 @@
 // agent, and config so we can assert: (1) DB rows are mapped to the
 // signer's entry shape (epoch-seconds revokedAt, reason null → omitted),
 // (2) the signed envelope is cached for ~60s and invalidate() clears it,
-// (3) a DB failure degrades to signing an EMPTY list rather than
-// throwing (the spec treats an empty list as a meaningful assertion).
+// (3) a DB failure NEVER signs an empty list: fail_closed (default) throws
+// RevocationUnavailableError; serve_stale re-serves the last good list only
+// within a bounded age.
 
 import { jest } from '@jest/globals';
 
@@ -32,9 +33,12 @@ jest.mock('../identity/cp-agent', () => ({
   }),
 }));
 
-jest.mock('../config', () => ({
-  config: { revocationListTtlSecs: 777 },
-}));
+const mockConfig = {
+  revocationListTtlSecs: 777,
+  revocationFailMode: 'fail_closed' as 'fail_closed' | 'serve_stale',
+  revocationMaxStalenessSecs: 300,
+};
+jest.mock('../config', () => ({ config: mockConfig }));
 
 /**
  * The logger is mocked so the DB-failure WARNING TEXT can be asserted.
@@ -48,18 +52,21 @@ jest.mock('../config', () => ({
  * is entirely broken. Measured, not theorised. This test is the pin.
  */
 const warnCalls: { obj: unknown; msg: string }[] = [];
+const errorCalls: { obj: unknown; msg: string }[] = [];
 jest.mock('../logger', () => ({
   logger: {
     warn: (obj: unknown, msg: string) => {
       warnCalls.push({ obj, msg });
     },
     info: () => {},
-    error: () => {},
+    error: (obj: unknown, msg: string) => {
+      errorCalls.push({ obj, msg });
+    },
     debug: () => {},
   },
 }));
 
-import { revocationProducer } from './producer';
+import { revocationProducer, RevocationUnavailableError } from './producer';
 /** The substring `scripts/verify-image.mjs` greps for. Keep the two in step. */
 const HARNESS_GREPPED_WARNING = 'revocation DB read failed';
 
@@ -67,8 +74,13 @@ beforeEach(() => {
   revocationProducer.invalidate();
   signCalls.length = 0;
   warnCalls.length = 0;
+  errorCalls.length = 0;
   rowsToReturn = [];
   dbShouldThrow = false;
+  mockConfig.revocationFailMode = 'fail_closed';
+  mockConfig.revocationMaxStalenessSecs = 300;
+  mockConfig.revocationListTtlSecs = 777;
+  jest.restoreAllMocks();
 });
 
 describe('revocationProducer.getEnvelopeJson', () => {
@@ -136,32 +148,114 @@ describe('revocationProducer.getEnvelopeJson', () => {
     ).toEqual(['jti-9']);
   });
 
-  it('publishes a signed EMPTY list when the DB read fails', async () => {
+  it('fail_closed (default): throws RevocationUnavailableError and signs NOTHING when the DB read fails', async () => {
     dbShouldThrow = true;
-    const envelope = await revocationProducer.getEnvelopeJson();
-    expect(envelope).toBe('envelope-1');
-    expect(signCalls.length).toBe(1);
-    expect(signCalls[0].entries).toEqual([]);
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+    expect(signCalls.length).toBe(0);
   });
 
-  // THE PIN ON THE FALLBACK'S WARNING TEXT. Read the comment on the logger mock
-  // above before touching this: `scripts/verify-image.mjs` asserts this exact
-  // substring is ABSENT from a healthy container's logs, and that assertion is the
-  // only thing that distinguishes a correctly-signed list from the empty-but-signed
-  // one the branch above produces. A reword here without a matching change there
-  // turns five image checks green against a broken database, silently.
-  it('logs a warning containing the substring verify-image.mjs greps for, at warn level', async () => {
+  it('fail_closed: the error carries a fixed message and code, never the DB error', async () => {
     dbShouldThrow = true;
+    const err = await revocationProducer.getEnvelopeJson().catch((e) => e);
+    expect(err.code).toBe('REVOCATION_UNAVAILABLE');
+    expect(err.message).not.toContain('db unreachable');
+  });
+
+  it('fail_closed: does not serve a previous good list after the 60s throttle lapses', async () => {
     await revocationProducer.getEnvelopeJson();
-    expect(warnCalls.length).toBe(1);
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now + 61_000);
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+    expect(signCalls.length).toBe(1);
+  });
+
+  it('serve_stale: re-serves the last good envelope (byte-identical, no re-sign) within the bound', async () => {
+    mockConfig.revocationFailMode = 'serve_stale';
+    const good = await revocationProducer.getEnvelopeJson();
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now + 120_000);
+    dbShouldThrow = true;
+    expect(await revocationProducer.getEnvelopeJson()).toBe(good);
+    expect(signCalls.length).toBe(1);
     expect(warnCalls[0].msg).toContain(HARNESS_GREPPED_WARNING);
-    // `err` must be carried, or an operator sees "the DB read failed" with no cause.
     expect(warnCalls[0].obj).toHaveProperty('err');
   });
 
-  it('logs NO such warning on the healthy path', async () => {
+  it('serve_stale: throws once the snapshot is older than REVOCATION_MAX_STALENESS_SECS', async () => {
+    mockConfig.revocationFailMode = 'serve_stale';
+    mockConfig.revocationMaxStalenessSecs = 300;
+    await revocationProducer.getEnvelopeJson();
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now + 301_000);
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+  });
+
+  it('serve_stale: the bound is clamped to the list TTL so an expired envelope is never served', async () => {
+    mockConfig.revocationFailMode = 'serve_stale';
+    mockConfig.revocationMaxStalenessSecs = 100_000;
+    mockConfig.revocationListTtlSecs = 200;
+    await revocationProducer.getEnvelopeJson();
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now + 201_000);
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+  });
+
+  it('serve_stale: throws when no good read has ever happened (no snapshot to serve)', async () => {
+    mockConfig.revocationFailMode = 'serve_stale';
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+    expect(signCalls.length).toBe(0);
+  });
+
+  it('serve_stale: invalidate() drops the fallback — a snapshot known to omit a new revocation is not served', async () => {
+    mockConfig.revocationFailMode = 'serve_stale';
+    await revocationProducer.getEnvelopeJson();
+    revocationProducer.invalidate(); // a revocation was just committed
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+  });
+
+  it('a recovered DB is picked up: failure does not poison later reads', async () => {
+    dbShouldThrow = true;
+    await expect(revocationProducer.getEnvelopeJson()).rejects.toBeInstanceOf(
+      RevocationUnavailableError,
+    );
+    dbShouldThrow = false;
+    expect(await revocationProducer.getEnvelopeJson()).toBe('envelope-1');
+  });
+
+  // THE PIN ON THE FAILURE LOG TEXT. `scripts/verify-image.mjs` asserts this
+  // substring is ABSENT from a healthy container's logs. Fail-closed now turns a
+  // broken database into a 503 that the harness's status check catches first, but
+  // the grep stays as the second line of defence (serve_stale mode still answers
+  // 200 on a failed read). Reword here only together with that harness.
+  it('logs an error containing the substring verify-image.mjs greps for, carrying err', async () => {
+    dbShouldThrow = true;
+    await revocationProducer.getEnvelopeJson().catch(() => undefined);
+    expect(errorCalls.length).toBe(1);
+    expect(errorCalls[0].msg).toContain(HARNESS_GREPPED_WARNING);
+    expect(errorCalls[0].obj).toHaveProperty('err');
+  });
+
+  it('logs NO such message on the healthy path', async () => {
     rowsToReturn = [];
     await revocationProducer.getEnvelopeJson();
-    expect(warnCalls.filter((c) => c.msg.includes(HARNESS_GREPPED_WARNING))).toEqual([]);
+    const all = [...warnCalls, ...errorCalls];
+    expect(all.filter((c) => c.msg.includes(HARNESS_GREPPED_WARNING))).toEqual([]);
   });
 });
