@@ -31,7 +31,12 @@
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  // FIRST, before anything else is started. A deployment whose
+  // FIRST: say so if NODE_ENV is not a known environment (issue #116). Every
+  // production safeguard keys on NODE_ENV === 'production', so an unexpected
+  // value disables all of them at once; this makes that a log line instead of
+  // an inference. Warn-only, deliberately: see node-env.ts.
+  //
+  // Then, before anything else is started. A deployment whose
   // ENROLLMENT_SECRET is unset or too short used to boot, report ready,
   // pass its health checks, and then answer 503 SERVER_MISCONFIGURED to
   // every POST /api/registry/enroll and every POST /api/registry/agents
@@ -63,6 +68,9 @@ export async function register(): Promise<void> {
   // readiness on it could only ever mean "this process should never have
   // started" — while pulling the replica out of rotation for every route
   // over a fault that breaks two. See docs/operations.md.
+  const { warnOnUnrecognisedNodeEnv } = await import('./lib/node-env');
+  warnOnUnrecognisedNodeEnv();
+
   const { enforceEnrollmentSecretAtBoot } = await import(
     './lib/registry/enrollment-config'
   );

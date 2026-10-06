@@ -75,6 +75,15 @@ signing key, not a config toggle.
   routes* instead. If you run a staging environment, set `NODE_ENV=production`
   there and differentiate it some other way; the image does this for you.
 
+  **That single point of failure is now loud, not silent (#116).** `NODE_ENV` is
+  trimmed (`"production "` is production), and at boot a value that is neither
+  `production` nor a recognised development value (`development`, `test`) — including
+  *unset* — makes the process print one `[aitp-cp] NODE_ENV is "staging", … every
+  production safeguard is INACTIVE` line at error level, listing what is off. It is
+  warn-only on purpose: making one gate stricter than the others would be inconsistent,
+  and `development`/`test` must keep working. Treat that line in a deployed instance's
+  logs as a misconfiguration.
+
   `/api/readyz` deliberately does **not** check it — see
   [Health, readiness & graceful shutdown](#health-readiness--graceful-shutdown)
   for why. Still verify an enrollment after any deploy that changes the value:
