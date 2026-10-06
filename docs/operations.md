@@ -1379,6 +1379,28 @@ retries:
 Inspect or reset a breaker via `GET /api/webhooks/:id/circuit-breaker` and
 `POST /api/webhooks/:id/circuit-breaker/reset` (see [`api.md`](api.md#webhooks)).
 
+## Observed-artifact verification
+
+The CP is an observer: `tct.issued` / `handshake.complete` / `delegation.issued`
+events are agent-reported, and by default the projection (`issued_tcts`,
+`delegations`) records the reported claims without checking any signature.
+`OBSERVED_ARTIFACT_VERIFICATION` opts into checking them:
+
+- **`off`** (default) — no verification; unchanged behaviour.
+- **`warn`** — when a report carries the v0.2 `{ token, claims }` wrapper, verify
+  the compact-JWS `token` with the SDK. A failure is logged (`tct-monitor:
+  observed artifact failed verification`) and the row is projected anyway.
+  Claims-only reports are projected silently.
+- **`strict`** — project only reports whose token verifies. Claims-only reports,
+  tampered tokens, and **expired** tokens are dropped (logged at warn). Turn this
+  on only if every reporter sends the signed token and reports promptly.
+
+What verification covers: TCTs are checked with `verifyTct` (signature, expiry,
+grant, audience = the TCT's own `aud`); delegations with the strict single-hop
+`verifyDelegation`, using the delegation's own `aud` as verifier AID, so multi-hop
+chains fail. It does not consult the revocation list, and no `verified` flag is
+persisted: the outcome only gates projection and is logged.
+
 ## Data retention
 
 A periodic sweep keeps storage bounded. It is multi-instance safe via a Postgres

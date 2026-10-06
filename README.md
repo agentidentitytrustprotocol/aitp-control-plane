@@ -92,6 +92,12 @@ rate-limit, retention, and telemetry subsystems behave.
 | `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
 | `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |
 
+**Observed-artifact verification**
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `OBSERVED_ARTIFACT_VERIFICATION` | no | `off` | `off` \| `warn` \| `strict`. Verify the signed token in reported TCT/delegation telemetry before projecting it. `warn` logs failures; `strict` drops anything unverified (including claims-only reports). Unknown values fall back to `off`. See [operations.md](docs/operations.md#observed-artifact-verification). |
+
 **Data retention** (periodic sweep, multi-instance safe — set any TTL to `0` to keep that table forever)
 
 | Variable | Required | Default | Purpose |

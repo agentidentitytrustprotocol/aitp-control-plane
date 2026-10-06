@@ -144,6 +144,20 @@ export const config = {
   trustedProxyHops: readNumber('TRUSTED_PROXY_HOPS', 0),
   rateLimitEnabled:
     (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
+  // ── Observed-artifact verification ───────────────────────────────────
+  // The CP projects TCT/delegation telemetry that agents REPORT. When a report
+  // carries the full signed token (the v0.2 `{ token, claims }` wrapper), the CP
+  // can verify it before trusting the claims:
+  //   off    — never verify; project whatever is reported (default; the
+  //            historical behaviour).
+  //   warn   — verify when a token is present; log a failure but still project.
+  //   strict — project only reports whose token verifies; drop the rest
+  //            (including flat/claims-only reports with no token).
+  // Unknown values fall back to `off`.
+  observedArtifactVerification: ((): 'off' | 'warn' | 'strict' => {
+    const v = (process.env.OBSERVED_ARTIFACT_VERIFICATION ?? 'off').trim().toLowerCase();
+    return v === 'warn' || v === 'strict' ? v : 'off';
+  })(),
   // ── Data retention ───────────────────────────────────────────────────
   // Periodic sweep deletes old rows so storage stays bounded. The sweep
   // uses a Postgres advisory lock so multiple CP instances do not
