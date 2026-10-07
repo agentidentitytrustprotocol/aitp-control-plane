@@ -344,8 +344,8 @@
     },
     {
       "path": "instrumentation/chunks/src_lib_0hxtwyh._.js",
-      "bytes": 4706,
-      "sha256": "ea90138035a32ba84cb0088e1a0a4158fd320192e86cae6067b74963ea96b23c"
+      "bytes": 4907,
+      "sha256": "4eb3e60f16a157e76b7c09b23681b9211d5a3753055d5375d7ba71b5eb8682ac"
     },
     {
       "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdiv._.js",
@@ -364,8 +364,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
-      "bytes": 236160,
-      "sha256": "b426c79d2744cb40ceb6bf1ab96e28f06ab9c4948061cd4076e8afb37ac1dea5"
+      "bytes": 236362,
+      "sha256": "b8f982536f3e5f50b065033e04d9b9dae8d30676e5e81ffa105055c92dc35f0c"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
