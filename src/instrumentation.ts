@@ -1,4 +1,9 @@
 /**
+ * Next's instrumentation hooks. Two of them, with opposite lifecycles:
+ * `register()` below runs once per boot, and `onRequestError` at the bottom of
+ * this file runs once per unhandled route fault, for as long as the process
+ * lives.
+ *
  * Next.js runs this `register()` function exactly once per server
  * boot (Node.js or Edge runtime), before any route handler executes.
  * Use it to wire up OpenTelemetry so spans from route handlers, pg
@@ -122,4 +127,48 @@ export async function register(): Promise<void> {
   // The OTel SDK flush runs as a shutdown hook so trace spans for the
   // request that triggered the signal still make it to the collector.
   registerShutdownHooks([() => sdk.shutdown()]);
+}
+
+/**
+ * Next calls this once for every unhandled fault out of a route handler, page
+ * render or server action, with the error plus the request and the router
+ * context. It is this service's only observer of the `throw err` tails that
+ * `registry/enroll`, `revocation/entries`, `webhooks`, `events` and
+ * `events/history` deliberately end with (issue #114).
+ *
+ * Everything about WHAT it logs and what it refuses to log lives in
+ * `./lib/request-error`, for the same reason `enforceEnrollmentSecretAtBoot`
+ * lives in `enrollment-config.ts`: `jest.config.js` excludes this file from
+ * coverage, so a decision made here is measured by nothing. This frame is only
+ * the wiring, and `src/instrumentation.test.ts` asserts the delegation because
+ * an `onRequestError` that exports fine and delegates nowhere is indistinguishable
+ * from a working one at the type level.
+ *
+ * NO `NEXT_RUNTIME` GUARD, deliberately, and this is the one place it diverges
+ * from `register()` above. That guard exists because `register()` must not reach
+ * `process.exit` on the Edge runtime. Here the same guard would mean "log nothing
+ * on a runtime where Next does call the hook", which is the defect rather than a
+ * safeguard — and `reportRequestError` swallows internally, so a dynamic import
+ * that cannot be satisfied in some future Edge compilation is already harmless
+ * (Next's own `console.error` still reports the underlying error, so we would be
+ * no worse off than before this hook existed).
+ *
+ * The import is dynamic, matching `register()`'s idiom: it keeps pino out of a
+ * module that Next loads on every runtime, and it is resolved once and cached, so
+ * only the first fault in a process pays for it.
+ */
+export async function onRequestError(
+  ...args: Parameters<
+    typeof import('./lib/request-error').reportRequestError
+  >
+): Promise<void> {
+  try {
+    const { reportRequestError } = await import('./lib/request-error');
+    await reportRequestError(...args);
+  } catch {
+    // Unreachable in practice — `reportRequestError` swallows its own failures,
+    // so only the import itself can fail here. Swallowed anyway: a throw from
+    // this function is caught by Next and reported with the very
+    // `console.error` this hook exists to replace.
+  }
 }
