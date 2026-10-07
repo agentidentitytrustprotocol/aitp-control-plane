@@ -196,7 +196,17 @@ export async function POST(req: NextRequest) {
     //
     // revocation/entries/route.ts was the last one open — it mapped any throw to
     // 500 INSERT_FAILED with the raw database message. That was #98, and it is
-    // fixed, which closes this class repo-wide.
+    // fixed. readyz's catch was a member of the same class (any throw answered
+    // with err.message) and is fixed too (#112), as is metrics' `# DB
+    // unavailable: <msg>` comment, which closes this class repo-wide.
+    //
+    // The probes could not adopt the rethrow half of the idiom: a probe must
+    // ANSWER, and a rethrow renders a framework 500, which is neither the
+    // documented readiness body nor the 503-means-not-ready contract a load
+    // balancer is pointed at. Their fix was to classify the failure (readyz:
+    // `reason: db_unreachable`; metrics: `db_up 0`) and move the diagnostic to
+    // pino, keeping the leak structurally impossible by building every response
+    // byte outside the catch.
     //
     // It is worth recording HOW it differed, because it is the case this block's
     // shape does not cover. That route had no lib-thrown error type to

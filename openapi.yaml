@@ -216,11 +216,13 @@ components:
         either misdescribe the route or force a `code` into it that nothing reads.
 
 
-        **Exactly one of `reason` or `error` is present.** `reason` means the
-        instance is unready on purpose (a drain); `error` means a readiness
-        check threw. Never both, and a `503` never has neither.
+        **A `503` always carries exactly `reason`.** `shutting_down` is a
+        deliberate drain; `db_unreachable` is a failed database probe. There is
+        no second field to branch on. The raw exception message is never put in
+        the body (it is logged server-side), because this route is unauthenticated
+        and unthrottled.
       type: object
-      required: [ready]
+      required: [ready, reason]
       properties:
         ready:
           type: boolean
@@ -232,23 +234,20 @@ components:
           type: string
           example: shutting_down
           description: >-
-            Why the instance took itself out of rotation, when the cause is a
-            deliberate state rather than a fault. Currently only
-            `shutting_down` — a `SIGTERM` has been received and the LB should
-            drain this pod, which stays *running* (`/api/health` deliberately
-            keeps answering `200` through the drain; only readiness flips).
+            Why the instance is not ready, as a classification and never as
+            exception text. Present on every `503`. Currently:
+
+            - `shutting_down` — a `SIGTERM` has been received and the LB should
+              drain this pod, which stays *running* (`/api/health` deliberately
+              keeps answering `200` through the drain; only readiness flips).
+            - `db_unreachable` — the database `SELECT 1` failed. The underlying
+              error is logged, not returned.
 
 
-            Not an `enum`, and this one is expected to grow: any future
-            precondition that can fail *known-ly* rather than by exception adds
-            a value here. Treat an unrecognised `reason` as "not ready, for a
-            reason this client need not understand".
-        error:
-          type: string
-          description: >-
-            The exception message from the readiness check that threw — today
-            the database `SELECT 1`. Human-facing diagnostic text only; it has
-            no stable wording and must not be parsed.
+            Not an `enum`, and this one is expected to grow. Treat an
+            unrecognised `reason` as "not ready, for a reason this client need
+            not understand" — that is what made adding `db_unreachable` a
+            non-breaking extension.
 
     HealthFailure:
       description: >-
@@ -589,9 +588,10 @@ paths:
           description: >-
             Not ready, for one of two reasons: a `SIGTERM` has been received and
             this instance is draining itself out of rotation
-            (`reason: shutting_down`), or the database ping failed (`error`
-            carries the exception message). Exactly one of those two fields is
-            present.
+            (`reason: shutting_down`), or the database ping failed
+            (`reason: db_unreachable`). `reason` is present on every `503`; the
+            database's own error message is logged server-side and never
+            returned.
 
 
             The body is **not** the shared `Error` shape and carries no `code` —
@@ -613,7 +613,14 @@ paths:
       security: []
       responses:
         "200":
-          description: Prometheus text format
+          description: >-
+            Prometheus text format. Also the response when the database is
+            unreachable: the route does not 503. It answers `200` with the
+            process-local series intact, `aitp_control_plane_db_up 0`, and the
+            fixed comment `# DB unavailable: cause logged server-side,
+            deliberately not published here`. The database error message is
+            logged, never included in the body. Alert on `db_up`, not on a
+            non-200.
           content:
             text/plain: { schema: { type: string } }
 
