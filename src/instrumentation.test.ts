@@ -29,6 +29,11 @@ const registerShutdownHooksMock = jest.fn((_hooks?: unknown) => {});
 /** Every observable side effect, in the order it happened. */
 const calls: string[] = [];
 
+jest.mock('./lib/node-env', () => ({
+  warnOnUnrecognisedNodeEnv: () => {
+    calls.push('warnOnUnrecognisedNodeEnv');
+  },
+}));
 jest.mock('./lib/registry/enrollment-config', () => ({
   enforceEnrollmentSecretAtBoot: () => {
     calls.push('enforceEnrollmentSecretAtBoot');
@@ -109,7 +114,11 @@ describe('register', () => {
     // A process that is about to exit should not first install signal handlers,
     // and the operator should read the fatal line first rather than third.
     await register();
-    expect(calls).toEqual(['enforceEnrollmentSecretAtBoot', 'registerShutdownHooks']);
+    expect(calls).toEqual([
+      'warnOnUnrecognisedNodeEnv',
+      'enforceEnrollmentSecretAtBoot',
+      'registerShutdownHooks',
+    ]);
   });
 
   it('still registers shutdown hooks with OTel off, so readiness drains', async () => {
