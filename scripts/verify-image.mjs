@@ -3256,13 +3256,23 @@ async function extractRoutesManifest(tag, platform) {
   // precondition that is assumed rather than asserted is how a floor becomes decoration, so
   // they are carried here (one read, one container) and asserted there.
   //
-  // KNOWN RESIDUAL, named rather than left implicit: these come from `routes-manifest.json`,
-  // whereas the router reads its own copy from `.next/required-server-files.json`, which
-  // nothing here pins. For a legitimate build the two agree (measured: both `basePath: ""`,
-  // no `i18n`). Under the thin-overlay tamper model this harness works in they could be made
-  // to disagree — but only in the harmless direction, since a non-empty `basePath` makes `/api`
-  // HARDER to reach, not easier. Pinning the serialised config is the obvious strengthening and
-  // is deliberately out of scope here.
+  // PROVENANCE, measured against next 16.3.x rather than assumed (issue #109): these come from
+  // `routes-manifest.json`, which is the copy the render worker reads — `route-module.js`
+  // destructures `{ basePath, i18n, rewrites }` from `routesManifest`. The ROUTER does not read
+  // it: the standalone `server.js` inlines the whole resolved config as a literal and exports it
+  // as `__NEXT_PRIVATE_STANDALONE_CONFIG`, `loadConfig` returns that before any manifest read,
+  // and `startServer` is handed it as `config`; `router-utils/filesystem.js` and
+  // `resolve-routes.js` take `basePath`/`i18n` from that object. `server.js` is the first entry
+  // of `bootGraph` (check 13), so the router's values are SHA-256 pinned (legitimate build:
+  // `basePath: ""`, `i18n: null`). Nothing on the standalone serve path reads `basePath`/`i18n`
+  // from `.next/required-server-files.json`; its only live readers take `experimental.*` flags
+  // (`isExperimentalCompile`, `trustHostHeader`) and an edge-runtime config fallback.
+  //
+  // THE RESIDUAL THAT REMAINS is therefore narrower and is not the one earlier worded here:
+  // `routes-manifest.json`'s own `basePath`/`i18n` are read by check 25 and by the render
+  // worker but are not pinned (check 27 pins only its route tables). Check 25 asserts them
+  // empty, so a tampered non-empty value FAILS rather than passes, and the router never consults
+  // it. Pinning the non-table keys is the obvious strengthening and is out of scope here.
   const bad = (error) => ({
     rewrites: null,
     routeTables: null,
@@ -6611,11 +6621,15 @@ async function main() {
   // STILL UNPINNED, named so the next reader inherits a list and not a search:
   //   - `routes-manifest.json`'s NON-TABLE keys — `caseSensitive`, `basePath`, `redirects`,
   //     `headers`, `onMatchHeaders`, `rsc`, `rewriteHeaders`, `pages404`, `appType`, `version`.
-  //     `basePath` and `i18n` are READ by check 25 as preconditions but not pinned, and
+  //     `basePath` and `i18n` are READ by check 25 as preconditions but not pinned here (the router's own
+  //     copies are pinned via `server.js`), and
   //     `caseSensitive` is load-bearing for the "no source-is-gated-too clearance" reasoning in
   //     `classifyRewrite` while being unpinned.
-  //   - `.next/required-server-files.json`, the serialised config the router reads its OWN
-  //     `basePath`/`i18n` from — the residual `extractRoutesManifest` already names.
+  //   - `.next/required-server-files.json`, the serialised config. NOT the source of the
+  //     router's `basePath`/`i18n`: the standalone `server.js` inlines the config and
+  //     `bootGraph` pins it (see `extractRoutesManifest`, #109). Its live readers take
+  //     `experimental.isExperimentalCompile` / `trustHostHeader` and an edge-only fallback;
+  //     unpinned for those, and nothing in check 25's path comparisons depends on it.
   //   - `prerender-manifest.json`, `pages-manifest.json`, `app-path-routes-manifest.json`,
   //     all read by `filesystem.js:222-235`.
   // Pinning the rest of `routes-manifest.json` whole is the obvious next question and is
