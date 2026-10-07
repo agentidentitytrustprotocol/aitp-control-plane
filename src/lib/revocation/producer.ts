@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { getCpAgent } from '../identity/cp-agent';
 import { db } from '../db';
 import { revocationEntries } from '../db/schema';
@@ -15,13 +16,17 @@ class RevocationProducer {
     if (Date.now() < this.cachedUntil && this.cachedEnvelope) {
       return this.cachedEnvelope;
     }
-    let entries: { jti: string; revokedAt: string; reason: string | null }[] =
+    let entries: { jti: string; revokedAt: number; reason: string | null }[] =
       [];
     try {
       entries = await db
         .select({
           jti: revocationEntries.jti,
-          revokedAt: revocationEntries.revokedAt,
+          // Epoch seconds computed by Postgres, NOT parsed from the driver's
+          // timestamp text with `new Date` (which mis-reads years 0001-0099
+          // via V8's two-digit-year rule). floor(...)::double precision
+          // arrives as a JS number; exact for any timestamptz (< 2^53).
+          revokedAt: sql<number>`floor(extract(epoch from ${revocationEntries.revokedAt}))::double precision`,
           reason: revocationEntries.reason,
         })
         .from(revocationEntries);
@@ -35,7 +40,7 @@ class RevocationProducer {
     this.cachedEnvelope = agent.signRevocationList(
       entries.map((e) => ({
         jti: e.jti,
-        revokedAt: Math.floor(new Date(e.revokedAt).getTime() / 1000),
+        revokedAt: Number(e.revokedAt),
         reason: e.reason ?? undefined,
       })),
       config.revocationListTtlSecs,
