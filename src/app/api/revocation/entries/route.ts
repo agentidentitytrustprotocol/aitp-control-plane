@@ -191,10 +191,10 @@ export async function POST(req: NextRequest) {
     // redact: a function that throws has no response body to leak into.
     //
     // The log is the one thing that must not be dropped along with the old body.
-    // Nothing else records this failure — src/instrumentation.ts registers no
-    // `onRequestError`, so without this line a database outage on the revocation
-    // path reaches operators only as Next's default `console.error`, outside pino
-    // and without the request-id correlation docs/api.md promises. Binding `err`
+    // This line is kept even though src/instrumentation.ts now exports
+    // `onRequestError`: the hook logs the fault with the request id, but only
+    // this call knows the `jti`, which is what an operator needs to find the
+    // row. The fault is therefore logged twice, deliberately. Binding `err`
     // here is safe in a way it was not before, because the next statement throws
     // instead of returning. Field set matches the `logger.warn` twenty lines
     // below. Not try-guarded, unlike enroll's `recordFailure`: that guards
