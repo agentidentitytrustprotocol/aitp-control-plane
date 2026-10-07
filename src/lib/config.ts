@@ -1,3 +1,5 @@
+import { isProductionNodeEnv } from './node-env';
+
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
   if (!v) return def;
@@ -88,7 +90,7 @@ function readHeartbeatMs(): number {
 }
 
 export const config = {
-  isProduction: process.env.NODE_ENV === 'production',
+  isProduction: isProductionNodeEnv(),
   port: readNumber('PORT', 4000),
   cpBaseUrl: process.env.CP_BASE_URL ?? 'http://localhost:4000',
   cpAidSeedHex: process.env.CP_AID_SEED_HEX ?? '',
@@ -116,6 +118,28 @@ export const config = {
   // becomes an env var, not a deploy. Clamped — see readHeartbeatMs above.
   sseHeartbeatMs: readHeartbeatMs(),
   revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
+  // What the revocation producer does when the DB read fails. A signed list
+  // asserts "these and ONLY these JTIs are revoked", so the CP never signs a
+  // fresh list from a failed read (that would assert "nothing is revoked").
+  //   fail_closed (default) -- answer 503 REVOCATION_UNAVAILABLE.
+  //   serve_stale           -- re-serve the last list that WAS backed by a
+  //                            successful read, but only while younger than
+  //                            REVOCATION_MAX_STALENESS_SECS; else 503.
+  // Anything unrecognised is fail_closed: a typo must never loosen the policy.
+  revocationFailMode: (
+    (process.env.REVOCATION_FAIL_MODE ?? '').trim().toLowerCase() ===
+    'serve_stale'
+      ? 'serve_stale'
+      : 'fail_closed'
+  ) as 'fail_closed' | 'serve_stale',
+  // Max age of a served-stale snapshot, measured from the successful read that
+  // backed it. Only meaningful in serve_stale mode. The producer additionally
+  // clamps it to REVOCATION_LIST_TTL_SECS so it never serves an envelope whose
+  // signed `expires_at` has already passed.
+  revocationMaxStalenessSecs: Math.max(
+    0,
+    readNumber('REVOCATION_MAX_STALENESS_SECS', 300),
+  ),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
   // Optional allowlist of webhook target hosts. Empty = allow any public
