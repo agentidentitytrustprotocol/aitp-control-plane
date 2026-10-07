@@ -3849,15 +3849,14 @@ function deriveAid(seedHex) {
 // the image's own arch and libc.
 //
 // AND WHY THE LOG ASSERTION (check 17) IS THE LOAD-BEARING ONE.
-// src/lib/revocation/producer.ts catches a failed database read and publishes an
-// EMPTY BUT VALIDLY SIGNED list. Measured against an unmigrated database: the
-// endpoint answered 200, the signature verified, the issuer was right — and the
-// container logged `revocation DB read failed, publishing empty list` because
-// `relation "revocation_entries" does not exist`. So a check asserting only "200 and
-// the signature verifies" PASSES ON AN IMAGE WHOSE DATABASE ACCESS IS ENTIRELY
-// BROKEN. Do not "simplify" check 17 away: it is the only thing standing between
-// this group and that vacuity, and the fallback it watches for is a deliberate
-// feature of the producer, not a bug that might get fixed.
+// src/lib/revocation/producer.ts USED TO catch a failed database read and publish an
+// EMPTY BUT VALIDLY SIGNED list: against an unmigrated database the endpoint answered
+// 200, the signature verified, the issuer was right — and the container logged
+// `revocation DB read failed` because `relation "revocation_entries" does not exist`.
+// It now fails closed by default (503 REVOCATION_UNAVAILABLE), which the 200 check in
+// fetchRevocationEnvelope rejects first. Check 17 stays as the second line of defence:
+// REVOCATION_FAIL_MODE=serve_stale still answers 200 on a failed read (re-serving a
+// bounded-age list) and logs the same text. Do not "simplify" check 17 away.
 const REVOCATION_PATH = '/.well-known/aitp-revocation-list';
 /**
  * The producer's fallback warning, as src/lib/revocation/producer.ts emits it.
@@ -4888,10 +4887,11 @@ async function assertRevocationDbReadHappened(app) {
       `the container logged ${JSON.stringify(REVOCATION_DB_FALLBACK)}, so the list above ` +
         'was signed WITHOUT reading the database.\n' +
         hits.map(([n, l]) => `  line ${n}: ${l.slice(0, 400)}`).join('\n') +
-        '\n\nsrc/lib/revocation/producer.ts catches a failed DB read and publishes an ' +
-        'EMPTY BUT VALIDLY SIGNED list, so every other assertion in this group still ' +
-        'passes — measured. Against this substrate it almost always means the ' +
-        'migrations did not apply and `revocation_entries` does not exist.',
+        '\n\nsrc/lib/revocation/producer.ts logs this when a DB read fails. With ' +
+        'REVOCATION_FAIL_MODE=serve_stale it then re-serves a last-known-good list, so ' +
+        'every other assertion in this group still passes. Against this substrate it ' +
+        'almost always means the migrations did not apply and `revocation_entries` ' +
+        'does not exist.',
     );
   }
   return (

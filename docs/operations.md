@@ -824,16 +824,19 @@ signature anyone can verify under the image's own arch and libc. So:
   `CP_AID_SEED_HEX`. Without this, the signature check only proves the container signed
   with *some* key it holds. Measured: with a wrong seed, both verifications above stay
   green and only this equality fails.
-- **The container did NOT log `revocation DB read failed`.** This is the load-bearing
-  one, and it is the reason the group is not vacuous.
-  `src/lib/revocation/producer.ts` catches a failed database read and publishes an
-  **empty but validly signed** list — a deliberate feature, not a bug that might get
-  fixed. Measured against a database with `revocation_entries` dropped: the endpoint
-  answered 200, the signature verified both ways, the issuer was right, and the tamper
-  negatives still passed. **Only this assertion caught it.** Do not "simplify" it away;
-  the fallback is named here so nobody can remove the check without reading why it
-  exists. (The producer caches for 60s, so the warning appears on the *first* request
-  only: the list is fetched before the scan, and the whole log is scanned, never a tail.)
+- **The container did NOT log `revocation DB read failed`.** This is the
+  second line of defence behind the status check. `src/lib/revocation/producer.ts`
+  used to catch a failed database read and publish an **empty but validly signed**
+  list, so against a database with `revocation_entries` dropped the endpoint
+  answered 200 and every signature, issuer and tamper assertion stayed green; only
+  this log assertion caught it. The producer now **fails closed** by default: a failed
+  read is a `503 REVOCATION_UNAVAILABLE`, which the harness's `200` check rejects
+  before the log is ever read. The log assertion is kept because
+  `REVOCATION_FAIL_MODE=serve_stale` still answers 200 on a failed read (re-serving a
+  bounded-age list), and that path logs the same text. Do not "simplify" it away.
+  (The producer caches for 60s, so the message appears on the *first* failed read
+  only: the list is fetched before the scan, and the whole log is scanned, never a
+  tail.)
 - **A tampered envelope is rejected** by the host-side verifier — a one-bit signature
   flip, a mutated signed body with the signature left as served, and the pre-0.5.0
   *wrapped* canonical form. Without the negative half, a verifier that returned true

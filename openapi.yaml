@@ -640,7 +640,26 @@ paths:
       security: []
       responses:
         "200":
-          description: Signed RevocationListEnvelope JSON
+          description: >-
+            Signed RevocationListEnvelope JSON, always backed by a successful
+            database read (or, only with `REVOCATION_FAIL_MODE=serve_stale`, the
+            last such list re-served byte-for-byte while younger than
+            `REVOCATION_MAX_STALENESS_SECS`).
+        "503":
+          description: >-
+            `code` is `REVOCATION_UNAVAILABLE`: the database read failed and
+            policy forbids serving anything else. The CP **never** answers a
+            failed read with a signed empty list, because that would assert
+            "nothing is revoked". A relying party must treat this as "revocation
+            status unknown", not as "not revoked". Carries `Cache-Control:
+            no-store` and `Retry-After: 30`; the body is fixed and carries no
+            database detail.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/enroll:
     post:

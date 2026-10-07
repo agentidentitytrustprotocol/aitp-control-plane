@@ -84,7 +84,7 @@ Cached responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7). An emp
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest (Ed25519). Rewritten to `/api/well-known/aitp-manifest`. |
-| GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. |
+| GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. `503 REVOCATION_UNAVAILABLE` when the database cannot be read — see [Revocation](#revocation). |
 
 The CP's own manifest has an 86400s TTL and is kept fresh automatically — it rebuilds itself once it nears expiry, no restart required.
 
@@ -275,6 +275,8 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 ```
 
 `jti` must be a UUID; `reason` ≤ 500 chars; `revokedAt` is optional ISO-8601 (defaults to now). Invalid input → `400 JTI_INVALID` / `400 BODY_INVALID`. Recording a revocation also flips the matching `issuedTcts.revoked` flag and cascades to descendant delegations. The signed list at `/.well-known/aitp-revocation-list` refreshes every `REVOCATION_LIST_TTL_SECS` seconds.
+
+**The list fails closed.** If the CP cannot read `revocation_entries`, `GET /.well-known/aitp-revocation-list` answers `503` with `{ "error": "revocation list temporarily unavailable", "code": "REVOCATION_UNAVAILABLE" }`, `Cache-Control: no-store` and `Retry-After: 30`. It never signs an empty list in that case: a signed empty list asserts that nothing is revoked, which the CP cannot honestly say while its store is unreachable. The body is fixed and carries no database detail (this is a classified `503`, not the unclassified `500` described in [Conventions](#conventions)). **Relying parties:** treat `503` as "revocation status unknown". Keep using the last list you verified until its own `expires_at`, then apply your own fail-closed policy; do not treat a failed fetch as an empty list. Operators who prefer availability can set `REVOCATION_FAIL_MODE=serve_stale`: the CP then re-serves the last list that was backed by a successful read, unchanged and still validly signed, for at most `REVOCATION_MAX_STALENESS_SECS` (default 300, clamped to `REVOCATION_LIST_TTL_SECS`), then `503`s. Recording a revocation discards that fallback, so a list known to omit an entry is never re-served.
 
 Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits:
 

@@ -268,9 +268,9 @@ jobs:
   #
   # It then verifies the SIGNING PATH — the revocation list's Ed25519 signature
   # checked two independent ways over the raw served bytes, plus the assertion that
-  # the container did NOT log `revocation DB read failed`, because the producer
-  # publishes an empty-but-validly-signed list on a failed DB read and every other
-  # assertion in that group passes against it — the CORS BUILD-FREEZE (the served
+  # the container did NOT log `revocation DB read failed` (the producer fails
+  # closed by default, but serve_stale mode re-serves a signed list on a failed DB
+  # read and every other assertion in that group passes against it) — the CORS BUILD-FREEZE (the served
   # origin must equal the runtime value and differ from the one the Dockerfile bakes,
   # parsed out of the Dockerfile rather than hardcoded), and the OTEL_ENABLED=true
   # PATH in a second container, where the gate/signing/CORS assertions are all re-run
