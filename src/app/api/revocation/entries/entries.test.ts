@@ -356,8 +356,8 @@ describe('POST /api/revocation/entries — database fault (#98)', () => {
   });
 
   // The response body was the only record of this failure before; the log is
-  // what replaces it. Nothing else captures it — there is no onRequestError hook
-  // — so dropping this line would trade a leak for silence.
+  // what replaces it. The onRequestError hook also logs the fault, but without
+  // the jti, so dropping this line would lose the identifier operators search by.
   it('logs the fault through the structured logger, with the jti', async () => {
     insertError = new Error('connection refused');
     await expect(post({ jti: GOOD_JTI })).rejects.toThrow();

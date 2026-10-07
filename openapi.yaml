@@ -1419,14 +1419,64 @@ paths:
                   type: string
                   description: Ed25519 public key, 43-character base64url
                   pattern: ^[A-Za-z0-9_-]{43}$
-                label: { type: string }
-                expiresAt: { type: string, format: date-time }
+                label:
+                  type: string
+                  maxLength: 128
+                  description: >-
+                    Free-form operator note. `maxLength` counts **characters**, as
+                    the `varchar(128)` column does — 65 astral characters are 130
+                    UTF-16 units but still 65 characters and are accepted. Must not
+                    contain a NUL (U+0000), the one code point the column cannot
+                    store; that is `400 BODY_INVALID`, and is not expressible in
+                    JSON Schema, hence the prose. Other control characters
+                    (newline, tab) are fine.
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Optional. Omitted or `null` means the pin never expires.
+                    Advisory: the control plane never sweeps `pinned_keys`, so
+                    honouring this is the reading agent's job. Must fall between
+                    `0001-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`, or
+                    `400 BODY_INVALID` — outside that window the value is not a
+                    writable `timestamp with time zone`, and Postgres has no year
+                    zero, which is why the floor is year 0001 rather than where the
+                    four-digit-year serialization ends. A past instant **is**
+                    allowed: it is how a pin is retired without deleting the row.
+                    The bound applies to the UTC instant, not to the digits sent,
+                    so `0001-01-01T00:00:00+14:00` is `0000-12-31T10:00Z` and is
+                    rejected. RFC 3339 `date-time` already forbids the
+                    expanded-year forms (`+010000-…`), so a spec-validating client
+                    is constrained before it reaches the server.
       responses:
         "201":
           description: Upserted
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PinnedKey" }
+        "400":
+          description: >-
+            `code` is always `BODY_INVALID`, except `IDEMPOTENCY_KEY_INVALID` when
+            an `Idempotency-Key` header is present but empty, over 255 characters,
+            or contains control characters — that one comes from the idempotency
+            layer and is common to every endpoint accepting the header, not
+            specific to this route. `BODY_INVALID` covers: body not JSON; `aid`
+            missing or empty; `pubkey` not 43-character base64url; `label` over 128
+            characters or containing a NUL (U+0000); `expiresAt` unparseable or
+            outside `0001-01-01T00:00:00.000Z` .. `9999-12-31T23:59:59.999Z`. See
+            the request body for the last two.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            An internal fault — in practice a database one, since the
+            caller-caused failures above are all decided before any SQL runs. The
+            body is whatever the framework renders and is **not** the shared
+            `Error` shape, which is why no schema is declared here: this route has
+            no catch around its insert, so a database error propagates rather than
+            being answered with, and its message (which names tables, columns and
+            types) never reaches the client.
     delete:
       tags: [trust]
       summary: Delete a pinned key

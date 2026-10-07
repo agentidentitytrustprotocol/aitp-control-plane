@@ -346,7 +346,7 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup |
-| POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }` |
+| POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }`. `label` ≤ 128 chars, no NUL; `expiresAt` within `0001-01-01T00:00:00.000Z`…`9999-12-31T23:59:59.999Z` (the writable `timestamptz` window — a past instant is allowed and retires the pin). Violations are `400 BODY_INVALID`. |
 | DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid` → `400 BAD_REQUEST`. |
 
 ## Headers
