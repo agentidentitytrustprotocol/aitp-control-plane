@@ -1,5 +1,5 @@
 {
-  "_comment": "Normalised inventory of the shipped standalone image, derived from a BUILT IMAGE (never from next.config.ts). `tracedExternals` is the set of .next/node_modules leaves with the 16-hex Turbopack suffix stripped — it is NOT serverExternalPackages: pg and pino are traced without being listed, and @grpc/grpc-js is listed without ever being traced. `nativeModules` is every .node under /app with the arch token replaced by <ARCH> and a trailing -<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. `middlewareMatchers` is the request gate's matcher set; it is PINNED rather than recomputed, because every attempt to verify the matcher by testing what it satisfies was defeated by a one-line edit (see check 11). Each matcher records BOTH the compiled `regexp` and its `originalSource`, and the regexp is the load-bearing half: it is what Next matches requests against, while originalSource enforces nothing. Narrowing only the regexp, with the source left byte-identical, was measured to pass every other check while leaving all ten dynamic /api/* routes ungated. `apiRoutes` pins the IDENTITIES of the built /api/* routes and `apiRouteCount` their number; identities are pinned because a count cannot see a SUBSTITUTION — renaming 19 gated routes to decoy names, count unchanged at 30, was measured to pass every check while six admin routes answered 200 anonymously. Those two are CHANGE DETECTION for the route surface (a route appearing, vanishing or being renamed is a review point) and are no longer what establishes the gate is CORRECT — check 13 does that by equality. `rewrites` is the compiled rewrite table read out of .next/routes-manifest.json — the file the standalone server actually ROUTES with, never next.config.ts — flattened to one array of {phase, ...} entries across beforeFiles/afterFiles/fallback, with every key the manifest carried preserved and the ENTRY ORDER pinned rather than sorted, because within a phase the FIRST MATCH WINS and a reordering is a routing change. It is pinned because a rewrite's SOURCE is what the middleware sees: Next matches the incoming request path and never a rewrite destination, so a rewrite whose source the gate's matcher does not cover delivers a request to its destination handler with the gate never having run — no auth, no rate limiting, no CORS, no x-request-id — and adding one moves nothing in middlewareMatchers, apiRoutes or apiRouteCount. Check 24 asserts this table WHOLE, so adding, removing, reordering or editing a rewrite is a reviewable diff here instead of an invisible change. `middlewareManifest` is .next/server/middleware-manifest.json, pinned WHOLE, and the reason is PRECEDENCE rather than informativeness — it is EMPTY in this image and that emptiness is exactly the point. The router reads BOTH middleware manifests and THIS one WINS when populated (router-utils/filesystem.js:278-288), so the functions-config-manifest.json that middlewareMatchers comes from decides the gate's coverage only BECAUSE this file is empty. An image that populated middleware['/'].matchers would move that decision into a file nothing here read, while check 11 went on pinning the now-unused one, and a narrowing surgical enough to keep the live gate probes green would leave checks 8, 11, 12 and 13 green with the rest of the tree ungated. Its `functions` map is a second surface: Object.keys(it) is getEdgeFunctionsPages(), which hands a matching /api route to the EDGE SANDBOX loading the files THIS manifest names — a file no chunk loads is outside bootGraph by construction, so check 13 cannot see it. Check 26 therefore does two things: 26a FAILS, naming the observed value, if `middleware` or `functions` is populated at all (the precondition that makes the fallback branch the one that runs), and 26b asserts the whole manifest equals this pin, so a Next `version` bump or a new key arrives as a review rather than silently. NOT to be confused with functions-config-manifest.json, whose own `functions` key holds all thirty built routes; two different files. `bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, and they cover the gate's whole LOAD PATH rather than just its own chunk: bootGraph is server.js plus every file the middleware and instrumentation loaders pull in, by SHA-256; nextTreeSha is one aggregate digest of /app/node_modules/next; imageConfig pins Env, Entrypoint, Cmd, WorkingDir and User. Env is pinned MINUS NODE_VERSION and YARN_VERSION, which node:24-slim sets and this repo does not — a floating base tag would otherwise move them on every Node patch release and fire the security-worded triage for nothing; see UNPINNED_ENV_KEYS in scripts/verify-image.mjs, and do not helpfully re-add them. Breadth is the point: an equality on the gate chunk alone proves the reviewed gate is on DISK, not that it RUNS, and a hook in server.js, the instrumentation chunk or the next tree was measured to rewrite the gate in memory while its chunk stayed byte-identical. Out of scope, and it must be stated: the node binary, libc and the base OS — a docker-cp check cannot out-trust the runtime that executes the files it read; that is the Dockerfile FROM pin's job, and checks 8-10 and 12 are the behavioural complement. The compiled gate itself is committed VERBATIM in scripts/image-gate-canonical.txt, not in this file, so it can be read and `git log -p`-ed. These replaced a 360-request behavioural probe of the route population that was defeated five times by request shapes it held constant (the verb, the population, the id shape, the id length, the Origin header); an equality has no such dimensions. The cost, accepted: a Next.js or Turbopack upgrade that recompiles the same source fails check 13 with no behaviour change to show for it, and needs `--update-baseline --allow-gate-change`. When that happens the harness says whether the GATE REGION moved or only the framework bytes around it, which is the difference between a security review and housekeeping. Review every line by hand: a new entry means a new external or a new native binary shipped, a missing entry means one stopped shipping, and any change to middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes, apiRouteCount, rewrites or middlewareManifest is a security review — the first changes what the gate covers, the next three change the code it runs and the environment it runs in, the next two mean a route appeared, vanished or was renamed, the next means a request can now reach a handler by a path the gate may never see, and the last means the file that OVERRIDES middlewareMatchers at runtime is no longer the empty one those matchers are load-bearing because of.",
+  "_comment": "Normalised inventory of the shipped standalone image, derived from a BUILT IMAGE (never from next.config.ts). `tracedExternals` is the set of .next/node_modules leaves with the 16-hex Turbopack suffix stripped — it is NOT serverExternalPackages: pg and pino are traced without being listed, and @grpc/grpc-js is listed without ever being traced. `nativeModules` is every .node under /app with the arch token replaced by <ARCH> and a trailing -<semver> dropped, so one baseline serves linux/amd64 and linux/arm64. `middlewareMatchers` is the request gate's matcher set; it is PINNED rather than recomputed, because every attempt to verify the matcher by testing what it satisfies was defeated by a one-line edit (see check 11). Each matcher records BOTH the compiled `regexp` and its `originalSource`, and the regexp is the load-bearing half: it is what Next matches requests against, while originalSource enforces nothing. Narrowing only the regexp, with the source left byte-identical, was measured to pass every other check while leaving all ten dynamic /api/* routes ungated. `apiRoutes` pins the IDENTITIES of the built /api/* routes and `apiRouteCount` their number; identities are pinned because a count cannot see a SUBSTITUTION — renaming 19 gated routes to decoy names, count unchanged at 30, was measured to pass every check while six admin routes answered 200 anonymously. Those two are CHANGE DETECTION for the route surface (a route appearing, vanishing or being renamed is a review point) and are no longer what establishes the gate is CORRECT — check 13 does that by equality. `rewrites` is the compiled rewrite table read out of .next/routes-manifest.json — the file the standalone server actually ROUTES with, never next.config.ts — flattened to one array of {phase, ...} entries across beforeFiles/afterFiles/fallback, with every key the manifest carried preserved and the ENTRY ORDER pinned rather than sorted, because within a phase the FIRST MATCH WINS and a reordering is a routing change. It is pinned because a rewrite's SOURCE is what the middleware sees: Next matches the incoming request path and never a rewrite destination, so a rewrite whose source the gate's matcher does not cover delivers a request to its destination handler with the gate never having run — no auth, no rate limiting, no CORS, no x-request-id — and adding one moves nothing in middlewareMatchers, apiRoutes or apiRouteCount. Check 24 asserts this table WHOLE, so adding, removing, reordering or editing a rewrite is a reviewable diff here instead of an invisible change. `dataRoutes`, `dynamicRoutes` and `staticRoutes` are the OTHER routing tables in that same routes-manifest.json, pinned WHOLE by check 27 with every key each entry carried and the ENTRY ORDER preserved. They are pure CHANGE DETECTION — the same category as apiRoutes, with no policy attached, because none of them has a source/destination split and so there is no bypass question to answer. Pinned despite no measured exploit, for three reasons: nextTreeSha demonstrably does NOT cover this file (a thin overlay patching only routes-manifest.json passed every pre-existing check, measured in #94); the read is already paid for by rewrites, so it costs no container and no consent flag; and the inertness of the measured tamper is a property of Next 16.3.3 rather than of the manifest — filesystem.js rebuilds every dynamicRoutes matcher from `page` and next-server.js does it again under its own \"// TODO: can we just re-use the regex from the manifest?\", while dataRoutes' dataRouteRegex is ALREADY compiled straight from the manifest string. Read `page` first on every entry: it is what the router recomputes each matcher from and the key it resolves the handler with. A new route reds check 27 AND check 11, which pins the same 30 built /api routes out of a DIFFERENT file — check 11 green with 27 red (or the reverse) means the two manifests disagree, which is what a thin-overlay tamper looks like. `middlewareManifest` is .next/server/middleware-manifest.json, pinned WHOLE, and the reason is PRECEDENCE rather than informativeness — it is EMPTY in this image and that emptiness is exactly the point. The router reads BOTH middleware manifests and THIS one WINS when populated (router-utils/filesystem.js:278-288), so the functions-config-manifest.json that middlewareMatchers comes from decides the gate's coverage only BECAUSE this file is empty. An image that populated middleware['/'].matchers would move that decision into a file nothing here read, while check 11 went on pinning the now-unused one, and a narrowing surgical enough to keep the live gate probes green would leave checks 8, 11, 12 and 13 green with the rest of the tree ungated. Its `functions` map is a second surface: Object.keys(it) is getEdgeFunctionsPages(), which hands a matching /api route to the EDGE SANDBOX loading the files THIS manifest names — a file no chunk loads is outside bootGraph by construction, so check 13 cannot see it. Check 26 therefore does two things: 26a FAILS, naming the observed value, if `middleware` or `functions` is populated at all (the precondition that makes the fallback branch the one that runs), and 26b asserts the whole manifest equals this pin, so a Next `version` bump or a new key arrives as a review rather than silently. NOT to be confused with functions-config-manifest.json, whose own `functions` key holds all thirty built routes; two different files. `bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, and they cover the gate's whole LOAD PATH rather than just its own chunk: bootGraph is server.js plus every file the middleware and instrumentation loaders pull in, by SHA-256; nextTreeSha is one aggregate digest of /app/node_modules/next; imageConfig pins Env, Entrypoint, Cmd, WorkingDir and User. Env is pinned MINUS NODE_VERSION and YARN_VERSION, which node:24-slim sets and this repo does not — a floating base tag would otherwise move them on every Node patch release and fire the security-worded triage for nothing; see UNPINNED_ENV_KEYS in scripts/verify-image.mjs, and do not helpfully re-add them. Breadth is the point: an equality on the gate chunk alone proves the reviewed gate is on DISK, not that it RUNS, and a hook in server.js, the instrumentation chunk or the next tree was measured to rewrite the gate in memory while its chunk stayed byte-identical. Out of scope, and it must be stated: the node binary, libc and the base OS — a docker-cp check cannot out-trust the runtime that executes the files it read; that is the Dockerfile FROM pin's job, and checks 8-10 and 12 are the behavioural complement. The compiled gate itself is committed VERBATIM in scripts/image-gate-canonical.txt, not in this file, so it can be read and `git log -p`-ed. These replaced a 360-request behavioural probe of the route population that was defeated five times by request shapes it held constant (the verb, the population, the id shape, the id length, the Origin header); an equality has no such dimensions. The cost, accepted: a Next.js or Turbopack upgrade that recompiles the same source fails check 13 with no behaviour change to show for it, and needs `--update-baseline --allow-gate-change`. When that happens the harness says whether the GATE REGION moved or only the framework bytes around it, which is the difference between a security review and housekeeping. Review every line by hand: a new entry means a new external or a new native binary shipped, a missing entry means one stopped shipping, and any change to middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes, apiRouteCount, rewrites, dataRoutes, dynamicRoutes, staticRoutes or middlewareManifest is a security review. Named rather than counted, because this list has grown three times and a positional \"the next two\" decays into a wrong sentence every time it does: middlewareMatchers changes what the gate covers; bootGraph, nextTreeSha and imageConfig change the code it runs and the environment it runs in; apiRoutes and apiRouteCount mean a route appeared, vanished or was renamed; rewrites means a request can now reach a handler by a path the gate may never see; dataRoutes, dynamicRoutes and staticRoutes mean the shipped route inventory moved, most often alongside apiRoutes and benignly, and NOT alongside it when one of the two manifests was tampered with; and middlewareManifest means the file that OVERRIDES middlewareMatchers at runtime is no longer the empty one those matchers are load-bearing because of.",
   "_regenerate": "node scripts/verify-image.mjs --update-baseline",
   "tracedExternals": [
     "@opentelemetry/auto-instrumentations-node",
@@ -68,6 +68,223 @@
       "source": "/.well-known/aitp-revocation-list"
     }
   ],
+  "dataRoutes": [],
+  "dynamicRoutes": [
+    {
+      "namedRegex": "^/api/registry/agents/(?<nxtPaid>[^/]+?)(?:/)?$",
+      "page": "/api/registry/agents/[aid]",
+      "regex": "^/api/registry/agents/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPaid": "nxtPaid"
+      }
+    },
+    {
+      "namedRegex": "^/api/registry/agents/(?<nxtPaid>[^/]+?)/export(?:/)?$",
+      "page": "/api/registry/agents/[aid]/export",
+      "regex": "^/api/registry/agents/([^/]+?)/export(?:/)?$",
+      "routeKeys": {
+        "nxtPaid": "nxtPaid"
+      }
+    },
+    {
+      "namedRegex": "^/api/registry/agents/(?<nxtPaid>[^/]+?)/manifest(?:/)?$",
+      "page": "/api/registry/agents/[aid]/manifest",
+      "regex": "^/api/registry/agents/([^/]+?)/manifest(?:/)?$",
+      "routeKeys": {
+        "nxtPaid": "nxtPaid"
+      }
+    },
+    {
+      "namedRegex": "^/api/sessions/(?<nxtPsessionId>[^/]+?)(?:/)?$",
+      "page": "/api/sessions/[sessionId]",
+      "regex": "^/api/sessions/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPsessionId": "nxtPsessionId"
+      }
+    },
+    {
+      "namedRegex": "^/api/sessions/(?<nxtPsessionId>[^/]+?)/export(?:/)?$",
+      "page": "/api/sessions/[sessionId]/export",
+      "regex": "^/api/sessions/([^/]+?)/export(?:/)?$",
+      "routeKeys": {
+        "nxtPsessionId": "nxtPsessionId"
+      }
+    },
+    {
+      "namedRegex": "^/api/sessions/(?<nxtPsessionId>[^/]+?)/replay(?:/)?$",
+      "page": "/api/sessions/[sessionId]/replay",
+      "regex": "^/api/sessions/([^/]+?)/replay(?:/)?$",
+      "routeKeys": {
+        "nxtPsessionId": "nxtPsessionId"
+      }
+    },
+    {
+      "namedRegex": "^/api/trust\\-anchors/(?<nxtPid>[^/]+?)(?:/)?$",
+      "page": "/api/trust-anchors/[id]",
+      "regex": "^/api/trust\\-anchors/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      }
+    },
+    {
+      "namedRegex": "^/api/webhooks/(?<nxtPid>[^/]+?)(?:/)?$",
+      "page": "/api/webhooks/[id]",
+      "regex": "^/api/webhooks/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      }
+    },
+    {
+      "namedRegex": "^/api/webhooks/(?<nxtPid>[^/]+?)/circuit\\-breaker(?:/)?$",
+      "page": "/api/webhooks/[id]/circuit-breaker",
+      "regex": "^/api/webhooks/([^/]+?)/circuit\\-breaker(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      }
+    },
+    {
+      "namedRegex": "^/api/webhooks/(?<nxtPid>[^/]+?)/circuit\\-breaker/reset(?:/)?$",
+      "page": "/api/webhooks/[id]/circuit-breaker/reset",
+      "regex": "^/api/webhooks/([^/]+?)/circuit\\-breaker/reset(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      }
+    }
+  ],
+  "staticRoutes": [
+    {
+      "namedRegex": "^/_global\\-error(?:/)?$",
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/_not\\-found(?:/)?$",
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/audit(?:/)?$",
+      "page": "/api/audit",
+      "regex": "^/api/audit(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/dashboard/agents(?:/)?$",
+      "page": "/api/dashboard/agents",
+      "regex": "^/api/dashboard/agents(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/dashboard/overview(?:/)?$",
+      "page": "/api/dashboard/overview",
+      "regex": "^/api/dashboard/overview(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/delegations(?:/)?$",
+      "page": "/api/delegations",
+      "regex": "^/api/delegations(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/events(?:/)?$",
+      "page": "/api/events",
+      "regex": "^/api/events(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/events/history(?:/)?$",
+      "page": "/api/events/history",
+      "regex": "^/api/events/history(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/events/stream(?:/)?$",
+      "page": "/api/events/stream",
+      "regex": "^/api/events/stream(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/health(?:/)?$",
+      "page": "/api/health",
+      "regex": "^/api/health(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/metrics(?:/)?$",
+      "page": "/api/metrics",
+      "regex": "^/api/metrics(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/pinned\\-keys(?:/)?$",
+      "page": "/api/pinned-keys",
+      "regex": "^/api/pinned\\-keys(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/readyz(?:/)?$",
+      "page": "/api/readyz",
+      "regex": "^/api/readyz(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/registry/agents(?:/)?$",
+      "page": "/api/registry/agents",
+      "regex": "^/api/registry/agents(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/registry/enroll(?:/)?$",
+      "page": "/api/registry/enroll",
+      "regex": "^/api/registry/enroll(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/revocation/entries(?:/)?$",
+      "page": "/api/revocation/entries",
+      "regex": "^/api/revocation/entries(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/sessions(?:/)?$",
+      "page": "/api/sessions",
+      "regex": "^/api/sessions(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/tcts(?:/)?$",
+      "page": "/api/tcts",
+      "regex": "^/api/tcts(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/trust\\-anchors(?:/)?$",
+      "page": "/api/trust-anchors",
+      "regex": "^/api/trust\\-anchors(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/webhooks(?:/)?$",
+      "page": "/api/webhooks",
+      "regex": "^/api/webhooks(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/well\\-known/aitp\\-manifest(?:/)?$",
+      "page": "/api/well-known/aitp-manifest",
+      "regex": "^/api/well\\-known/aitp\\-manifest(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/well\\-known/aitp\\-revocation\\-list(?:/)?$",
+      "page": "/api/well-known/aitp-revocation-list",
+      "regex": "^/api/well\\-known/aitp\\-revocation\\-list(?:/)?$",
+      "routeKeys": {}
+    }
+  ],
   "middlewareManifest": {
     "functions": {},
     "middleware": {},
@@ -101,14 +318,19 @@
       "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__1f0_43k._.js",
-      "bytes": 1878,
-      "sha256": "952e623039708496f362b931dd84a40f64884c2eb8e488c50633e53a1ac32d84"
+      "path": "instrumentation/chunks/[root-of-the-server]__02dw6h7._.js",
+      "bytes": 2251,
+      "sha256": "a31626b703e304f9b23b8c7354b896094fbc2148001af89c258ee5acdbaa9f05"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__1up5uol._.js",
-      "bytes": 1495,
-      "sha256": "8b44a4fd0ae0152567cb0a54ef14c0dfc57036b82be0dd5a472b90a47df80b9d"
+      "path": "instrumentation/chunks/[root-of-the-server]__05orm08._.js",
+      "bytes": 2705,
+      "sha256": "ce657d3d5d9e38ffaa24ee039e75a98d47c18a940dfbe3757b0197cb0648f555"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__0krknrx._.js",
+      "bytes": 2588,
+      "sha256": "60422987211635f7ce607a8644c9c4655ef68111f89624ffcdb1bc0c2e9bbf30"
     },
     {
       "path": "instrumentation/chunks/[turbopack]_runtime.js",
@@ -116,14 +338,24 @@
       "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
     },
     {
-      "path": "instrumentation/chunks/src_lib_registry_enrollment-config_ts_0q5mrtz._.js",
-      "bytes": 3828,
-      "sha256": "ebb63d92d4cb7ff18af2737958b29f60134191083a125bcf3ac55ffc5954ae4b"
+      "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7.js",
+      "bytes": 10159,
+      "sha256": "ad62a0d102f86f9013af971fb61c9511e1bc6f28b5f2c8b8573945fa004bc934"
+    },
+    {
+      "path": "instrumentation/chunks/src_lib_0hxtwyh._.js",
+      "bytes": 4706,
+      "sha256": "ea90138035a32ba84cb0088e1a0a4158fd320192e86cae6067b74963ea96b23c"
+    },
+    {
+      "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdiv._.js",
+      "bytes": 950,
+      "sha256": "62ceadffe6b8135c44ad60767a2ec6d122a9a786c0dc6ab3f1710b665b88dc6f"
     },
     {
       "path": "instrumentation/instrumentation.js",
       "bytes": 179,
-      "sha256": "4ce9b0ca94ec7c3f97a880a2163e9b81b0600b6e62ab86240ed7d73b53ca4562"
+      "sha256": "51d158e6054185810f158d19373eef87a508e9191d51543ecd0e2e0001056539"
     },
     {
       "path": "middleware/chunks/[externals]__06hzl-k._.js",
@@ -132,8 +364,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
-      "bytes": 236128,
-      "sha256": "2e1d16d8dfd97283186d7283e81e3d18c5b70ebd56314bb97fdfc58b498bed8a"
+      "bytes": 236160,
+      "sha256": "b426c79d2744cb40ceb6bf1ab96e28f06ab9c4948061cd4076e8afb37ac1dea5"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",

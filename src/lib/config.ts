@@ -1,3 +1,5 @@
+import { isProductionNodeEnv } from './node-env';
+
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
   if (!v) return def;
@@ -88,7 +90,7 @@ function readHeartbeatMs(): number {
 }
 
 export const config = {
-  isProduction: process.env.NODE_ENV === 'production',
+  isProduction: isProductionNodeEnv(),
   port: readNumber('PORT', 4000),
   cpBaseUrl: process.env.CP_BASE_URL ?? 'http://localhost:4000',
   cpAidSeedHex: process.env.CP_AID_SEED_HEX ?? '',

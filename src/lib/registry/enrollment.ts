@@ -2,7 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { assertEnrollmentSecretUsable } from './enrollment-config';
-import { ManifestRejectedError } from './verify-error';
+import { ManifestRejectedError, markSdkVerifyFailure } from './verify-error';
 
 // Same 5-min window as src/app/api/registry/agents/route.ts, so a caller does
 // not enroll a manifest that the immediately-following register call would
@@ -69,7 +69,34 @@ export class EnrollmentService {
    * (clearer error than the same rejection at register-time after a
    * round-trip). */
   verifyAndIssueToken(manifestEnvelopeJson: string): EnrollmentResult {
-    verifyManifestJson(manifestEnvelopeJson);
+    // The try is around this ONE call, and the mark is applied here, because
+    // this is the only frame that can honestly say "the SDK's verifier is what
+    // rejected this manifest". Both halves of issue #102's fix are that narrow:
+    //
+    //  - Provenance is ASSERTED, not sniffed. `sdkVerifyCode` answers only for a
+    //    value marked here, so nothing else that merely happens to carry a
+    //    string `.code` can be published to a caller as a `verifyCode`.
+    //  - The region that can produce a manifest verdict is narrowed to exactly
+    //    this call. Everything below it — the two `ManifestRejectedError`
+    //    guards, and `randomUUID`/`Buffer.from`/`createHmac` in the minting tail
+    //    — is outside that region by construction, not because the route
+    //    remembers to keep its statements in a careful order. That was the
+    //    other fix issue #102 proposed, and doing it here rather than by
+    //    splitting this method gets it without changing a public API.
+    //
+    // The error propagates UNTOUCHED: the mark is an entry in a WeakSet, not a
+    // property, so `enrollment.test.ts`'s forward-compat guard still reads
+    // `.code` off the object the SDK actually threw, and the route still echoes
+    // the SDK's own message. Wrapping would have cost both.
+    //
+    // A future second call site of `verifyManifestJson` must mark too; see
+    // `markSdkVerifyFailure` for what forgetting costs and why it is loud.
+    try {
+      verifyManifestJson(manifestEnvelopeJson);
+    } catch (err) {
+      markSdkVerifyFailure(err);
+      throw err;
+    }
 
     const envelope = JSON.parse(manifestEnvelopeJson) as {
       manifest: { aid: string; expires_at?: number };
