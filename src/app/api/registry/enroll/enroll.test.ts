@@ -11,10 +11,14 @@
 //     mapping everything to 400:
 //       - ManifestRejectedError (we rejected it) -> 400 with its cpCode,
 //         never a verifyCode
-//       - an error carrying a usable SDK code    -> 400 plus that verifyCode;
+//       - an error MARKED as the SDK's and carrying a usable SDK code
+//                                                -> 400 plus that verifyCode;
 //         the code is the contract, the wording is not
 //       - anything else                          -> RETHROWN, so the
-//         framework renders a 500 instead of blaming the caller
+//         framework renders a 500 instead of blaming the caller. "Anything
+//         else" now includes an UNMARKED error carrying a perfect SDK code,
+//         and the Node crypto faults (ERR_CRYPTO_INVALID_DIGEST and friends)
+//         that used to be laundered into a 400 — issue #102.
 //
 //   • which `code` each 400 carries, and the two OPPOSITE allowlist rules that
 //     decide it. `cpCode` is ours, so an unrecognized value falls back to
@@ -39,8 +43,13 @@
 // `toBeUndefined()`, which would also pass on an explicitly-undefined key.
 //
 // @/lib/registry/enrollment is mocked, so the SDK-shaped errors here are
-// hand-built. The proof that a real SDK code reaches a real HTTP body is in
-// src/e2e/flow.integration.test.ts, which mocks nothing.
+// hand-built AND MARKED, via the `sdkError` helper below — production applies
+// that mark in enrollment.ts's catch around verifyManifestJson, and a fixture
+// without it would assert the rethrow path while reading like a 400 test. The
+// proof that a real SDK code reaches a real HTTP body is in
+// src/e2e/flow.integration.test.ts, which mocks nothing; the proof that a real
+// createHmac fault reaches a 500 through the real service is in
+// crypto-fault.test.ts, which mocks only `aitp` and `node:crypto`.
 
 import { jest } from '@jest/globals';
 
@@ -75,8 +84,30 @@ import { POST } from './route';
 // error here — would make every 503 case below pass for the wrong reason, or
 // fail for one.
 import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
-import { ManifestRejectedError } from '@/lib/registry/verify-error';
+import {
+  ManifestRejectedError,
+  markSdkVerifyFailure,
+} from '@/lib/registry/verify-error';
 import { NextRequest } from 'next/server';
+
+/**
+ * An error shaped AND MARKED exactly as the SDK boundary delivers one.
+ *
+ * `@/lib/registry/enrollment` is mocked in this file, so the mark that
+ * production applies in `verifyAndIssueToken`'s catch around
+ * `verifyManifestJson` has to be applied here too. Without it every SDK case
+ * below would quietly assert the *rethrow* path instead of the 400 it was
+ * written for — the tests would still pass, on the wrong branch.
+ *
+ * `markSdkVerifyFailure` is imported from the real module and not stubbed, for
+ * the same reason the note above gives for ManifestRejectedError: the route and
+ * this file must be talking to the same registry.
+ */
+function sdkError(message: string, code: string): Error {
+  const err = Object.assign(new Error(message), { code });
+  markSdkVerifyFailure(err);
+  return err;
+}
 
 function makeReq(body: string): NextRequest {
   return new NextRequest(
@@ -140,9 +171,7 @@ describe('POST /api/registry/enroll', () => {
 
   it('surfaces the SDK verification code as `verifyCode` on a 400', async () => {
     verifyAndIssueTokenMock.mockImplementation(() => {
-      throw Object.assign(new Error('manifest verification failed'), {
-        code: 'signature_invalid',
-      });
+      throw sdkError('manifest verification failed', 'signature_invalid');
     });
     const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
     expect(res.status).toBe(400);
@@ -237,7 +266,7 @@ describe('POST /api/registry/enroll', () => {
     // paths must report one code — to a client both mean "re-issue with a
     // longer TTL" — with `verifyCode` distinguishing which guard fired.
     verifyAndIssueTokenMock.mockImplementation(() => {
-      throw Object.assign(new Error('manifest expired'), { code: 'expired' });
+      throw sdkError('manifest expired', 'expired');
     });
     const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
     expect(res.status).toBe(400);
@@ -256,7 +285,7 @@ describe('POST /api/registry/enroll', () => {
       // verbatim under MANIFEST_INVALID, because the SDK owns that vocabulary.
       // Without this, widening the mapping to every SDK code would pass.
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('nope'), { code: sdkCode });
+        throw sdkError('nope', sdkCode);
       });
       const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
       expect(res.status).toBe(400);
@@ -282,6 +311,48 @@ describe('POST /api/registry/enroll', () => {
     );
   });
 
+  it('propagates an UNMARKED error that carries a perfect SDK code', async () => {
+    // Issue #102 at the route level. Byte-identical in shape to the
+    // `signature_invalid` case above, which returns 400 — the ONLY difference is
+    // that nothing attested this came out of the SDK's verifier. Provenance, not
+    // shape, decides, so this is a 500.
+    //
+    // Deliberately uses a real SDK code rather than an `ERR_`-prefixed one: a
+    // gate that keyed off the code's spelling (a prefix check, an allowlist)
+    // would pass the crypto-fault test in crypto-fault.test.ts and fail here,
+    // which is what makes this case worth its own test.
+    verifyAndIssueTokenMock.mockImplementation(() => {
+      throw Object.assign(new Error('unmarked'), { code: 'signature_invalid' });
+    });
+    await expect(POST(makeReq(JSON.stringify({ manifest: {} })))).rejects.toThrow(
+      'unmarked',
+    );
+    // And it is not counted as a verification failure, because it is not one.
+    expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ERR_CRYPTO_INVALID_DIGEST', 'Digest method not supported'],
+    ['ERR_OSSL_EVP_UNSUPPORTED', 'error:0308010C:digital envelope routines::unsupported'],
+    ['ERR_OUT_OF_RANGE', 'The value of "size" is out of range'],
+  ])(
+    'propagates a Node %s fault rather than echoing it as a bad manifest',
+    async (code, message) => {
+      // The shapes `randomUUID`, `createHmac` and `Buffer.from` actually throw
+      // from inside `verifyAndIssueToken`'s minting tail — i.e. after the SDK has
+      // already ACCEPTED the manifest. Each used to be answered
+      // `400 MANIFEST_INVALID` with this code published as the SDK's verdict and
+      // this message echoed to an unauthenticated caller.
+      verifyAndIssueTokenMock.mockImplementation(() => {
+        throw Object.assign(new Error(message), { code });
+      });
+      const call = POST(makeReq(JSON.stringify({ manifest: {} })));
+      await expect(call).rejects.toThrow(message);
+      expect(recordEnrollFailureMock).not.toHaveBeenCalled();
+    },
+  );
+
   it('propagates a thrown non-Error too', async () => {
     verifyAndIssueTokenMock.mockImplementation(() => {
       throw 'oops';
@@ -302,7 +373,12 @@ describe('POST /api/registry/enroll', () => {
     // code is the contract, so the response is still usable; asserted so the
     // shape is a known state rather than a surprise discovered in production.
     verifyAndIssueTokenMock.mockImplementation(() => {
-      throw { code: 'signature_invalid', message: 'not a real Error' };
+      const notAnError = { code: 'signature_invalid', message: 'not a real Error' };
+      // Marked like any other SDK throw: the boundary marks whatever came out of
+      // the verifier, and a plain object is markable (the registry keys on object
+      // identity, not on being an Error).
+      markSdkVerifyFailure(notAnError);
+      throw notAnError;
     });
     const res = await POST(makeReq(JSON.stringify({ manifest: {} })));
     expect(res.status).toBe(400);
@@ -322,7 +398,7 @@ describe('POST /api/registry/enroll', () => {
     // with today's SDK (it sets fixed short literals); asserted so the
     // behavior is a recorded decision rather than a surprise.
     verifyAndIssueTokenMock.mockImplementation(() => {
-      throw Object.assign(new Error('nope'), { code: 'a'.repeat(65) });
+      throw sdkError('nope', 'a'.repeat(65));
     });
     await expect(POST(makeReq(JSON.stringify({ manifest: {} })))).rejects.toThrow(
       'nope',
@@ -389,7 +465,7 @@ describe('POST /api/registry/enroll', () => {
 
     it('counts and logs an SDK verification failure exactly once, by code', async () => {
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+        throw sdkError('bad sig', 'signature_invalid');
       });
       await POST(badManifestReq());
 
@@ -409,7 +485,7 @@ describe('POST /api/registry/enroll', () => {
       // vocabulary, and `expired` vs `none` is what distinguishes the two
       // expiry paths on a dashboard.
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('manifest expired'), { code: 'expired' });
+        throw sdkError('manifest expired', 'expired');
       });
       await POST(badManifestReq());
 
@@ -438,7 +514,7 @@ describe('POST /api/registry/enroll', () => {
       // route; logging it at warn level is a log-volume amplification vector.
       const aid = 'aid:pubkey:z:secret-looking-value';
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('nope'), { code: 'aid_mismatch' });
+        throw sdkError('nope', 'aid_mismatch');
       });
       await POST(makeReq(JSON.stringify({ manifest: { aid } })));
 
@@ -494,7 +570,7 @@ describe('POST /api/registry/enroll', () => {
       // without this binding the warn could not be tied to a request at all —
       // which would make "log only the code" useless rather than minimal.
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+        throw sdkError('bad sig', 'signature_invalid');
       });
       const req = new NextRequest(
         new Request('http://localhost:4000/api/registry/enroll', {
@@ -540,7 +616,7 @@ describe('POST /api/registry/enroll', () => {
         throw new Error('logger exploded');
       });
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+        throw sdkError('bad sig', 'signature_invalid');
       });
       const res = await POST(badManifestReq());
       expect(res.status).toBe(400);
@@ -552,7 +628,7 @@ describe('POST /api/registry/enroll', () => {
         throw new Error('counter exploded');
       });
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+        throw sdkError('bad sig', 'signature_invalid');
       });
       await POST(badManifestReq());
       expect(warnMock).toHaveBeenCalledTimes(1);
@@ -565,7 +641,7 @@ describe('POST /api/registry/enroll', () => {
         throw new Error('counter exploded');
       });
       verifyAndIssueTokenMock.mockImplementation(() => {
-        throw Object.assign(new Error('bad sig'), { code: 'signature_invalid' });
+        throw sdkError('bad sig', 'signature_invalid');
       });
       const res = await POST(badManifestReq());
       expect(res.status).toBe(400);

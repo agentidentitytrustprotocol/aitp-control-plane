@@ -29,13 +29,13 @@ spec rather than restate it.
   big). Such a field is always optional and additive — absent means "not
   applicable here", never "unknown".
 
-  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`.
+  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / draining). DELETEs on trust-anchors and pinned-keys return `204 No Content`; the other two — `DELETE /api/registry/agents/:aid` and `DELETE /api/webhooks/:id` — answer `200` with a one-line confirmation body (`{"aid": ..., "status": "deregistered"}` and `{"id": ..., "deleted": true}`). Do not assume one shape for "a DELETE on this API": until #107 `openapi.yaml` claimed all four were `204`, and that went unnoticed because this sentence named the `204` pair without naming the other two.
 
   A `500` **never** carries the shape above. Every internal fault reaches you as a framework response whose body is whatever the framework renders — not JSON, and not the `{error, code}` contract — so do not parse it and do not branch on it. The status is the whole signal: retry, and if it persists, the server's operator has the detail in their logs. Routes reach this state deliberately, by rethrowing anything they cannot classify (`POST /api/registry/enroll`, `POST /api/revocation/entries`), which is what keeps internal detail — database messages especially — out of client-facing bodies by construction.
 
   `POST /api/revocation/entries` was the one exception, returning `{ "error": ..., "code": "INSERT_FAILED" }` with a raw database message in `error`. That code is **gone**; a client that special-cased it can delete that branch. The input mistakes that used to surface that way are now `400 BODY_INVALID` instead (see [Revocation](#revocation)).
 
-  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
+  This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer rather than an unhandled fault, and the gated-route and enrollment ones do carry `{error, code}` (`SERVER_MISCONFIGURED`, `SSE_CAPACITY`). The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ready, reason}`, `{ok, service, aid, db}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
 
 ## Authentication
 
@@ -75,8 +75,8 @@ Cached responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7). An emp
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | public | Liveness + DB ping. Stays `200` during a SIGTERM drain. |
-| GET | `/api/readyz` | public | Readiness (DB reachable, identity initialized). `503` once draining. |
+| GET | `/api/health` | public | Liveness + DB ping. `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. |
+| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity, which is `/api/health`'s business. |
 | GET | `/api/metrics` | public | Prometheus text format |
 
 ### Discovery
@@ -84,7 +84,7 @@ Cached responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7). An emp
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest (Ed25519). Rewritten to `/api/well-known/aitp-manifest`. |
-| GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. |
+| GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. `503 REVOCATION_UNAVAILABLE` when the database cannot be read — see [Revocation](#revocation). |
 
 The CP's own manifest has an 86400s TTL and is kept fresh automatically — it rebuilds itself once it nears expiry, no restart required.
 
@@ -98,7 +98,7 @@ The CP's own manifest has an 86400s TTL and is kept fresh automatically — it r
 | GET | `/api/registry/agents/:aid` | public | Fetch one agent |
 | GET | `/api/registry/agents/:aid/manifest` | public | Fetch the cached signed manifest (raw JSON) |
 | GET | `/api/registry/agents/:aid/export` | API key | Bundle agent + sessions + TCTs + recent events |
-| DELETE | `/api/registry/agents/:aid` | API key | Deregister |
+| DELETE | `/api/registry/agents/:aid` | API key | Deregister. `200` with `{aid, status: "deregistered"}` — a status flip, not a row deletion. |
 
 #### `POST /api/registry/enroll`
 
@@ -276,6 +276,8 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 
 `jti` must be a UUID; `reason` ≤ 500 chars; `revokedAt` is optional ISO-8601 (defaults to now). Invalid input → `400 JTI_INVALID` / `400 BODY_INVALID`. Recording a revocation also flips the matching `issuedTcts.revoked` flag and cascades to descendant delegations. The signed list at `/.well-known/aitp-revocation-list` refreshes every `REVOCATION_LIST_TTL_SECS` seconds.
 
+**The list fails closed.** If the CP cannot read `revocation_entries`, `GET /.well-known/aitp-revocation-list` answers `503` with `{ "error": "revocation list temporarily unavailable", "code": "REVOCATION_UNAVAILABLE" }`, `Cache-Control: no-store` and `Retry-After: 30`. It never signs an empty list in that case: a signed empty list asserts that nothing is revoked, which the CP cannot honestly say while its store is unreachable. The body is fixed and carries no database detail (this is a classified `503`, not the unclassified `500` described in [Conventions](#conventions)). **Relying parties:** treat `503` as "revocation status unknown". Keep using the last list you verified until its own `expires_at`, then apply your own fail-closed policy; do not treat a failed fetch as an empty list. Operators who prefer availability can set `REVOCATION_FAIL_MODE=serve_stale`: the CP then re-serves the last list that was backed by a successful read, unchanged and still validly signed, for at most `REVOCATION_MAX_STALENESS_SECS` (default 300, clamped to `REVOCATION_LIST_TTL_SECS`), then `503`s. Recording a revocation discards that fallback, so a list known to omit an entry is never re-served.
+
 Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits:
 
 - **`revokedAt` must fall between `1970-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`.** The two ends have different reasons. Above the upper bound the value is not a `timestamp with time zone` this server can write at all. Below the epoch the value *can* be stored but cannot be republished faithfully — the signed list at `/.well-known/aitp-revocation-list` carries `revoked_at` as seconds since the epoch, which a revocation predating that epoch cannot express. The bound applies to the **UTC instant**, not the digits you sent: `1970-01-01T00:00:00+01:00` is `1969-12-31T23:00Z` and is rejected.
@@ -294,7 +296,7 @@ Consumers of the signed list should verify it with the `aitp` SDK's `verifyRevoc
 | GET | `/api/webhooks` | API key | List subscriptions |
 | POST | `/api/webhooks` | API key | Create |
 | PATCH | `/api/webhooks/:id` | API key | Update |
-| DELETE | `/api/webhooks/:id` | API key | Remove |
+| DELETE | `/api/webhooks/:id` | API key | Remove (`200` with `{id, deleted: true}`, not `204`) |
 | GET | `/api/webhooks/:id/circuit-breaker` | API key | Current breaker state snapshot |
 | POST | `/api/webhooks/:id/circuit-breaker/reset` | API key | Manually re-arm a breaker stuck open |
 
@@ -346,7 +348,7 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup |
-| POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }` |
+| POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }`. `label` ≤ 128 chars, no NUL; `expiresAt` within `0001-01-01T00:00:00.000Z`…`9999-12-31T23:59:59.999Z` (the writable `timestamptz` window — a past instant is allowed and retires the pin). Violations are `400 BODY_INVALID`. |
 | DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid` → `400 BAD_REQUEST`. |
 
 ## Headers

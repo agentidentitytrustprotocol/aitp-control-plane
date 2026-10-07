@@ -196,7 +196,17 @@ export async function POST(req: NextRequest) {
     //
     // revocation/entries/route.ts was the last one open — it mapped any throw to
     // 500 INSERT_FAILED with the raw database message. That was #98, and it is
-    // fixed, which closes this class repo-wide.
+    // fixed. readyz's catch was a member of the same class (any throw answered
+    // with err.message) and is fixed too (#112), as is metrics' `# DB
+    // unavailable: <msg>` comment, which closes this class repo-wide.
+    //
+    // The probes could not adopt the rethrow half of the idiom: a probe must
+    // ANSWER, and a rethrow renders a framework 500, which is neither the
+    // documented readiness body nor the 503-means-not-ready contract a load
+    // balancer is pointed at. Their fix was to classify the failure (readyz:
+    // `reason: db_unreachable`; metrics: `db_up 0`) and move the diagnostic to
+    // pino, keeping the leak structurally impossible by building every response
+    // byte outside the catch.
     //
     // It is worth recording HOW it differed, because it is the case this block's
     // shape does not cover. That route had no lib-thrown error type to
@@ -225,6 +235,21 @@ export async function POST(req: NextRequest) {
     // After the ManifestRejectedError branch above, that is also exactly the
     // test for "is this the caller's fault at all" — so its absence here means
     // the failure was neither a rejection we made nor one the SDK made.
+    //
+    // That "⇔" is now ENFORCED rather than inferred, which is issue #102. It
+    // used to be a duck-type: any thrown value carrying a plausible string
+    // `.code` was read as an SDK verdict. Node's own errors satisfy that shape,
+    // and `verifyAndIssueToken` calls `randomUUID`, `Buffer.from` and
+    // `createHmac` to mint the token — *after* the SDK has already accepted the
+    // manifest — so a server-side crypto fault was answered
+    // `400 MANIFEST_INVALID {verifyCode: "ERR_CRYPTO_INVALID_DIGEST"}`: the
+    // caller blamed for our fault, an internal message echoed to an
+    // unauthenticated caller, and a code published as the SDK's that the SDK
+    // never produced. `sdkVerifyCode` now answers only for a value
+    // `enrollment.ts` marked at the `verifyManifestJson` call site, so every one
+    // of those sites falls through to the rethrow below and renders a 500.
+    // docs/api.md's "`verifyCode` is present if and only if the SDK was what
+    // rejected the manifest" was false before this and is true after it.
     const verifyCode = sdkVerifyCode(err);
     if (verifyCode === undefined) {
       // Not a manifest problem at all — a bug, a broken dependency, an

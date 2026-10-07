@@ -96,7 +96,7 @@
  *     `Set.prototype.has` shim in it served four un-probed routes anonymously with all 13
  *     checks the harness then had passing. (Every "13/13" and "n of 13" in this file is a
  *     record of a defeat measured against the harness AS IT STOOD AT THE TIME, not against
- *     today's 26 checks. They are kept verbatim because the count is part of the evidence.)
+ *     today's 27 checks. They are kept verbatim because the count is part of the evidence.)
  *     Complete over the COMPILED CHUNK GRAPH the gate's loaders reach, including
  *     bytes outside the gate function (deny(), applyCors(), the config parser). It is NOT
  *     complete over everything that executes — see WHAT IS OUT OF SCOPE.
@@ -260,6 +260,31 @@
  * like check 13's and 24's inputs. Filed out of #94 as aitp-control-plane#104 rather than
  * folded into it, because a narrowed matcher is check 11's surface and not a routing-table
  * question.
+ *
+ *   THE OTHER ROUTING TABLES (check 27). `routes-manifest.json`'s `dataRoutes`,
+ * `dynamicRoutes` and `staticRoutes`, pinned WHOLE out of the read check 24 already pays for.
+ * THE ONLY PINNED SURFACE HERE WITH NO MEASURED EXPLOIT BEHIND IT, and saying so is the point:
+ * #105 built two thin-overlay images patching only these tables — one on `dataRoutes`, one
+ * prepending `{page:'/api/audit', regex:'^/z/audit(?:/)?$'}` to the other two — and both passed
+ * all 25 checks the harness then had, with `GET /z/audit` answering 404 and `GET /api/audit`
+ * answering 401. It is pinned for three reasons that do not need an exploit. First,
+ * `nextTreeSha` DEMONSTRABLY does not cover this file — #94 measured the same overlay trick
+ * against `rewrites` passing every pre-existing check — so "the tree digest covers it" is
+ * unavailable for any table in it. Second, it is nearly free: the same `docker cp`, no new
+ * container, no new consent flag. Third, and this is the real argument, THE INERTNESS IS A
+ * PROPERTY OF NEXT 16.3.3 AND NOT OF THE MANIFEST. `filesystem.js:275` rebuilds each
+ * `dynamicRoutes` matcher as `getRouteMatcher(getRouteRegex(route.page))` and
+ * `next-server.js:471-481` does it a second time under Next's own
+ * `// TODO: can we just re-use the regex from the manifest?` — so the serialised regex is dead
+ * only while Next chooses to recompute it, in a place its authors have flagged to change, and
+ * the day it does not the same tamper is a routing bypass with a silent failure. One table
+ * needs no future version at all: `dataRoutes`' `dataRouteRegex` is compiled STRAIGHT FROM THE
+ * MANIFEST STRING today (`filesystem.js:260`), harmless here only because an app-router build
+ * emits that table empty. Pure CHANGE DETECTION, with deliberately no policy: none of these
+ * has a source/destination split, so there is no bypass question for a floor to answer — the
+ * same category as `apiRoutes`. Its own id rather than more of check 24, because a routine
+ * route addition must not red a check whose text is about gate bypasses; see UNPINNED_ENV_KEYS
+ * for the failure mode that reasoning comes from. aitp-control-plane#105.
  *
  * TWO HARNESSES, ON PURPOSE. DO NOT MERGE THEM.
  *   - `verify-request-gate.mjs` owns the `next start` path — a real developer
@@ -2614,7 +2639,7 @@ const ROUTES_MANIFEST_PATH = '/app/.next/routes-manifest.json';
  * which holds all thirty built routes. Two different files, two different `functions`.)
  *
  * Read cold — `docker create` + `docker cp`, container never started — for the reason
- * `extractRewrites` gives: the artifact must not get to report on the manifests that decide
+ * `extractRoutesManifest` gives: the artifact must not get to report on the manifests that decide
  * its own routing.
  */
 const MIDDLEWARE_MANIFEST_PATH = '/app/.next/server/middleware-manifest.json';
@@ -2633,9 +2658,81 @@ const MIDDLEWARE_MANIFEST_PATH = '/app/.next/server/middleware-manifest.json';
  * one would wrongly suggest `beforeFiles` destinations are gated.)
  *
  * A FOURTH phase key appearing is an unmodelled routing stage and fails closed — see
- * `extractRewrites`.
+ * `extractRoutesManifest`.
  */
 const REWRITE_PHASES = ['beforeFiles', 'afterFiles', 'fallback'];
+
+/**
+ * The OTHER routing tables in `routes-manifest.json` — check 27's subject.
+ *
+ * PINNED BECAUSE `nextTreeSha` DEMONSTRABLY DOES NOT COVER THIS FILE, not because a tamper in
+ * them is exploitable today. #94 measured the thin-overlay attack that patches ONLY
+ * `routes-manifest.json` passing every pre-existing check, so "the framework tree digest covers
+ * it" is not an argument available for ANY table in this file. #105 then measured two more
+ * overlays — one patching `dataRoutes`, one prepending
+ * `{page:'/api/audit', regex:'^/z/audit(?:/)?$', namedRegex:…}` to `dynamicRoutes` AND
+ * `staticRoutes` — and both passed all 25 checks the harness then had. On the running image
+ * `GET /z/audit` answered 404 and `GET /api/audit` answered 401, so neither was a bypass.
+ *
+ * WHAT EACH TABLE ACTUALLY DECIDES, read out of Next 16.3.3's source rather than inferred from
+ * the absence of a 200, because "no 200" is a property of one version and the reason matters
+ * more than the observation:
+ *
+ *   `staticRoutes` — READ BY NOTHING. `grep -rn staticRoutes` over `next/dist`, excluding
+ * `.map` files, hits only `build/generate-routes-manifest.js`, which BUILDS it. There is no
+ * consumer under `next/dist/server/` at all. Pure change detection, and the weakest of the
+ * three on its own merits — pinned because it is the same read and because a table nothing
+ * consumes today is a table a future release may start consuming.
+ *
+ *   `dynamicRoutes` — its serialised `regex`/`namedRegex` are DEAD FOR ROUTING, and that is
+ * the finding that makes the measured tamper inert. `filesystem.js:267-277` builds each
+ * entry's matcher as `getRouteMatcher(getRouteRegex(route.page))` — RECOMPUTED FROM `page` —
+ * and `resolve-routes.js:190-213` then calls only `route.match(...)` and reads `route.page`.
+ * `next-server.js:471-481` recomputes it a SECOND time, independently, for the render server.
+ * BUT: that second site carries Next's own comment, verbatim,
+ * `// TODO: can we just re-use the regex from the manifest?` — which is the whole argument for
+ * pinning this table. The serialised regex is dead because Next chooses to recompute it, in a
+ * place its own authors have flagged as a thing to change. The day that TODO is taken, this
+ * same tamper is a routing bypass and the failure is silent. Two fields here ARE live:
+ * `page` (the matcher's input AND the `fsChecker.getItem(page)` lookup key, which is exactly
+ * why the tamper cannot reach an ungated handler — a `page` outside `/api` escapes the gate's
+ * matcher but then resolves to no handler), and `skipInternalRouting`, which
+ * `filesystem.js:268-271` reads to `continue` past the entry — dropping a real route from the
+ * internal router entirely. That is a denial, not a bypass, and it is currently invisible.
+ *
+ *   `dataRoutes` — ITS SERIALISED REGEX IS LIVE, and this corrects #105's own premise.
+ * `filesystem.js:247-265` builds the matcher as
+ * `getRouteMatcher({re: new RegExp(route.dataRouteRegex), groups: …})`. The `re` comes STRAIGHT
+ * FROM THE MANIFEST STRING; only `groups`/`routeKeys`/`namedRegex` are recomputed from `page`.
+ * So Next does not merely serialise this regex for a future version to trust — it trusts it
+ * today. The table is `[]` in this image, which is why #105's `dataRoutes` overlay was inert,
+ * and that emptiness is a property of THIS APP, not of the manifest:
+ * `generate-routes-manifest.js` emits `dataRoutes: []` and `build/index.js:1647-1656`
+ * repopulates it only from `serverPropsPages ∪ ssgPages` — pages-router
+ * `getServerSideProps`/`getStaticProps` pages, of which an app-router-only repo has none. Add
+ * one and this becomes the one table in the file whose pinned regex is load-bearing.
+ *
+ * ENTRY ORDER IS PINNED FOR ALL THREE, and the reason differs between them, so it is written
+ * out rather than left to be inferred — this file warns that it has precedent BOTH ways
+ * (`middlewareMatchers`, `apiRoutes` and `imageConfig.Env` are sorted; `rewrites` is not) and
+ * that neither should be "fixed" to match the other.
+ *   - For `dataRoutes` and `dynamicRoutes` order IS MEANING. `filesystem.js` pushes
+ *     `dataRoutes`' dynamic entries into ONE array first and `dynamicRoutes`' entries after
+ *     them, and `resolve-routes.js:190` returns on the FIRST entry whose `match` yields params
+ *     and whose page resolves. First match wins across both tables, so a swap changes which
+ *     handler an ambiguous path reaches — the same argument `normaliseRewrite` makes.
+ *   - For `staticRoutes` order is NOT meaning, since nothing reads the table. It is preserved
+ *     anyway because `generate-routes-manifest.js:20-37` emits all of these through
+ *     `sortPages(...)` — Next's own route-specificity sort — so the order is DETERMINISTIC and
+ *     preserving it cannot produce a flaky red, while sorting it would hide a reorder that has
+ *     no legitimate cause. Three sibling tables in one pin disagreeing about their own format,
+ *     for a difference invisible from the baseline, is the worse trade.
+ *
+ * Nothing here is arch-normalised, the same property `normaliseRewrite` documents: every field
+ * is compiled from a route PATH at build time, with no arch token and no content hash, so one
+ * pin serves linux/amd64 and linux/arm64.
+ */
+const ROUTE_TABLES = ['dataRoutes', 'dynamicRoutes', 'staticRoutes'];
 
 /**
  * How a value that is not the shape this harness models reads in a failure message.
@@ -2738,18 +2835,44 @@ function canonicaliseJsonValue(v) {
   );
 }
 
-function rewriteLine(e) {
+/**
+ * One pinned manifest entry as one canonical line, with `leadKey` hoisted to the front.
+ *
+ * The body is `rewriteLine`'s, generalised when check 27 needed the same treatment for the
+ * three routing tables. `leadKey` is DISPLAY ONLY — it decides which field a human reads
+ * first on a 200-character line (`phase` for a rewrite, `page` for a route) and changes
+ * nothing about what is compared, since every remaining key is sorted and every value is
+ * recursively canonicalised either way. Two callers, one implementation, so the recursive
+ * sort that makes the comparison semantic rather than textual cannot drift between them.
+ */
+function canonicalEntryLine(e, leadKey) {
   const keys = Object.keys(e).sort();
   return JSON.stringify(
     Object.fromEntries([
-      ...(Object.prototype.hasOwnProperty.call(e, 'phase')
-        ? [['phase', canonicaliseJsonValue(e.phase)]]
+      ...(Object.prototype.hasOwnProperty.call(e, leadKey)
+        ? [[leadKey, canonicaliseJsonValue(e[leadKey])]]
         : []),
       ...keys
-        .filter((k) => k !== 'phase')
+        .filter((k) => k !== leadKey)
         .map((k) => [k, canonicaliseJsonValue(e[k])]),
     ]),
   );
+}
+
+function rewriteLine(e) {
+  return canonicalEntryLine(e, 'phase');
+}
+
+/**
+ * One routing-table entry as one canonical line — check 27's comparison unit.
+ *
+ * `page` leads because it is the entry's IDENTITY and the field that is actually live: it is
+ * the matcher's input (`getRouteRegex(route.page)`) and the `fsChecker.getItem(page)` lookup
+ * key. Every other key follows, sorted, none dropped — see ROUTE_TABLES for why a key that
+ * looks inert (`regex`, `namedRegex`) is pinned anyway.
+ */
+function routeLine(e) {
+  return canonicalEntryLine(e, 'page');
 }
 
 /**
@@ -3079,7 +3202,17 @@ function classifyRewrite(entry, matchers) {
 }
 
 /**
- * The compiled rewrite table, read out of the image with NO code from the image run.
+ * `routes-manifest.json`, read out of the image with NO code from the image run: the compiled
+ * rewrite table (checks 24 and 25) and the three other routing tables (check 27).
+ *
+ * NAMED FOR THE FILE IT READS, not for one of the four things it reads out of it. It was
+ * `extractRewrites` while `rewrites` plus check 25's two preconditions were all it returned;
+ * check 27 added the routing tables and the old name would then have been the second
+ * rewrite-specific name in this area to outlive its subject — the first being
+ * `canonicaliseRewriteValue`, renamed for exactly this reason when check 26 became its second
+ * caller. ONE read, ONE `docker create`/`cp`/`rm` cycle, no new consent flag: that is the
+ * argument aitp-control-plane#105 makes for pinning the other tables at all, and it only holds
+ * if they come out of this container rather than a fourth one.
  *
  * WHY A REWRITE IS A GATE QUESTION AT ALL. `src/proxy.ts:257-259` attaches the gate with
  * `matcher: ['/api/:path*']`, and Next middleware matches the INCOMING REQUEST PATH,
@@ -3108,13 +3241,16 @@ function classifyRewrite(entry, matchers) {
  * `routes-manifest.json` this harness cannot parse should not abort a run that could
  * still report every other finding.
  *
- * IT NEVER THROWS. It returns `{entries, error}` and RECORDS its failures, mirroring
- * `gate.regionError`, so an unreadable or unmodelled table lands as check 24's named
- * finding — "a table this harness could not read is not a table it may bless" — and so
- * that `--update-baseline` can refuse to write rather than committing an unreadable
- * state.
+ * IT NEVER THROWS. It returns `{rewrites, routeTables, basePath, i18n, error}` and RECORDS its
+ * failures, mirroring `gate.regionError`, so an unreadable or unmodelled table lands as check
+ * 24's or check 27's named finding — "a table this harness could not read is not a table it may
+ * bless" — and so that `--update-baseline` can refuse to write rather than committing an
+ * unreadable state. ONE `error` for all four surfaces, deliberately: they come from one parse of
+ * one file, so an unreadable manifest is one finding with one remedy, not four. That is the
+ * opposite of the split between this function and `extractMiddlewareManifest`, which read
+ * DIFFERENT files and therefore keep different errors.
  */
-async function extractRewrites(tag, platform) {
+async function extractRoutesManifest(tag, platform) {
   // `basePath` and `i18n` come out alongside the entries because check 25's path comparisons
   // SILENTLY ASSUME both. Check 24 does not care about either — it is pure equality — but a
   // precondition that is assumed rather than asserted is how a floor becomes decoration, so
@@ -3127,7 +3263,13 @@ async function extractRewrites(tag, platform) {
   // to disagree — but only in the harmless direction, since a non-empty `basePath` makes `/api`
   // HARDER to reach, not easier. Pinning the serialised config is the obvious strengthening and
   // is deliberately out of scope here.
-  const bad = (error) => ({ entries: null, basePath: null, i18n: null, error });
+  const bad = (error) => ({
+    rewrites: null,
+    routeTables: null,
+    basePath: null,
+    i18n: null,
+    error,
+  });
   try {
     return await withImageContainer(tag, platform, async ({ readFile }) => {
       let text;
@@ -3220,8 +3362,79 @@ async function extractRewrites(tag, platform) {
           entries.push(normaliseRewrite(phase, entry));
         }
       }
+      // ── the three other routing tables (check 27) ────────────────────────
+      //
+      // Same file, same parse, same container. See ROUTE_TABLES for what each one decides at
+      // runtime and why a field that looks inert is pinned anyway.
+      const routeTables = {};
+      for (const name of ROUTE_TABLES) {
+        // ABSENT IS A FAILURE, NOT AN EMPTY TABLE — the rule the `rewrites` branch above
+        // already states, and here it is not merely symmetry. `filesystem.js:247` and `:267`
+        // iterate `routesManifest.dataRoutes` and `routesManifest.dynamicRoutes` UNGUARDED, so
+        // a manifest missing either would make the ROUTER throw at boot. An image in that
+        // state is not one whose routing tables are empty; it is one this harness does not
+        // understand, and reading "absent" as "none" would record a shape change as a clean
+        // pin. (The symmetric rule on the BASELINE side runs the other way and lives in check
+        // 27: an absent `baseline.<table>` fails, while `[]` is a legitimate pin, because
+        // `dataRoutes` genuinely IS `[]` in an app-router-only build.)
+        if (!Object.prototype.hasOwnProperty.call(manifest, name)) {
+          return bad(
+            `${ROUTES_MANIFEST_PATH} (manifest version ${JSON.stringify(manifest.version)}) ` +
+              `carries NO \`${name}\` key at all. That is not the same as carrying an empty ` +
+              'table: this harness reads the routing tables from exactly those keys, and ' +
+              '`filesystem.js` iterates `dataRoutes` and `dynamicRoutes` unguarded, so a ' +
+              'manifest without one is a shape the standalone router would throw on rather ' +
+              'than a build with no routes. It fails instead of recording an empty table.',
+          );
+        }
+        const list = manifest[name];
+        if (!Array.isArray(list)) {
+          return bad(
+            `\`${name}\` in ${ROUTES_MANIFEST_PATH} is ${describeShape(list)}, not an array. ` +
+              'This harness models each routing table as an array of route objects and does ' +
+              'NOT coerce: a shape it does not model is one it may not bless.',
+          );
+        }
+        const out = [];
+        for (const [i, entry] of list.entries()) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+            return bad(
+              `\`${name}[${i}]\` in ${ROUTES_MANIFEST_PATH} is ${describeShape(entry)}, not a ` +
+                'route object.',
+            );
+          }
+          // `page` IS THE LIVE FIELD, so an entry without a usable one is refused rather than
+          // pinned. `filesystem.js:275` builds the matcher as `getRouteRegex(route.page)` and
+          // `resolve-routes.js:200` then looks the handler up with `getItem(route.page)`, so it
+          // is both what a request is matched against and what gets served. An entry this
+          // harness cannot key is one whose routing effect it cannot describe in a diff.
+          if (typeof entry.page !== 'string' || !entry.page) {
+            return bad(
+              `\`${name}[${i}].page\` in ${ROUTES_MANIFEST_PATH} is ` +
+                `${describeShape(entry.page)}, not a non-empty string. \`page\` is the field ` +
+                'the router recomputes each matcher from and the key it resolves the handler ' +
+                'with, so an entry without one is refused rather than recorded.',
+            );
+          }
+          // EVERY KEY PRESERVED, keys sorted, values recursively canonicalised — the same
+          // discipline as `normaliseRewrite`, and `Object.fromEntries` for the same reason:
+          // a literal `__proto__` key is an own data property after `JSON.parse`, so it is a
+          // key the manifest genuinely carried, and `out[k] =` would set the output's
+          // PROTOTYPE and drop it — making "every key is preserved" false for exactly the key
+          // name an attacker would choose.
+          out.push(
+            Object.fromEntries(
+              Object.keys(entry)
+                .sort()
+                .map((k) => [k, canonicaliseJsonValue(entry[k])]),
+            ),
+          );
+        }
+        routeTables[name] = out;
+      }
       return {
-        entries,
+        rewrites: entries,
+        routeTables,
         basePath: manifest.basePath,
         i18n: Object.prototype.hasOwnProperty.call(manifest, 'i18n') ? manifest.i18n : null,
         error: null,
@@ -3243,15 +3456,15 @@ async function extractRewrites(tag, platform) {
  * THIS one wins when populated, so check 11's pin on `functions-config-manifest.json` decides
  * the gate's coverage only because this file is empty. Nothing asserted that until check 26.
  *
- * ITS OWN CONTAINER, not folded into `extractRewrites`, and the reason is the one
- * `extractRewrites` itself gives for not folding into `extractGatePin`: two unrelated
+ * ITS OWN CONTAINER, not folded into `extractRoutesManifest`, and the reason is the one
+ * `extractRoutesManifest` itself gives for not folding into `extractGatePin`: two unrelated
  * surfaces would then share one failure. A `routes-manifest.json` this harness cannot parse
  * and a `middleware-manifest.json` it cannot parse are different findings with different
  * remedies, and collapsing them would report one as the other. The cost is one more
  * `docker create`/`cp`/`rm` cycle against a container that never boots — bounded
  * structurally, not hopefully, exactly as the WATCHDOG_MS comment says of check 24's.
  *
- * IT NEVER THROWS, mirroring `extractRewrites` and `gate.regionError`: an unreadable manifest
+ * IT NEVER THROWS, mirroring `extractRoutesManifest` and `gate.regionError`: an unreadable manifest
  * lands as check 26's named finding, and `--update-baseline` refuses to write rather than
  * committing an unreadable state.
  *
@@ -3422,6 +3635,77 @@ function locatedDiff(want, got, window = 90) {
   );
 }
 
+/**
+ * Two pinned entry tables, diffed the way an ORDER-SIGNIFICANT inventory has to be diffed.
+ *
+ * Returns `null` when they are equal, otherwise `{body, reordered}`. The CALLER owns the
+ * prose — what a change to ITS table means is subject-specific and must not be genericised
+ * into one message that fits none of them — and this owns the mechanics, which are not.
+ *
+ * THE SET DIFF ALONGSIDE THE POSITIONAL ONE IS THE WHOLE POINT, and it is here rather than
+ * duplicated per caller because the property it buys is easy to lose on a rewrite. A
+ * positional diff MISNAMES THE DANGEROUS ENTRY ON A PREPEND: an entry inserted at the FRONT
+ * shifts every later index, so every position "DIFFERS" and the last one reads as
+ * "[n] ADDED in the image: <a benign entry that was always there>", while the actually
+ * injected entry appears only as the `image` half of `[0]`. The prose then says "an ADDED
+ * entry is the dangerous direction" with the reader's eye on an innocent line. Both measured
+ * attacks against these surfaces are prepends — `{source:'/admin/audit', …}` into
+ * `beforeFiles`, the first phase Next evaluates (#94), and `{page:'/api/audit', …}` into
+ * `dynamicRoutes` and `staticRoutes` (#105) — so this is the shape that matters, at exactly
+ * the place the positional log is least legible.
+ *
+ * A pure REORDER is reported as such rather than as a wall of per-entry diffs with no clue
+ * what happened: `reordered` is true when the entries are the same SET in a different order,
+ * which the set diff alone cannot see. Whether that is a routing change or merely an
+ * unexplained one depends on the table, so the caller says which.
+ *
+ * Keyed on `lineOf` throughout, so every comparison here is over what SHIPS and never over
+ * how the committed file happens to spell its object keys.
+ */
+function entryTableDiff(want, got, lineOf) {
+  const wantLines = want.map(lineOf);
+  const gotLines = got.map(lineOf);
+  if (JSON.stringify(wantLines) === JSON.stringify(gotLines)) return null;
+  const lines = [];
+  const max = Math.max(want.length, got.length);
+  for (let i = 0; i < max; i++) {
+    const w = want[i];
+    const g = got[i];
+    if (wantLines[i] === gotLines[i]) continue;
+    if (w === undefined) {
+      lines.push(`  [${i}] ADDED in the image:     ${lineOf(g)}`);
+      continue;
+    }
+    if (g === undefined) {
+      lines.push(`  [${i}] MISSING from the image: ${lineOf(w)}`);
+      continue;
+    }
+    lines.push(
+      `  [${i}] DIFFERS:\n` +
+        `        pinned ${lineOf(w)}\n` +
+        `        image  ${lineOf(g)}\n` +
+        locatedDiff(lineOf(w), lineOf(g), 40)
+          .split('\n')
+          .map((l) => `      ${l}`)
+          .join('\n'),
+    );
+  }
+  const onlyInImage = gotLines.filter((l) => !wantLines.includes(l));
+  const onlyInPin = wantLines.filter((l) => !gotLines.includes(l));
+  const reordered = want.length === got.length && !onlyInImage.length && !onlyInPin.length;
+  const setSummary =
+    onlyInImage.length || onlyInPin.length
+      ? '\n\n  IGNORING POSITION — the entries that actually differ:\n' +
+        onlyInImage.map((l) => `    only in the IMAGE (ADDED):   ${l}`).join('\n') +
+        (onlyInImage.length && onlyInPin.length ? '\n' : '') +
+        onlyInPin.map((l) => `    only in the PIN (MISSING):   ${l}`).join('\n') +
+        '\n  Read THIS list for what changed; the indexed diff above shifts by one for ' +
+        'every inserted entry, so an entry added at the FRONT makes each later position ' +
+        'look changed.'
+      : '';
+  return { body: lines.join('\n') + setSummary, reordered };
+}
+
 // ── normalisation, so ONE baseline serves both arches ───────────────────────
 /** Strip the 16-hex Turbopack suffix. The hash is Next's internal detail and
  *  must never be hardcoded; deriving the name from the artifact cannot rot. */
@@ -3565,15 +3849,14 @@ function deriveAid(seedHex) {
 // the image's own arch and libc.
 //
 // AND WHY THE LOG ASSERTION (check 17) IS THE LOAD-BEARING ONE.
-// src/lib/revocation/producer.ts catches a failed database read and publishes an
-// EMPTY BUT VALIDLY SIGNED list. Measured against an unmigrated database: the
-// endpoint answered 200, the signature verified, the issuer was right — and the
-// container logged `revocation DB read failed, publishing empty list` because
-// `relation "revocation_entries" does not exist`. So a check asserting only "200 and
-// the signature verifies" PASSES ON AN IMAGE WHOSE DATABASE ACCESS IS ENTIRELY
-// BROKEN. Do not "simplify" check 17 away: it is the only thing standing between
-// this group and that vacuity, and the fallback it watches for is a deliberate
-// feature of the producer, not a bug that might get fixed.
+// src/lib/revocation/producer.ts USED TO catch a failed database read and publish an
+// EMPTY BUT VALIDLY SIGNED list: against an unmigrated database the endpoint answered
+// 200, the signature verified, the issuer was right — and the container logged
+// `revocation DB read failed` because `relation "revocation_entries" does not exist`.
+// It now fails closed by default (503 REVOCATION_UNAVAILABLE), which the 200 check in
+// fetchRevocationEnvelope rejects first. Check 17 stays as the second line of defence:
+// REVOCATION_FAIL_MODE=serve_stale still answers 200 on a failed read (re-serving a
+// bounded-age list) and logs the same text. Do not "simplify" check 17 away.
 const REVOCATION_PATH = '/.well-known/aitp-revocation-list';
 /**
  * The producer's fallback warning, as src/lib/revocation/producer.ts emits it.
@@ -4604,10 +4887,11 @@ async function assertRevocationDbReadHappened(app) {
       `the container logged ${JSON.stringify(REVOCATION_DB_FALLBACK)}, so the list above ` +
         'was signed WITHOUT reading the database.\n' +
         hits.map(([n, l]) => `  line ${n}: ${l.slice(0, 400)}`).join('\n') +
-        '\n\nsrc/lib/revocation/producer.ts catches a failed DB read and publishes an ' +
-        'EMPTY BUT VALIDLY SIGNED list, so every other assertion in this group still ' +
-        'passes — measured. Against this substrate it almost always means the ' +
-        'migrations did not apply and `revocation_entries` does not exist.',
+        '\n\nsrc/lib/revocation/producer.ts logs this when a DB read fails. With ' +
+        'REVOCATION_FAIL_MODE=serve_stale it then re-serves a last-known-good list, so ' +
+        'every other assertion in this group still passes. Against this substrate it ' +
+        'almost always means the migrations did not apply and `revocation_entries` ' +
+        'does not exist.',
     );
   }
   return (
@@ -4865,9 +5149,9 @@ async function main() {
   // `docker create` + `docker cp` against a container that is never started, so the
   // artifact cannot report on its own routing table and no `ENV NODE_OPTIONS` preload can
   // fire. Unlike the gate pin, a failure is RECORDED rather than fatal (see
-  // extractRewrites): there is no partial answer for the gate's bytes, but a
+  // extractRoutesManifest): there is no partial answer for the gate's bytes, but a
   // routes-manifest this harness cannot parse should still let the rest of the run report.
-  const rewrites = await extractRewrites(opts.tag, platform);
+  const routesManifest = await extractRoutesManifest(opts.tag, platform);
 
   // The middleware manifest (check 26). Gathered here for the SAME correctness reason the
   // rewrite table is: the --update-baseline branch below returns before check 26 runs, so a
@@ -5115,19 +5399,21 @@ async function main() {
           'nothing more — losing exactly the triage the region exists to provide.',
       );
     }
-    // The same rule, for the same reason, applied to the rewrite table: a baseline cannot
-    // pin a routing table that could not be read. Writing the other fields and leaving
-    // `rewrites` out would put an unreadable state in the committed file, and check 24
-    // would then report it as "this baseline never pinned rewrites" — an unreadable table
-    // recorded as an absent one, which is exactly the conflation that check refuses.
-    if (rewrites.error) {
+    // The same rule, for the same reason, applied to `routes-manifest.json`: a baseline cannot
+    // pin routing tables that could not be read. Writing the other fields and leaving
+    // `rewrites` and the three route tables out would put an unreadable state in the committed
+    // file, and checks 24 and 27 would then report it as "this baseline never pinned them" — an
+    // unreadable table recorded as an absent one, which is exactly the conflation both checks
+    // refuse. ONE gate for all four fields, because there is one parse of one file.
+    if (routesManifest.error) {
       fail(
-        'refusing to write a baseline: the compiled rewrite table could not be read out of ' +
-          `this image.\n  ${rewrites.error}\n\n` +
-          'That table is what the standalone server actually routes with, and a rewrite ' +
+        'refusing to write a baseline: the routing tables could not be read out of ' +
+          `this image.\n  ${routesManifest.error}\n\n` +
+          'That file is what the standalone server actually routes with. A rewrite ' +
           "whose SOURCE the gate's matcher does not cover reaches its destination handler " +
-          'with the gate never having run. Fix the image or the extraction before pinning ' +
-          'anything from it.',
+          'with the gate never having run, and `dataRoutes`/`dynamicRoutes`/`staticRoutes` are ' +
+          'the route inventory it builds its dynamic route list from. Fix the image or the ' +
+          'extraction before pinning anything from it.',
       );
     }
     // AND THE POLICY ITSELF, at write time — not only on the next run.
@@ -5152,7 +5438,7 @@ async function main() {
     // alongside it", and on a first run or a matcher change the committed baseline is not that.
     // (`baseline` is also not in scope yet here; it is built below.)
     {
-      const badPins = (rewrites.entries ?? [])
+      const badPins = (routesManifest.rewrites ?? [])
         .map((e) => [e, classifyRewrite(e, middlewareMatchers)])
         .filter(([, r]) => !r.ok);
       if (badPins.length) {
@@ -5287,7 +5573,7 @@ async function main() {
       const prevRewriteLines = (Array.isArray(prev.rewrites) ? prev.rewrites : []).map(
         rewriteLine,
       );
-      const nowRewriteLines = rewrites.entries.map(rewriteLine);
+      const nowRewriteLines = routesManifest.rewrites.map(rewriteLine);
       const rw = diff(prevRewriteLines, nowRewriteLines);
       // ORDER IS MEANING HERE, so a pure reorder must not print "unchanged". Within a
       // phase the first match wins, so swapping two entries changes which handler a
@@ -5306,6 +5592,53 @@ async function main() {
         for (const s of nowRewriteLines) console.log(`    ${s}`);
       } else {
         show('rewrites', rw);
+      }
+      // The same treatment for check 27's three tables: whole entries, never a projection, and
+      // a REORDER printed as a reorder rather than as "unchanged" — `diff` is set-based and
+      // cannot see one. Whether a reorder is a routing change depends on the table (see
+      // ROUTE_TABLES), but it is a change in all three and must not print as a no-op.
+      //
+      // A per-table `removed` list is collected here and folded into the removal gate below, so
+      // a route that VANISHED needs `--allow-removals` exactly as a vanished rewrite,
+      // `apiRoutes` entry or traced external does.
+      const routeTableDiffs = {};
+      for (const name of ROUTE_TABLES) {
+        const pinnedBefore = Array.isArray(prev[name]);
+        const prevLines = pinnedBefore ? prev[name].map(routeLine) : [];
+        const nowLines = routesManifest.routeTables[name].map(routeLine);
+        const d = diff(prevLines, nowLines);
+        routeTableDiffs[name] = d;
+        // NAMED AS A FIRST PIN rather than printed as N additions, the same courtesy
+        // `middlewareManifest` gets. Without it, the run that introduces this field prints the
+        // whole table as `+` lines indistinguishable from a build that really did gain 32
+        // routes — and the operator's job at that moment is to read the table, not to wonder
+        // which of the two happened.
+        if (!pinnedBefore) {
+          console.log(
+            `  ${name}: not pinned yet (this baseline predates check 27) — ` +
+              `${nowLines.length} entr${nowLines.length === 1 ? 'y' : 'ies'}:`,
+          );
+          for (const s of nowLines) console.log(`    + ${s}`);
+          continue;
+        }
+        if (
+          !d.added.length &&
+          !d.removed.length &&
+          prevLines.join('\n') !== nowLines.join('\n')
+        ) {
+          console.log(
+            `  ${name}: REORDERED — the same entries in a new order` +
+              (name === 'staticRoutes'
+                ? ' (nothing reads this table, but Next emits it through `sortPages`, so a ' +
+                  'reorder has no legitimate cause)'
+                : ' (first match wins across the array `filesystem.js` builds, so this is a ' +
+                  'routing change)') +
+              ':',
+          );
+          for (const s of nowLines) console.log(`    ${s}`);
+        } else {
+          show(name, d);
+        }
       }
       // ONE OBJECT, so it prints as a before/after rather than an added/removed set — the
       // whole manifest is four keys and fits on a line a human reads. Canonicalised on BOTH
@@ -5376,6 +5709,16 @@ async function main() {
         // reviewer has to notice and reason about, in a file whose own `_comment` is forty
         // lines long.
         ...rw.removed.map((s) => `rewrites: ${s}`),
+        // A ROUTE that vanished from one of check 27's tables, same ceremony. This is the
+        // direction that matters for an inventory: a route the image used to serve and no
+        // longer does is either a deletion someone made or a build that silently dropped it,
+        // and re-blessing the shrunken table makes the loss the new normal. The ADDITION
+        // direction is printed and allowed, as it is for `apiRoutes` — a new route is the
+        // routine event, and it is answered by the equality being a reviewable diff rather than
+        // by a consent flag nobody would keep reading (D14 Decision 6).
+        ...ROUTE_TABLES.flatMap((name) =>
+          routeTableDiffs[name].removed.map((s) => `${name}: ${s}`),
+        ),
       ];
       if (removed.length && !opts.allowRemovals) {
         fail(
@@ -5535,6 +5878,24 @@ async function main() {
         'nothing in middlewareMatchers, apiRoutes or apiRouteCount. Check 24 asserts this ' +
         'table WHOLE, so adding, removing, reordering or editing a rewrite is a reviewable ' +
         'diff here instead of an invisible change. ' +
+        '`dataRoutes`, `dynamicRoutes` and `staticRoutes` are the OTHER routing tables in that ' +
+        'same routes-manifest.json, pinned WHOLE by check 27 with every key each entry carried ' +
+        'and the ENTRY ORDER preserved. They are pure CHANGE DETECTION — the same category as ' +
+        'apiRoutes, with no policy attached, because none of them has a source/destination ' +
+        'split and so there is no bypass question to answer. Pinned despite no measured ' +
+        'exploit, for three reasons: nextTreeSha demonstrably does NOT cover this file (a thin ' +
+        'overlay patching only routes-manifest.json passed every pre-existing check, measured ' +
+        'in #94); the read is already paid for by rewrites, so it costs no container and no ' +
+        'consent flag; and the inertness of the measured tamper is a property of Next 16.3.3 ' +
+        'rather than of the manifest — filesystem.js rebuilds every dynamicRoutes matcher from ' +
+        '`page` and next-server.js does it again under its own ' +
+        '"// TODO: can we just re-use the regex from the manifest?", while dataRoutes\' ' +
+        'dataRouteRegex is ALREADY compiled straight from the manifest string. Read `page` ' +
+        'first on every entry: it is what the router recomputes each matcher from and the key ' +
+        'it resolves the handler with. A new route reds check 27 AND check 11, which pins the ' +
+        'same 30 built /api routes out of a DIFFERENT file — check 11 green with 27 red (or the ' +
+        'reverse) means the two manifests disagree, which is what a thin-overlay tamper looks ' +
+        'like. ' +
         '`middlewareManifest` is .next/server/middleware-manifest.json, pinned WHOLE, and the ' +
         'reason is PRECEDENCE rather than informativeness — it is EMPTY in this image and that ' +
         'emptiness is exactly the point. The router reads BOTH middleware manifests and THIS ' +
@@ -5583,13 +5944,18 @@ async function main() {
         'Review every line by hand: a new entry means a new external or a new native ' +
         'binary shipped, a missing entry means one stopped shipping, and any change to ' +
         'middlewareMatchers, bootGraph, nextTreeSha, imageConfig, apiRoutes, ' +
-        'apiRouteCount, rewrites or middlewareManifest is a security review — the first ' +
-        'changes what the gate ' +
-        'covers, the next three change the code it runs and the environment it runs in, ' +
-        'the next two mean a route appeared, vanished or was renamed, the next means a ' +
-        'request can now reach a handler by a path the gate may never see, and the last ' +
-        'means the file that OVERRIDES middlewareMatchers at runtime is no longer the empty ' +
-        'one those matchers are load-bearing because of.',
+        'apiRouteCount, rewrites, dataRoutes, dynamicRoutes, staticRoutes or ' +
+        'middlewareManifest is a security review. Named rather than counted, because this list ' +
+        'has grown three times and a positional "the next two" decays into a wrong sentence ' +
+        'every time it does: middlewareMatchers changes what the gate covers; bootGraph, ' +
+        'nextTreeSha and imageConfig change the code it runs and the environment it runs in; ' +
+        'apiRoutes and apiRouteCount mean a route appeared, vanished or was renamed; rewrites ' +
+        'means a request can now reach a handler by a path the gate may never see; dataRoutes, ' +
+        'dynamicRoutes and staticRoutes mean the shipped route inventory moved, most often ' +
+        'alongside apiRoutes and benignly, and NOT alongside it when one of the two manifests ' +
+        'was tampered with; and middlewareManifest means the file that OVERRIDES ' +
+        'middlewareMatchers at runtime is no longer the empty one those matchers are ' +
+        'load-bearing because of.',
       _regenerate: 'node scripts/verify-image.mjs --update-baseline',
       tracedExternals,
       nativeModules,
@@ -5621,7 +5987,27 @@ async function main() {
       // the FIRST MATCH WINS, so a swap changes which handler a request reaches. See
       // normaliseRewrite: the file has a precedent both ways, so do not "fix" one to match
       // the other.
-      rewrites: rewrites.entries,
+      rewrites: routesManifest.rewrites,
+      // ── check 27: the other three routing tables ─────────────────────────
+      //
+      // `dataRoutes`, `dynamicRoutes` and `staticRoutes` from the same
+      // `.next/routes-manifest.json`, spread as three keys under the manifest's OWN names so a
+      // reader can grep Next's source for them. Every key each entry carried is preserved with
+      // its own keys sorted, and ENTRY ORDER IS PRESERVED rather than sorted — for
+      // `dataRoutes`/`dynamicRoutes` because first match wins across the single array
+      // `filesystem.js` builds from both, and for `staticRoutes` because the build emits it
+      // through `sortPages` deterministically, so preserving costs nothing while sorting would
+      // hide a reorder with no legitimate cause. See ROUTE_TABLES.
+      //
+      // PINNED DESPITE NO MEASURED EXPLOIT: `nextTreeSha` does not cover this file (measured in
+      // #94), the read is already paid for by `rewrites`, and the inertness of the measured
+      // tamper is a property of Next 16.3.3 — `next-server.js:471-481` recomputes the matcher
+      // from `page` under a `// TODO: can we just re-use the regex from the manifest?`, and
+      // `dataRoutes`' `dataRouteRegex` is already trusted verbatim (`filesystem.js:260`).
+      //
+      // Arch-invariant: every field is compiled from a route PATH at build time, no arch token
+      // and no content hash, so one pin serves amd64 and arm64 — `normaliseRewrite`'s property.
+      ...routesManifest.routeTables,
       // ── check 26: the middleware manifest ────────────────────────────────
       //
       // `.next/server/middleware-manifest.json` from the image, pinned WHOLE with keys
@@ -5696,8 +6082,22 @@ async function main() {
     // apiRoutes are: it is a line a human has to review. The question to ask of every line
     // is whether the gate's matcher covers that entry's SOURCE — the destination is where
     // the request lands, but the source is all the middleware ever sees.
-    console.log(`  rewrites (${rewrites.entries.length}):`);
-    for (const e of rewrites.entries) console.log(`    ${rewriteLine(e)}`);
+    console.log(`  rewrites (${routesManifest.rewrites.length}):`);
+    for (const e of routesManifest.rewrites) console.log(`    ${rewriteLine(e)}`);
+    // The routing tables print their `page` list rather than their whole entries, and that is
+    // the one place this file deliberately prints LESS than it pins. The entries are 32 lines
+    // of compiled regex; the question a human can actually answer at the terminal is "is every
+    // one of these a route I meant to build, and is the list complete", which is the page list.
+    // The full entries are in the committed file, where `git diff` shows them — and that is the
+    // artefact the failure text sends the reviewer to. Contrast `rewrites`, `apiRoutes` and
+    // `middlewareMatchers`, which are printed whole because each line carries a decision
+    // (a destination, a route identity, a compiled matcher regexp) rather than a derivation.
+    for (const name of ROUTE_TABLES) {
+      const t = routesManifest.routeTables[name];
+      console.log(
+        `  ${name} (${t.length}): ${t.length ? t.map((e) => e.page).join(', ') : '(none)'}`,
+      );
+    }
     // Printed WHOLE, on one line, because the whole file is four keys — and because the
     // question a reviewer has to ask of it is binary and visible at a glance: are `middleware`
     // and `functions` still `{}`? If either is not, check 26a has already refused to write and
@@ -5842,10 +6242,10 @@ async function main() {
     // records its failure rather than throwing (mirroring gate.regionError), so it lands
     // here as a named finding instead of aborting a run that can still report every other
     // result.
-    if (rewrites.error) {
+    if (routesManifest.error) {
       fail(
         'the shipped rewrite table could not be read out of the image:\n' +
-          `  ${rewrites.error}\n\n` +
+          `  ${routesManifest.error}\n\n` +
           'This check pins what the standalone server actually ROUTES with. Next middleware ' +
           "matches the incoming request path, so a rewrite whose SOURCE the gate's matcher " +
           'does not cover reaches its destination handler with the gate never having run — ' +
@@ -5908,70 +6308,26 @@ async function main() {
       );
     }
     const want = baseline.rewrites;
-    const got = rewrites.entries;
+    const got = routesManifest.rewrites;
     // Compared WHOLE and CANONICALLY — `rewriteLine` on both sides, no projection — because
     // a projection is what let a matcher condition be recorded as "unchanged" (see
     // ALLOWED_MATCHER_KEYS), and because the comparison must be sensitive to ORDER: within a
     // phase the first match wins. `rewriteLine` re-sorts each entry's keys, so the comparison
     // is on what SHIPS rather than on how the committed file happens to spell its objects.
-    const wantLines = want.map(rewriteLine);
-    const gotLines = got.map(rewriteLine);
-    if (JSON.stringify(wantLines) !== JSON.stringify(gotLines)) {
-      const lines = [];
-      const max = Math.max(want.length, got.length);
-      for (let i = 0; i < max; i++) {
-        const w = want[i];
-        const g = got[i];
-        if (wantLines[i] === gotLines[i]) continue;
-        if (w === undefined) {
-          lines.push(`  [${i}] ADDED in the image:     ${rewriteLine(g)}`);
-          continue;
-        }
-        if (g === undefined) {
-          lines.push(`  [${i}] MISSING from the image: ${rewriteLine(w)}`);
-          continue;
-        }
-        lines.push(
-          `  [${i}] DIFFERS:\n` +
-            `        pinned ${rewriteLine(w)}\n` +
-            `        image  ${rewriteLine(g)}\n` +
-            locatedDiff(rewriteLine(w), rewriteLine(g), 40)
-              .split('\n')
-              .map((l) => `      ${l}`)
-              .join('\n'),
-        );
-      }
-      // THE SET DIFF, alongside the positional one, because the positional diff alone
-      // MISNAMES THE DANGEROUS ENTRY ON A PREPEND. An entry inserted at the FRONT shifts
-      // every later index, so each position "DIFFERS" and the last one reads as
-      // "[n] ADDED in the image: <a benign entry that was always there>" — while the
-      // actually-injected rewrite appears only as the `image` half of `[0]`. The prose then
-      // says "an ADDED entry is the dangerous direction" with the reader's eye on an
-      // innocent line. That matters here specifically: `beforeFiles` is the FIRST phase Next
-      // evaluates, so prepending is the likely shape of an attack, and it is exactly where
-      // the positional log is least legible. Keyed on `rewriteLine`, so it is a set diff over
-      // what ships, not over file spelling.
-      const onlyInImage = gotLines.filter((l) => !wantLines.includes(l));
-      const onlyInPin = wantLines.filter((l) => !gotLines.includes(l));
-      // A pure REORDER would otherwise read as a wall of per-entry diffs with no clue
-      // what happened, so it is named. It is a routing change, not a cosmetic one.
-      const reordered =
-        want.length === got.length && !onlyInImage.length && !onlyInPin.length;
-      const setSummary =
-        onlyInImage.length || onlyInPin.length
-          ? '\n\n  IGNORING POSITION — the entries that actually differ:\n' +
-            onlyInImage.map((l) => `    only in the IMAGE (ADDED):   ${l}`).join('\n') +
-            (onlyInImage.length && onlyInPin.length ? '\n' : '') +
-            onlyInPin.map((l) => `    only in the PIN (MISSING):   ${l}`).join('\n') +
-            '\n  Read THIS list for what changed; the indexed diff above shifts by one for ' +
-            'every inserted entry, so a rewrite added at the FRONT makes each later position ' +
-            'look changed.'
-          : '';
+    //
+    // THE POSITIONAL DIFF, THE POSITION-INDEPENDENT SET DIFF AND THE REORDER FLAG all come
+    // from `entryTableDiff`, which is where the mechanics live now that check 27 needs the
+    // same three. The prose below stays HERE, because what a changed rewrite MEANS is
+    // rewrite-specific and a message generic enough to serve four tables would serve none of
+    // them. Read `entryTableDiff` for why the set diff exists: prepending is the measured
+    // shape of an attack on this table (`beforeFiles` is the first phase Next evaluates) and
+    // it is exactly where the indexed log is least legible.
+    const d = entryTableDiff(want, got, rewriteLine);
+    if (d) {
       fail(
         'the shipped rewrite table is not the pinned one:\n' +
-          lines.join('\n') +
-          setSummary +
-          (reordered
+          d.body +
+          (d.reordered
             ? '\n\n  The entries are the SAME SET in a DIFFERENT ORDER. That is a routing ' +
               'change, not a cosmetic one: within a phase the FIRST MATCH WINS, so a swap ' +
               'changes which handler a request reaches. Entry order is pinned on purpose ' +
@@ -6014,10 +6370,10 @@ async function main() {
   // pure function of a copied file plus the committed baseline, and a routing-bypass check
   // must not be reachable only after Postgres health and two container boots.
   await runCheck(25, 'no rewrite reaches a path the gate protects', async () => {
-    if (rewrites.error) {
+    if (routesManifest.error) {
       fail(
         'the shipped rewrite table could not be read, so this policy could not be ' +
-          `evaluated at all:\n  ${rewrites.error}\n\n` +
+          `evaluated at all:\n  ${routesManifest.error}\n\n` +
           'Reported separately from check 24 on purpose: an unreadable table means the ' +
           'FLOOR did not run, which is a different and worse thing than a table that ' +
           'disagrees with its pin.',
@@ -6030,9 +6386,9 @@ async function main() {
     // `/app/api/audit` would test as UNCOVERED and be ALLOWED — the assumption fails
     // silently and in the dangerous direction. Next applies basePath to custom routes in
     // its own `buildCustomRoute`, so this is not hypothetical.
-    if (rewrites.basePath !== '') {
+    if (routesManifest.basePath !== '') {
       fail(
-        `${ROUTES_MANIFEST_PATH} reports basePath ${JSON.stringify(rewrites.basePath)}, ` +
+        `${ROUTES_MANIFEST_PATH} reports basePath ${JSON.stringify(routesManifest.basePath)}, ` +
           'not "". Every destination comparison in this check assumes destinations are ' +
           "root-relative and compares them against the gate matcher's `^/api` anchor; " +
           'under a basePath they carry that prefix, so a gated destination would test as ' +
@@ -6042,10 +6398,10 @@ async function main() {
     }
     // i18n: locale prefixes generate route variants reachable under prefixes the pinned
     // matcher never sees.
-    if (rewrites.i18n !== null && rewrites.i18n !== undefined) {
+    if (routesManifest.i18n !== null && routesManifest.i18n !== undefined) {
       fail(
         `${ROUTES_MANIFEST_PATH} carries an \`i18n\` config ` +
-          `(${JSON.stringify(rewrites.i18n)}). Locale-prefixed route variants are ` +
+          `(${JSON.stringify(routesManifest.i18n)}). Locale-prefixed route variants are ` +
           'reachable under prefixes the pinned matcher does not describe, so this check ' +
           'cannot decide coverage. Refusing rather than under-reporting.',
       );
@@ -6129,7 +6485,7 @@ async function main() {
       );
     }
     const sides = [
-      ['the IMAGE', rewrites.entries],
+      ['the IMAGE', routesManifest.rewrites],
       ['the PIN', baseline.rewrites],
     ];
     const offenders = [];
@@ -6170,7 +6526,7 @@ async function main() {
           're-pin), not to widen this check.',
       );
     }
-    const n = rewrites.entries.length;
+    const n = routesManifest.rewrites.length;
     return (
       `${n} shipped rewrite(s) and ${sides[1][1].length} pinned, all permitted; ` +
       `${PUBLIC_PATHS_PINNED.length} pinned public path(s) form the only clearance` +
@@ -6245,12 +6601,26 @@ async function main() {
   // and the remedy is to move that pin. The same trade check 25 makes, and the same one D14
   // Decision 4 accepted for a future `/api/old → /api/new` rewrite.
   //
-  // FOR WHOEVER PICKS UP #105: the harness now pins three of the manifests the standalone
-  // router reads — `functions-config-manifest.json` (as `middlewareMatchers`),
-  // `routes-manifest.json`'s rewrite table (as `rewrites`), and this one whole. The remaining
-  // unpinned surface is `routes-manifest.json`'s `dataRoutes`/`dynamicRoutes`/`staticRoutes`.
-  // The frame is "every manifest the router reads is either pinned or has a written reason why
-  // not", so that it stays a list rather than a series of rediscoveries.
+  // THE RUNNING LIST OF MANIFESTS THE ROUTER READS, kept here so the frame stays "every one is
+  // either pinned or has a written reason why not" rather than becoming a series of
+  // rediscoveries. PINNED: `functions-config-manifest.json` (as `middlewareMatchers` and
+  // `apiRoutes`, check 11); `routes-manifest.json`'s rewrite table (as `rewrites`, checks 24
+  // and 25) and its `dataRoutes`/`dynamicRoutes`/`staticRoutes` (check 27, which closed #105);
+  // and this one whole (check 26).
+  //
+  // STILL UNPINNED, named so the next reader inherits a list and not a search:
+  //   - `routes-manifest.json`'s NON-TABLE keys — `caseSensitive`, `basePath`, `redirects`,
+  //     `headers`, `onMatchHeaders`, `rsc`, `rewriteHeaders`, `pages404`, `appType`, `version`.
+  //     `basePath` and `i18n` are READ by check 25 as preconditions but not pinned, and
+  //     `caseSensitive` is load-bearing for the "no source-is-gated-too clearance" reasoning in
+  //     `classifyRewrite` while being unpinned.
+  //   - `.next/required-server-files.json`, the serialised config the router reads its OWN
+  //     `basePath`/`i18n` from — the residual `extractRoutesManifest` already names.
+  //   - `prerender-manifest.json`, `pages-manifest.json`, `app-path-routes-manifest.json`,
+  //     all read by `filesystem.js:222-235`.
+  // Pinning the rest of `routes-manifest.json` whole is the obvious next question and is
+  // deliberately not check 27's: it would put `version`/`rsc`/`rewriteHeaders` under the same
+  // equality and needs its own measurement of what a Next bump moves.
   await runCheck(
     26,
     'the middleware manifest is empty, so the pinned matcher set is what the gate uses',
@@ -6382,6 +6752,221 @@ async function main() {
     },
   );
 
+  // ── check 27: the other three routing tables ─────────────────────────────
+  //
+  // WHY THIS EXISTS. Checks 24 and 25 read `routes-manifest.json` and assert only its
+  // `rewrites`. The same file's `dataRoutes`, `dynamicRoutes` and `staticRoutes` were neither
+  // pinned nor read, so a tamper in them passed every check — measured twice
+  // (aitp-control-plane#105): one thin-overlay image patching `dataRoutes`, one prepending
+  // `{page:'/api/audit', regex:'^/z/audit(?:/)?$', namedRegex:…}` to `dynamicRoutes` AND
+  // `staticRoutes`, both green across all 25 checks the harness then had.
+  //
+  // NEITHER TAMPER WAS EXPLOITABLE, and this check is not sold as closing a bypass. Three
+  // reasons to pin anyway, in the order they carry weight:
+  //
+  //   1. `nextTreeSha` DEMONSTRABLY DOES NOT COVER THIS FILE. #94 measured the thin overlay
+  //      that patches only `routes-manifest.json` passing every pre-existing check, so "the
+  //      framework tree digest covers it" is not an argument available for ANY table here.
+  //   2. IT IS NEARLY FREE. Check 24 already copies this file out with `docker create` +
+  //      `docker cp` against a container that is never started. This adds fields to the same
+  //      read: no new container, no new probe, no new consent flag, and the removal gate and
+  //      the diff printer already handle a pinned inventory.
+  //   3. "NOT EXPLOITABLE" IS A PROPERTY OF NEXT 16.3.3, NOT OF THE MANIFEST. The
+  //      `dynamicRoutes` tamper is inert because `filesystem.js:275` rebuilds every matcher as
+  //      `getRouteMatcher(getRouteRegex(route.page))` — recomputed from `page`, so the
+  //      serialised `regex`/`namedRegex` are dead. `next-server.js:471-481` recomputes it a
+  //      second time and carries Next's own comment,
+  //      `// TODO: can we just re-use the regex from the manifest?`. The day that TODO is
+  //      taken, the same tamper is a routing bypass and the failure is SILENT. And one table
+  //      does not need a future version at all: `dataRoutes`' `dataRouteRegex` is compiled
+  //      STRAIGHT FROM THE MANIFEST STRING today (`filesystem.js:260`). See ROUTE_TABLES for
+  //      the full per-table reading, including the two live fields on a `dynamicRoutes` entry
+  //      (`page`, and `skipInternalRouting`, which drops a real route from the router).
+  //
+  // A SEPARATE CHECK RATHER THAN MORE OF CHECK 24, and that is a deliberate departure from
+  // what #105 suggested ("extend check 24's extraction and comparison"). The EXTRACTION is
+  // extended — one file, one parse, one container, which is the cost argument the issue makes.
+  // The COMPARISON is its own check, because check 24's failure text is security-worded about
+  // gate bypasses ("an ADDED entry is the dangerous direction: a rewrite's SOURCE is what the
+  // middleware sees…") and a route addition is ROUTINE. Folding the route inventory into 24
+  // would make `src/app/api/foo/route.ts` red a check that opens with that sentence — which is
+  // exactly the failure mode UNPINNED_ENV_KEYS in this file records and warns against: "a
+  // routine base bump would present as a security event and the response would become a
+  // reflex, which is the one thing this pin cannot survive." Split, the triage is precise:
+  // 24 red means a rewrite moved and is a security review; 27 red means the route inventory
+  // moved and is usually a route addition. Two checks over one extraction is already the
+  // pattern here — check 25 reads check 24's.
+  //
+  // PURE CHANGE DETECTION, WITH NO POLICY, and that is also deliberate. None of these tables
+  // has a source/destination split, so there is no "does this reach a gated path" question for
+  // a floor to answer — the same category as `apiRoutes`. So check 25 is NOT extended, there
+  // is no new consent flag, and `--allow-gate-change` does not cover these fields for D14
+  // Decision 6's reason: that flag guards compiled code, and a consent demanded for every
+  // routine routing change stops being read. The removal gate covers the one direction that
+  // needs ceremony — an entry that VANISHED.
+  //
+  // THE ACCEPTED COST, stated rather than discovered: a new `/api` route reds this check. It
+  // already reds check 11, which pins `apiRoutes` and `apiRouteCount` as equalities, so this
+  // adds NO new re-pin event — only more lines to the diff at an event that already exists,
+  // and one `--update-baseline` clears both. Measured before choosing whole-table equality
+  // over a digest: `staticRoutes` (22) is the 20 static `/api/*` routes plus `/_global-error`
+  // and `/_not-found`, `dynamicRoutes` (10) is the 10 dynamic ones, 20 + 10 = 30 =
+  // `apiRouteCount`, and this baseline has been re-pinned three times in its life, never for a
+  // route addition.
+  //
+  // Called in the STATIC HALF with 24, 25 and 26, for D14 Decision 7's reason: it is a pure
+  // function of one copied file plus the committed baseline, and a check about the shipped
+  // routing surface must not be reachable only after Postgres health and two container boots.
+  // The id is APPENDED, never renumbered — the file's standing rule.
+  await runCheck(
+    27,
+    'the compiled routing tables match the committed baseline',
+    async () => {
+      // A TABLE THIS HARNESS COULD NOT READ IS NOT A TABLE IT MAY BLESS — check 24's
+      // disposition, and reported from the SAME `error` because there is one parse of one
+      // file: an unreadable manifest is one finding with one remedy, not four.
+      if (routesManifest.error) {
+        fail(
+          'the shipped routing tables could not be read out of the image:\n' +
+            `  ${routesManifest.error}\n\n` +
+            'These are the tables the standalone server builds its dynamic route list from ' +
+            '(`filesystem.js:247-277`), and a manifest this harness cannot read is one in ' +
+            'which a tamper in them would be invisible — which is the state this check exists ' +
+            'to end.',
+        );
+      }
+      // PER-TABLE PIN VALIDATION FIRST, all of it fail-closed, before any comparison. Each
+      // rule is check 24's, applied to a table whose absence means something different.
+      for (const name of ROUTE_TABLES) {
+        const want = baseline[name];
+        // FAILS CLOSED ON ABSENCE. `?? []` would mean "expected an empty table", which passes
+        // against an image carrying a prepended entry — the quiet disposition checks 5, 6, 24
+        // and 26 were each corrected away from. An absent key means a baseline that predates
+        // this check, NOT a build with no routes.
+        //
+        // AN EMPTY ARRAY, BY CONTRAST, IS A LEGITIMATE PIN AND IS COMPARED NORMALLY, and for
+        // this field that is not a hypothetical: `dataRoutes` IS `[]` in this repo.
+        // `generate-routes-manifest.js` emits it empty and `build/index.js:1647-1656`
+        // repopulates it only from pages-router `getServerSideProps`/`getStaticProps` pages,
+        // of which an app-router-only build has none. Conflating the two would make the one
+        // table whose serialised regex Next trusts TODAY the one this check could not pin.
+        if (!Array.isArray(want)) {
+          fail(
+            `${BASELINE_PATH} has no \`${name}\` array (it is ${describeShape(want)}). That ` +
+              'is the pin on one of the routing tables the standalone server builds its route ' +
+              'list from, and without it this check has nothing to compare against — so it ' +
+              'fails rather than passing vacuously. Treating the absence as "expected an ' +
+              'empty table" would pass against an image carrying an injected route entry. An ' +
+              'EMPTY array is a different thing and is a legitimate pin (`dataRoutes` is `[]` ' +
+              `in an app-router-only build). Regenerate with \`${REPIN_CMD}\`.`,
+          );
+        }
+        // A MALFORMED PIN IS NAMED AS A MALFORMED PIN, not reported as image drift — check
+        // 24's rule, for its reason: without this, a baseline whose table holds strings still
+        // fails closed, but through the generic "the shipped table is not the pinned one"
+        // path, which tells the operator the IMAGE changed when the committed file is what is
+        // wrong. A wrong diagnosis on a pinned surface costs more than the lines it takes to
+        // separate the cases.
+        const malformed = want
+          .map((e, i) => [i, e])
+          .filter(
+            ([, e]) =>
+              e === null ||
+              typeof e !== 'object' ||
+              Array.isArray(e) ||
+              typeof e.page !== 'string' ||
+              !e.page,
+          );
+        if (malformed.length) {
+          fail(
+            `${BASELINE_PATH}'s \`${name}\` is an array, but ${malformed.length} of its ` +
+              `${want.length} entr(ies) are not pinned route objects:\n` +
+              malformed
+                .map(
+                  ([i, e]) =>
+                    `  [${i}] ${describeShape(e)}` +
+                    (e && typeof e === 'object' && !Array.isArray(e)
+                      ? ` — \`page\` is ${JSON.stringify(e.page)}, expected a non-empty string`
+                      : ''),
+                )
+                .join('\n') +
+              '\n\nThat is a malformed PIN, not a changed image. Each entry must carry a ' +
+              'non-empty string `page`, which is the field the router recomputes its matcher ' +
+              'from and resolves the handler with. The baseline is generated, never ' +
+              `hand-edited — regenerate it with \`${REPIN_CMD}\`.`,
+          );
+        }
+      }
+      // ALL THREE COMPARED BEFORE ANY IS REPORTED, so one failure names every table that
+      // moved. The measured attack patched TWO tables at once, and a check that stopped at the
+      // first would have the operator re-pin, re-run and meet the second — teaching that a
+      // red here is something you clear rather than something you read.
+      const moved = [];
+      for (const name of ROUTE_TABLES) {
+        const d = entryTableDiff(baseline[name], routesManifest.routeTables[name], routeLine);
+        if (d) moved.push([name, d]);
+      }
+      if (moved.length) {
+        fail(
+          `${moved.length} of the ${ROUTE_TABLES.length} shipped routing tables ` +
+            `${moved.length === 1 ? 'is' : 'are'} not the pinned one:\n` +
+            moved
+              .map(
+                ([name, d]) =>
+                  `\n  === \`${name}\` ===\n` +
+                  d.body +
+                  (d.reordered
+                    ? '\n\n  The entries are the SAME SET in a DIFFERENT ORDER.' +
+                      (name === 'staticRoutes'
+                        ? ' Nothing in the router reads `staticRoutes`, so this is not a' +
+                          ' routing change — but Next emits it through `sortPages`, so the' +
+                          ' order is deterministic and a reorder has no legitimate cause.'
+                        : ' That is a ROUTING CHANGE: `filesystem.js` puts `dataRoutes`' +
+                          " dynamic entries and `dynamicRoutes`' entries into ONE array and" +
+                          ' `resolve-routes.js:190` returns on the FIRST one that matches, so' +
+                          ' a swap changes which handler an ambiguous path reaches.')
+                    : ''),
+              )
+              .join('\n') +
+            '\n\nWHAT A CHANGE HERE MEANS. These tables are the route inventory the ' +
+            'standalone server builds its dynamic route list from, and the most likely cause ' +
+            'of this failure is the benign one: A ROUTE WAS ADDED, REMOVED OR RENAMED. That ' +
+            'also reds check 11 (`apiRoutes`/`apiRouteCount`), and ONE re-pin clears both — ' +
+            'if check 11 is red too and its diff is the same route, this is housekeeping.\n' +
+            'CHECK 11 GREEN AND THIS RED IS THE CASE TO READ CAREFULLY, because the two pins ' +
+            'come from DIFFERENT FILES: check 11 reads ' +
+            '`functions-config-manifest.json` and this reads `routes-manifest.json`. They ' +
+            'describe the same 30 built /api routes, so a disagreement means one file was ' +
+            'changed and the other was not — which is what a thin-overlay tamper on ' +
+            '`routes-manifest.json` looks like (measured, aitp-control-plane#105), and what a ' +
+            'Next release emitting one table differently also looks like.\n' +
+            'READ `page` FIRST on every line: it is the field the router recomputes each ' +
+            "matcher from and the key it resolves the handler with. `regex`, `namedRegex` and " +
+            '`routeKeys` are pinned too even though Next recomputes them for `dynamicRoutes`, ' +
+            'because that is a choice its own source flags as a TODO to change — and because ' +
+            "`dataRoutes`' `dataRouteRegex` is compiled straight from the manifest string " +
+            'today. A `skipInternalRouting` appearing on an entry is NOT cosmetic: the router ' +
+            'skips that route entirely.\n' +
+            `Review every line above, then re-pin with \`${REPIN_CMD}\` (an entry that ` +
+            'VANISHED additionally needs --allow-removals).',
+        );
+      }
+      return (
+        `${ROUTE_TABLES.map((n) => `${n} ${routesManifest.routeTables[n].length}`).join(', ')}` +
+        `, read from ${ROUTES_MANIFEST_PATH} by \`docker cp\` against a container that was ` +
+        'never started, so no code from the image ran. Every key each entry carried is pinned ' +
+        'and entry order is preserved:\n' +
+        ROUTE_TABLES.map(
+          (n) =>
+            `  ${n}: ` +
+            (routesManifest.routeTables[n].length
+              ? routesManifest.routeTables[n].map((e) => e.page).join(', ')
+              : '(none)'),
+        ).join('\n')
+      );
+    },
+  );
+
   // ── the cross-arch inventory artifact ────────────────────────────────────
   //
   // WHAT THIS IS FOR, and why it is a file rather than a check. Both arches
@@ -6399,8 +6984,9 @@ async function main() {
   // WHAT `structuralChecksFailed` DOES AND DOES NOT COVER. It is written HERE, before the
   // live substrate is stood up, so it can only ever report on the checks that have RUN by
   // this point — the structural half, which is the half whose findings this file's contents
-  // come from. That is checks 1-6 and checks 24-26 — the rewrite-table pin, its policy
-  // floor, and the middleware-manifest pin — which keep the ids they were appended with but
+  // come from. That is checks 1-6 and checks 24-27 — the rewrite-table pin, its policy
+  // floor, the middleware-manifest pin and the routing-table pin — which keep the ids they
+  // were appended with but
   // are CALLED in the static half on
   // purpose, because a routing-bypass check must not be reachable only after Postgres
   // health, migrations and two container boots. (This sentence used to say "checks 1-6" and
@@ -6411,7 +6997,7 @@ async function main() {
   // that fails check 13 or check 20 emits `structuralChecksFailed: []`, and that is correct
   // rather than misleading: the field is scoped by its name. It is NOT a summary of the
   // run. Do not read an empty array here as "the run passed" — the job's exit code is the
-  // only thing that says that. (Moving the write into a `finally` after all 26 checks would
+  // only thing that says that. (Moving the write into a `finally` after all 27 checks would
   // widen the field, and would also mean no inventory at all from a run that died in the
   // live phase, which is the one this file is most often wanted for.)
   if (opts.inventoryOut) {
