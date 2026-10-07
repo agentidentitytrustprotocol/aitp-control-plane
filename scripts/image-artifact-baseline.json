@@ -344,8 +344,8 @@
     },
     {
       "path": "instrumentation/chunks/src_lib_0hxtwyh._.js",
-      "bytes": 4907,
-      "sha256": "4eb3e60f16a157e76b7c09b23681b9211d5a3753055d5375d7ba71b5eb8682ac"
+      "bytes": 5050,
+      "sha256": "65b98bd08f133b3865eeeb0ca8047c3b9892f62bda0dfc6d6f6a14e456957edb"
     },
     {
       "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdiv._.js",
@@ -364,8 +364,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
-      "bytes": 236362,
-      "sha256": "b8f982536f3e5f50b065033e04d9b9dae8d30676e5e81ffa105055c92dc35f0c"
+      "bytes": 236508,
+      "sha256": "ea8f6505627dbfa2574da6a4702732e527a1893d1a8f72fe6850ed93e9505ef1"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -405,6 +405,6 @@
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
     "bytes": 2837,
-    "sha256": "e46733878401cfc494235132179aca586aab80853db3d13a604dc5570a8a494d"
+    "sha256": "5493e5d31b7ca8b1eb191bb8aa109de994cf6dacf3f2bf375c82cdc58153a2c2"
   }
 }
