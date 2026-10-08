@@ -216,11 +216,13 @@ components:
         either misdescribe the route or force a `code` into it that nothing reads.
 
 
-        **Exactly one of `reason` or `error` is present.** `reason` means the
-        instance is unready on purpose (a drain); `error` means a readiness
-        check threw. Never both, and a `503` never has neither.
+        **A `503` always carries exactly `reason`.** `shutting_down` is a
+        deliberate drain; `db_unreachable` is a failed database probe. There is
+        no second field to branch on. The raw exception message is never put in
+        the body (it is logged server-side), because this route is unauthenticated
+        and unthrottled.
       type: object
-      required: [ready]
+      required: [ready, reason]
       properties:
         ready:
           type: boolean
@@ -232,23 +234,71 @@ components:
           type: string
           example: shutting_down
           description: >-
-            Why the instance took itself out of rotation, when the cause is a
-            deliberate state rather than a fault. Currently only
-            `shutting_down` — a `SIGTERM` has been received and the LB should
-            drain this pod, which stays *running* (`/api/health` deliberately
-            keeps answering `200` through the drain; only readiness flips).
+            Why the instance is not ready, as a classification and never as
+            exception text. Present on every `503`. Currently:
+
+            - `shutting_down` — a `SIGTERM` has been received and the LB should
+              drain this pod, which stays *running* (`/api/health` deliberately
+              keeps answering `200` through the drain; only readiness flips).
+            - `db_unreachable` — the database `SELECT 1` failed. The underlying
+              error is logged, not returned.
 
 
-            Not an `enum`, and this one is expected to grow: any future
-            precondition that can fail *known-ly* rather than by exception adds
-            a value here. Treat an unrecognised `reason` as "not ready, for a
-            reason this client need not understand".
-        error:
+            Not an `enum`, and this one is expected to grow. Treat an
+            unrecognised `reason` as "not ready, for a reason this client need
+            not understand" — that is what made adding `db_unreachable` a
+            non-breaking extension.
+
+    HealthFailure:
+      description: >-
+        The `503` body of `GET /api/health`. Like `ReadinessFailure`, deliberately
+        **not** composed from `Error` and deliberately carrying no `code`: it is a
+        probe response read by an orchestrator, not an API error handed to a client
+        that would branch on a machine code.
+
+
+        Exactly one condition produces it — the database ping failed — so a `503`
+        here means "process up, database unreachable". It is *not* a drain signal:
+        this route never consults the shutdown flag that flips `/api/readyz`, so
+        liveness keeps answering `200` for as long as the process is alive and the
+        database is reachable. Note that this repo points its platform healthcheck
+        at `/api/health` (`railway.json`), so a sustained `503` here is what fails
+        a deploy's healthcheck; the drain case belongs to `/api/readyz` alone.
+
+
+        The `200` body is these same four fields with `ok: true` and `db: ok` — one
+        object literal, built before the status is chosen — so a probe may key off
+        `ok` (or the status) alone and ignore the rest. The `200` is not declared
+        separately for the same reason `/api/readyz`'s is not: the schema
+        requirement this file holds itself to is about error responses.
+      type: object
+      required: [ok, service, aid, db]
+      properties:
+        ok:
+          type: boolean
+          const: false
+          description: Always `false` on a `503`, and always `true` on the `200`.
+        service:
           type: string
+          const: aitp-control-plane
           description: >-
-            The exception message from the readiness check that threw — today
-            the database `SELECT 1`. Human-facing diagnostic text only; it has
-            no stable wording and must not be parsed.
+            Constant service identifier, so a shared or proxied probe path makes it
+            obvious which service answered.
+        aid:
+          type: string
+          example: "aid:pubkey:z:abc..."
+          description: >-
+            The control plane's own AID, read from its cached manifest. Present on
+            the `503` too: it comes from process-local identity rather than from a
+            query, so a database outage does not remove it. (This is also the one
+            probe that touches CP identity at all — `/api/readyz` does not.)
+        db:
+          type: string
+          const: error
+          description: >-
+            Always `error` on a `503` and `ok` on the `200`. The database ping is
+            the only check this probe makes, which is why it is the only field that
+            can disagree with `ok`.
 
     Agent:
       type: object
@@ -503,6 +553,29 @@ paths:
       security: []
       responses:
         "200": { description: OK }
+        "503":
+          description: >-
+            The database ping failed. The process itself is up — that is what this
+            probe reports — so this is "up, but cannot serve anything that needs the
+            database", not a crashed instance.
+
+
+            The body is **not** the shared `Error` shape and carries no `code` —
+            see `HealthFailure` for why, and for the `200`'s shape, which is the
+            same four fields.
+
+
+            Undeclared here until #107, which is a gap worth naming: an operator
+            configuring alerts from this file alone would have had no way to know
+            that a non-`200` from the liveness probe is a documented, classified
+            answer with a readable body rather than an unhandled fault.
+
+
+            Unlike `/api/readyz`, this route does not consult the shutdown flag, so
+            a drain never produces a `503` here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthFailure" }
 
   /api/readyz:
     get:
@@ -515,9 +588,10 @@ paths:
           description: >-
             Not ready, for one of two reasons: a `SIGTERM` has been received and
             this instance is draining itself out of rotation
-            (`reason: shutting_down`), or the database ping failed (`error`
-            carries the exception message). Exactly one of those two fields is
-            present.
+            (`reason: shutting_down`), or the database ping failed
+            (`reason: db_unreachable`). `reason` is present on every `503`; the
+            database's own error message is logged server-side and never
+            returned.
 
 
             The body is **not** the shared `Error` shape and carries no `code` —
@@ -539,7 +613,14 @@ paths:
       security: []
       responses:
         "200":
-          description: Prometheus text format
+          description: >-
+            Prometheus text format. Also the response when the database is
+            unreachable: the route does not 503. It answers `200` with the
+            process-local series intact, `aitp_control_plane_db_up 0`, and the
+            fixed comment `# DB unavailable: cause logged server-side,
+            deliberately not published here`. The database error message is
+            logged, never included in the body. Alert on `db_up`, not on a
+            non-200.
           content:
             text/plain: { schema: { type: string } }
 
@@ -559,7 +640,26 @@ paths:
       security: []
       responses:
         "200":
-          description: Signed RevocationListEnvelope JSON
+          description: >-
+            Signed RevocationListEnvelope JSON, always backed by a successful
+            database read (or, only with `REVOCATION_FAIL_MODE=serve_stale`, the
+            last such list re-served byte-for-byte while younger than
+            `REVOCATION_MAX_STALENESS_SECS`).
+        "503":
+          description: >-
+            `code` is `REVOCATION_UNAVAILABLE`: the database read failed and
+            policy forbids serving anything else. The CP **never** answers a
+            failed read with a signed empty list, because that would assert
+            "nothing is revoked". A relying party must treat this as "revocation
+            status unknown", not as "not revoked". Carries `Cache-Control:
+            no-store` and `Retry-After: 30`; the body is fixed and carries no
+            database detail.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/enroll:
     post:
@@ -765,7 +865,44 @@ paths:
       tags: [registry]
       summary: Deregister an agent (admin)
       responses:
-        "204": { description: Deregistered }
+        "200":
+          description: >-
+            Deregistered — a `200` **with a body**, not a `204`. This file said
+            `204` until #107; the route has always answered
+            `{"aid": "…", "status": "deregistered"}`, and a unit test pins both the
+            status and that body, so the spec was corrected to the route rather
+            than the reverse.
+
+
+            The body is not redundant here the way a deleted-resource confirmation
+            would be: deregistration is a status flip on the registry row, not a
+            row deletion, and `status` reports the state the row is now in.
+
+
+            Two of this API's four DELETEs are genuinely `204` with no body
+            (`/api/trust-anchors/{id}` and `/api/pinned-keys`) and two answer `200`
+            with a small confirmation body (this one and `/api/webhooks/{id}`).
+            The split is a real property of the routes, not a documentation
+            artefact — `docs/api.md` draws the same line — so a client cannot
+            assume one shape for "DELETE on this API".
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [aid, status]
+                properties:
+                  aid:
+                    type: string
+                    description: >-
+                      The AID that was deregistered — the `{aid}` path segment,
+                      percent-decoded.
+                  status:
+                    type: string
+                    const: deregistered
+                    description: >-
+                      The row's status after the call. Always this value on a
+                      `200`; the registry's other statuses (`active`, `expired`)
+                      are not reachable through this route.
         "404":
           description: >-
             No registry row with this AID, so nothing was deregistered. `code` is
@@ -1022,16 +1159,17 @@ paths:
   /api/webhooks/{id}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-    get:
-      tags: [webhooks]
-      summary: Fetch one subscription
-      responses:
-        "200": { description: OK }
-        "404":
-          description: No webhook subscription with this id. `code` is `NOT_FOUND`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+    # There is deliberately no `get` here. `src/app/api/webhooks/[id]/route.ts`
+    # exports only PATCH and DELETE, so a read-one answers 405. This file declared
+    # one anyway — a `200` with no schema at all, plus a `404` — until #107. No
+    # handler was ever removed: that route file has exported exactly PATCH and
+    # DELETE in every commit of its history, while `docs/api.md`'s webhook table
+    # listed only the routes that exist.
+    #
+    # Adding one is a feature, not a doc fix, so it does not belong here until the
+    # route exists: `GET /api/webhooks` is the read surface today, and the row
+    # carries a `secret` that the collection response deliberately does not
+    # project, so a single-row read has to decide what it exposes first.
     patch:
       tags: [webhooks]
       summary: Update a subscription
@@ -1051,7 +1189,39 @@ paths:
       tags: [webhooks]
       summary: Delete a subscription
       responses:
-        "204": { description: Deleted }
+        "200":
+          description: >-
+            Deleted — a `200` **with a body**, not a `204`. This file said `204`
+            until #107; the route has always answered
+            `{"id": "…", "deleted": true}`, and a unit test pins both the status
+            and that body. A `204` would be the more conventional answer for a
+            real row deletion, which this is — but the body is the shipped
+            contract and a client may be reading it, so the spec was corrected to
+            the route rather than the route changed to the spec.
+
+
+            Two of this API's four DELETEs are genuinely `204` with no body
+            (`/api/trust-anchors/{id}` and `/api/pinned-keys`) and two answer `200`
+            with a small confirmation body (this one and
+            `/api/registry/agents/{aid}`). The split is a real property of the
+            routes, not a documentation artefact — `docs/api.md` draws the same
+            line — so a client cannot assume one shape for "DELETE on this API".
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, deleted]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                    description: The `{id}` from the path, echoed back.
+                  deleted:
+                    type: boolean
+                    const: true
+                    description: >-
+                      Always `true` on a `200`. A subscription that was not there
+                      is a `404`, not a `200` with `false`.
         "404":
           description: >-
             No webhook subscription with this id, so nothing was deleted. `code`
@@ -1278,14 +1448,64 @@ paths:
                   type: string
                   description: Ed25519 public key, 43-character base64url
                   pattern: ^[A-Za-z0-9_-]{43}$
-                label: { type: string }
-                expiresAt: { type: string, format: date-time }
+                label:
+                  type: string
+                  maxLength: 128
+                  description: >-
+                    Free-form operator note. `maxLength` counts **characters**, as
+                    the `varchar(128)` column does — 65 astral characters are 130
+                    UTF-16 units but still 65 characters and are accepted. Must not
+                    contain a NUL (U+0000), the one code point the column cannot
+                    store; that is `400 BODY_INVALID`, and is not expressible in
+                    JSON Schema, hence the prose. Other control characters
+                    (newline, tab) are fine.
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Optional. Omitted or `null` means the pin never expires.
+                    Advisory: the control plane never sweeps `pinned_keys`, so
+                    honouring this is the reading agent's job. Must fall between
+                    `0001-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`, or
+                    `400 BODY_INVALID` — outside that window the value is not a
+                    writable `timestamp with time zone`, and Postgres has no year
+                    zero, which is why the floor is year 0001 rather than where the
+                    four-digit-year serialization ends. A past instant **is**
+                    allowed: it is how a pin is retired without deleting the row.
+                    The bound applies to the UTC instant, not to the digits sent,
+                    so `0001-01-01T00:00:00+14:00` is `0000-12-31T10:00Z` and is
+                    rejected. RFC 3339 `date-time` already forbids the
+                    expanded-year forms (`+010000-…`), so a spec-validating client
+                    is constrained before it reaches the server.
       responses:
         "201":
           description: Upserted
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PinnedKey" }
+        "400":
+          description: >-
+            `code` is always `BODY_INVALID`, except `IDEMPOTENCY_KEY_INVALID` when
+            an `Idempotency-Key` header is present but empty, over 255 characters,
+            or contains control characters — that one comes from the idempotency
+            layer and is common to every endpoint accepting the header, not
+            specific to this route. `BODY_INVALID` covers: body not JSON; `aid`
+            missing or empty; `pubkey` not 43-character base64url; `label` over 128
+            characters or containing a NUL (U+0000); `expiresAt` unparseable or
+            outside `0001-01-01T00:00:00.000Z` .. `9999-12-31T23:59:59.999Z`. See
+            the request body for the last two.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            An internal fault — in practice a database one, since the
+            caller-caused failures above are all decided before any SQL runs. The
+            body is whatever the framework renders and is **not** the shared
+            `Error` shape, which is why no schema is declared here: this route has
+            no catch around its insert, so a database error propagates rather than
+            being answered with, and its message (which names tables, columns and
+            types) never reaches the client.
     delete:
       tags: [trust]
       summary: Delete a pinned key

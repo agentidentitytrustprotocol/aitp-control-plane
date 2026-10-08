@@ -1,7 +1,8 @@
 import pino, { type Logger } from 'pino';
+import { isProductionNodeEnv, readNodeEnv } from './node-env';
 
-const isProduction = process.env.NODE_ENV === 'production';
-const isTest = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID;
+const isProduction = isProductionNodeEnv();
+const isTest = readNodeEnv() === 'test' || process.env.JEST_WORKER_ID;
 const level = process.env.LOG_LEVEL ?? (isProduction ? 'info' : 'debug');
 
 function buildLogger(): Logger {

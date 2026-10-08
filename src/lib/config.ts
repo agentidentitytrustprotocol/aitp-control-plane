@@ -1,3 +1,5 @@
+import { isProductionNodeEnv } from './node-env';
+
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
   if (!v) return def;
@@ -88,7 +90,7 @@ function readHeartbeatMs(): number {
 }
 
 export const config = {
-  isProduction: process.env.NODE_ENV === 'production',
+  isProduction: isProductionNodeEnv(),
   port: readNumber('PORT', 4000),
   cpBaseUrl: process.env.CP_BASE_URL ?? 'http://localhost:4000',
   cpAidSeedHex: process.env.CP_AID_SEED_HEX ?? '',
@@ -116,6 +118,28 @@ export const config = {
   // becomes an env var, not a deploy. Clamped — see readHeartbeatMs above.
   sseHeartbeatMs: readHeartbeatMs(),
   revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
+  // What the revocation producer does when the DB read fails. A signed list
+  // asserts "these and ONLY these JTIs are revoked", so the CP never signs a
+  // fresh list from a failed read (that would assert "nothing is revoked").
+  //   fail_closed (default) -- answer 503 REVOCATION_UNAVAILABLE.
+  //   serve_stale           -- re-serve the last list that WAS backed by a
+  //                            successful read, but only while younger than
+  //                            REVOCATION_MAX_STALENESS_SECS; else 503.
+  // Anything unrecognised is fail_closed: a typo must never loosen the policy.
+  revocationFailMode: (
+    (process.env.REVOCATION_FAIL_MODE ?? '').trim().toLowerCase() ===
+    'serve_stale'
+      ? 'serve_stale'
+      : 'fail_closed'
+  ) as 'fail_closed' | 'serve_stale',
+  // Max age of a served-stale snapshot, measured from the successful read that
+  // backed it. Only meaningful in serve_stale mode. The producer additionally
+  // clamps it to REVOCATION_LIST_TTL_SECS so it never serves an envelope whose
+  // signed `expires_at` has already passed.
+  revocationMaxStalenessSecs: Math.max(
+    0,
+    readNumber('REVOCATION_MAX_STALENESS_SECS', 300),
+  ),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
   // Optional allowlist of webhook target hosts. Empty = allow any public
@@ -144,6 +168,20 @@ export const config = {
   trustedProxyHops: readNumber('TRUSTED_PROXY_HOPS', 0),
   rateLimitEnabled:
     (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
+  // ── Observed-artifact verification ───────────────────────────────────
+  // The CP projects TCT/delegation telemetry that agents REPORT. When a report
+  // carries the full signed token (the v0.2 `{ token, claims }` wrapper), the CP
+  // can verify it before trusting the claims:
+  //   off    — never verify; project whatever is reported (default; the
+  //            historical behaviour).
+  //   warn   — verify when a token is present; log a failure but still project.
+  //   strict — project only reports whose token verifies; drop the rest
+  //            (including flat/claims-only reports with no token).
+  // Unknown values fall back to `off`.
+  observedArtifactVerification: ((): 'off' | 'warn' | 'strict' => {
+    const v = (process.env.OBSERVED_ARTIFACT_VERIFICATION ?? 'off').trim().toLowerCase();
+    return v === 'warn' || v === 'strict' ? v : 'off';
+  })(),
   // ── Data retention ───────────────────────────────────────────────────
   // Periodic sweep deletes old rows so storage stays bounded. The sweep
   // uses a Postgres advisory lock so multiple CP instances do not

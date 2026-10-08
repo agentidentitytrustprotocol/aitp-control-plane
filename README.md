@@ -66,6 +66,8 @@ rate-limit, retention, and telemetry subsystems behave.
 | `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret (**≥ 32 chars**) for minting/verifying one-time enrollment tokens (callers never present it). **Checked at boot: with `NODE_ENV=production` an unset or too-short value makes the process print one fatal line and exit 1** — so a bad value fails the deploy instead of deploying green. Outside production it warns once at boot and starts, and both `POST /api/registry/enroll` and `POST /api/registry/agents` then return 503 for every request. Deliberately not checked by `/api/readyz` — see [operations.md](docs/operations.md#health-readiness--graceful-shutdown). |
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Defaults to `http://localhost:3000` if unset (including in prod) — set it to the UI plane origin. |
 | `REVOCATION_LIST_TTL_SECS` | no | `3600` | TTL on the signed revocation snapshot |
+| `REVOCATION_FAIL_MODE` | no | `fail_closed` | What the revocation list does when the DB read fails. `fail_closed` answers `503 REVOCATION_UNAVAILABLE`; `serve_stale` re-serves the last successfully-read list for up to `REVOCATION_MAX_STALENESS_SECS`, then `503`. It never signs an empty list. Unrecognised values mean `fail_closed`. |
+| `REVOCATION_MAX_STALENESS_SECS` | no | `300` | `serve_stale` only: max age of the re-served list, clamped to `REVOCATION_LIST_TTL_SECS`. |
 | `LOG_LEVEL` | no | `info` | Pino log level: trace / debug / info / warn / error / fatal |
 
 **Webhooks & SSE**
@@ -91,6 +93,12 @@ rate-limit, retention, and telemetry subsystems behave.
 | `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min limits accumulate |
 | `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
 | `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |
+
+**Observed-artifact verification**
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `OBSERVED_ARTIFACT_VERIFICATION` | no | `off` | `off` \| `warn` \| `strict`. Verify the signed token in reported TCT/delegation telemetry before projecting it. `warn` logs failures; `strict` drops anything unverified (including claims-only reports). Unknown values fall back to `off`. See [operations.md](docs/operations.md#observed-artifact-verification). |
 
 **Data retention** (periodic sweep, multi-instance safe — set any TTL to `0` to keep that table forever)
 
