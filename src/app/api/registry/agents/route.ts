@@ -191,11 +191,11 @@ export async function POST(req: NextRequest) {
 
     let tokenPayload;
     try {
-      tokenPayload = service.validateToken(token, manifest.aid);
+      tokenPayload = service.validateToken(token, manifest.aid, body);
     } catch (err) {
       // `err.message` is echoed on purpose: every message reachable here is
       // deliberate caller-facing text about a credential the caller supplied
-      // and can fix (wrong scope, expired, sub/aid mismatch, missing jti,
+      // and can fix (wrong scope, expired, sub/aid mismatch, missing jti, manifest binding,
       // malformed, bad signature, unparseable payload). Redacting them would
       // remove the caller's only signal about why their token failed, to solve
       // a leak that — since the hoist above — no longer reaches this path.

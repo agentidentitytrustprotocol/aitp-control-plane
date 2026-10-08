@@ -26,6 +26,12 @@ import { db } from '../db';
 import { delegations, issuedTcts } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
 import { logger } from '../logger';
+import { config } from '../config';
+import {
+  decideProjection,
+  verifyObservedTct,
+  verifyObservedDelegation,
+} from './verify-observed';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -280,6 +286,27 @@ export function parseDelegation(
   };
 }
 
+/** Apply OBSERVED_ARTIFACT_VERIFICATION to one parsed report. Returns whether
+ * to project it. `off` short-circuits before any verification work. */
+function gateObserved(
+  kind: 'tct' | 'delegation',
+  jti: string,
+  verify: () => ReturnType<typeof verifyObservedTct>,
+): boolean {
+  const mode = config.observedArtifactVerification;
+  if (mode === 'off') return true;
+  const decision = decideProjection(mode, verify());
+  if (decision.error) {
+    logger.warn(
+      { kind, jti, mode, error: decision.error },
+      decision.project
+        ? 'tct-monitor: observed artifact failed verification (projected, warn mode)'
+        : 'tct-monitor: dropping unverified observed artifact (strict mode)',
+    );
+  }
+  return decision.project;
+}
+
 class TctMonitorService {
   async onEvent(event: AuditEventRecord): Promise<void> {
     try {
@@ -322,6 +349,7 @@ class TctMonitorService {
     for (const raw of tctList) {
       const tct = parseTct(raw, event.ts);
       if (!tct) continue;
+      if (!gateObserved('tct', tct.jti, () => verifyObservedTct(raw, tct))) continue;
 
       await db
         .insert(issuedTcts)
@@ -367,6 +395,15 @@ class TctMonitorService {
   private async recordDelegation(event: AuditEventRecord): Promise<void> {
     const delegation = parseDelegation(event.payload, event.ts);
     if (!delegation) return;
+    if (
+      !gateObserved(
+        'delegation',
+        delegation.jti,
+        () => verifyObservedDelegation(event.payload),
+      )
+    ) {
+      return;
+    }
 
     await db.insert(delegations).values(delegation).onConflictDoNothing();
   }

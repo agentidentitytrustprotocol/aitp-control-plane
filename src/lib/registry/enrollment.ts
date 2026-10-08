@@ -1,8 +1,8 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { assertEnrollmentSecretUsable } from './enrollment-config';
-import { ManifestRejectedError } from './verify-error';
+import { ManifestRejectedError, markSdkVerifyFailure } from './verify-error';
 
 // Same 5-min window as src/app/api/registry/agents/route.ts, so a caller does
 // not enroll a manifest that the immediately-following register call would
@@ -35,6 +35,15 @@ interface EnrollmentPayload {
   iat: number;
   exp: number;
   jti: string;
+  /** SHA-256 (hex) of the exact ManifestEnvelope bytes verified at enrollment.
+   * Registration recomputes it over its own body and requires a match, so a
+   * token cannot be replayed against a different manifest for the same aid. */
+  msh: string;
+}
+
+/** SHA-256 hex digest of the exact ManifestEnvelope body bytes (UTF-8). */
+export function manifestDigest(manifestEnvelopeJson: string): string {
+  return createHash('sha256').update(manifestEnvelopeJson, 'utf8').digest('hex');
 }
 
 export interface EnrollmentResult {
@@ -69,7 +78,34 @@ export class EnrollmentService {
    * (clearer error than the same rejection at register-time after a
    * round-trip). */
   verifyAndIssueToken(manifestEnvelopeJson: string): EnrollmentResult {
-    verifyManifestJson(manifestEnvelopeJson);
+    // The try is around this ONE call, and the mark is applied here, because
+    // this is the only frame that can honestly say "the SDK's verifier is what
+    // rejected this manifest". Both halves of issue #102's fix are that narrow:
+    //
+    //  - Provenance is ASSERTED, not sniffed. `sdkVerifyCode` answers only for a
+    //    value marked here, so nothing else that merely happens to carry a
+    //    string `.code` can be published to a caller as a `verifyCode`.
+    //  - The region that can produce a manifest verdict is narrowed to exactly
+    //    this call. Everything below it — the two `ManifestRejectedError`
+    //    guards, and `randomUUID`/`Buffer.from`/`createHmac` in the minting tail
+    //    — is outside that region by construction, not because the route
+    //    remembers to keep its statements in a careful order. That was the
+    //    other fix issue #102 proposed, and doing it here rather than by
+    //    splitting this method gets it without changing a public API.
+    //
+    // The error propagates UNTOUCHED: the mark is an entry in a WeakSet, not a
+    // property, so `enrollment.test.ts`'s forward-compat guard still reads
+    // `.code` off the object the SDK actually threw, and the route still echoes
+    // the SDK's own message. Wrapping would have cost both.
+    //
+    // A future second call site of `verifyManifestJson` must mark too; see
+    // `markSdkVerifyFailure` for what forgetting costs and why it is loud.
+    try {
+      verifyManifestJson(manifestEnvelopeJson);
+    } catch (err) {
+      markSdkVerifyFailure(err);
+      throw err;
+    }
 
     const envelope = JSON.parse(manifestEnvelopeJson) as {
       manifest: { aid: string; expires_at?: number };
@@ -117,15 +153,24 @@ export class EnrollmentService {
       iat: now,
       exp: now + TOKEN_LIFETIME_SECS,
       jti: randomUUID(),
+      msh: manifestDigest(manifestEnvelopeJson),
     };
     return { token: this.sign(payload), expiresIn: TOKEN_LIFETIME_SECS, aid };
   }
 
-  /** Verify the token's signature, scope, expiry, and subject binding.
+  /** Verify the token's signature, scope, expiry, subject binding, and that it
+   * is bound to `manifestEnvelopeJson` (the exact request-body bytes) via the
+   * `msh` claim. A token without a string `msh` (minted before this binding
+   * existed) is rejected, not waved through: there is no safe way to tell a
+   * legitimately old token from a stripped one, and they live 5 minutes.
    * Returns the validated payload so the caller can atomically consume
    * the `jti` (one-time-token enforcement — see `consumeEnrollmentJti`).
    * Throws on any failure. */
-  validateToken(token: string, expectedAid: string): EnrollmentPayload {
+  validateToken(
+    token: string,
+    expectedAid: string,
+    manifestEnvelopeJson: string,
+  ): EnrollmentPayload {
     const payload = this.verify(token);
     if (payload.scope !== 'register') {
       throw new Error('token scope must be register');
@@ -140,6 +185,16 @@ export class EnrollmentService {
     }
     if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
       throw new Error('enrollment token missing jti');
+    }
+    if (typeof payload.msh !== 'string' || payload.msh.length === 0) {
+      throw new Error(
+        'enrollment token is not bound to a manifest — re-enroll to get a new token',
+      );
+    }
+    if (payload.msh !== manifestDigest(manifestEnvelopeJson)) {
+      throw new Error(
+        'enrollment token was issued for a different manifest than the one submitted',
+      );
     }
     return payload;
   }

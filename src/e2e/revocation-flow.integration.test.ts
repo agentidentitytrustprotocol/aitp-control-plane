@@ -160,6 +160,8 @@ const jti2 = randomUUID();
 // signed list republishes, rather than against a mock.
 const boundaryMinJti = randomUUID();
 const boundaryMaxJti = randomUUID();
+// Rows written DIRECTLY to the table, bypassing the route's epoch floor (#113).
+const legacyLowYearJtis = [randomUUID(), randomUUID(), randomUUID()];
 const parentTctJti = randomUUID();
 const childDelegationJti = randomUUID();
 const grandchildDelegationJti = randomUUID();
@@ -178,7 +180,7 @@ const secondIdentityAid = AitpAgent.fromSeed(Buffer.alloc(32, 0x11)).aid;
 
 describe('integration: revocation entry → signed well-known list → delegation cascade', () => {
   afterAll(async () => {
-    const allJtis = [jti1, jti2, parentTctJti, boundaryMinJti, boundaryMaxJti];
+    const allJtis = [jti1, jti2, parentTctJti, boundaryMinJti, boundaryMaxJti, ...legacyLowYearJtis];
     await db
       .delete(revocationEntries)
       .where(
@@ -392,6 +394,33 @@ describe('integration: revocation entry → signed well-known list → delegatio
       const entry = env.revocation_list.entries.find((e) => e.jti === jti);
       expect(entry).toBeDefined();
       expect(entry!.revoked_at).toBe(Math.floor(new Date(revokedAt).getTime() / 1000));
+    }
+    expect(verifyEnvelopeSignature(env)).toBe(true);
+  });
+
+  // #113: the route's floor only stops NEW rows. Rows already stored (written
+  // before the floor existed) must still publish correctly, so insert pre-1970
+  // and low-year rows straight into the table and check the signed epoch.
+  // Years 0001/0002/0099 are the ones `new Date(driverText)` mis-read.
+  it('publishes low-year rows inserted directly into the table with the correct epoch', async () => {
+    const cases = [
+      [legacyLowYearJtis[0], '0001-01-01T00:00:00Z', -62135596800],
+      [legacyLowYearJtis[1], '0002-01-01T00:00:00Z', -62104060800],
+      [legacyLowYearJtis[2], '0099-01-01T00:00:00Z', -59042995200],
+    ] as const;
+    for (const [jti, ts] of cases) {
+      await db.execute(
+        sql`insert into revocation_entries (jti, revoked_at, reason) values (${jti}, ${ts}::timestamptz, 'legacy low year')`,
+      );
+    }
+    // Invalidate the producer's 60s cache so the direct inserts are read.
+    const { revocationProducer } = await import('@/lib/revocation/producer');
+    revocationProducer.invalidate();
+    const env = await fetchList();
+    for (const [jti, , epoch] of cases) {
+      const entry = env.revocation_list.entries.find((e) => e.jti === jti);
+      expect(entry).toBeDefined();
+      expect(entry!.revoked_at).toBe(epoch);
     }
     expect(verifyEnvelopeSignature(env)).toBe(true);
   });
