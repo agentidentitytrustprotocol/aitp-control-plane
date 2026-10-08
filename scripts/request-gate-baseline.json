@@ -29,6 +29,7 @@
     "/api/tcts": "gated",
     "/api/trust-anchors": "gated",
     "/api/trust-anchors/[id]": "gated",
+    "/api/trust-anchors/[id]/jwks": "gated",
     "/api/webhooks": "gated",
     "/api/webhooks/[id]": "gated",
     "/api/webhooks/[id]/circuit-breaker": "gated",

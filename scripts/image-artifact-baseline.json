@@ -332,19 +332,19 @@
       "sha256": "ce657d3d5d9e38ffaa24ee039e75a98d47c18a940dfbe3757b0197cb0648f555"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__0urby1o._.js",
-      "bytes": 2447,
-      "sha256": "46fc7731da2e88b12055d8ebbbf9d59110d94b202ce754bfd2058527b7056b03"
+      "path": "instrumentation/chunks/[root-of-the-server]__0oqnzw5._.js",
+      "bytes": 2588,
+      "sha256": "8b6783e6af05ec53346725dbbb401d2e1a3a51938eaca84f88ce40bb04e9c471"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__0w8ssgc._.js",
+      "bytes": 2476,
+      "sha256": "806c07cdb4e62159cc91390c0cab814fb5f27bcd91b1489976711a6e88824988"
     },
     {
       "path": "instrumentation/chunks/[root-of-the-server]__1isajwa._.js",
       "bytes": 5329,
       "sha256": "f3c2df48bad3faa305add462001a46d07515b178cebc12e8023347e0978be11c"
-    },
-    {
-      "path": "instrumentation/chunks/[root-of-the-server]__1oz76yl._.js",
-      "bytes": 2588,
-      "sha256": "8f6bdf31ce7b3b7101958242515f4bad9a20c6d5414f087d0b7d68624d3c78da"
     },
     {
       "path": "instrumentation/chunks/[turbopack]_runtime.js",
@@ -374,7 +374,7 @@
     {
       "path": "instrumentation/instrumentation.js",
       "bytes": 179,
-      "sha256": "1020a4926831c3d7009f4f2b02c7fec24557a9c267aed1bbeffb8807655fca93"
+      "sha256": "f33f5be0bba800e2cdd2553fc4226413d81dd86a08387fb4e72846421a884f7e"
     },
     {
       "path": "middleware/chunks/[externals]__06hzl-k._.js",

@@ -81,17 +81,29 @@ export async function register(): Promise<void> {
   );
   enforceEnrollmentSecretAtBoot();
 
-  // Background JWKS cache refresh for OIDC trust anchors (no-op when
-  // JWKS_REFRESH_ENABLED=false; idempotent; its interval is unref'd).
-  const { startJwksRefresher } = await import('./lib/trust-anchors/jwks-refresher');
-  startJwksRefresher();
-
   // Shutdown hooks must always be wired — even with OTel off — so
   // readiness drains correctly on SIGTERM.
   const { registerShutdownHooks } = await import('./lib/shutdown');
 
+  // Background JWKS cache refresh for OIDC trust anchors (no-op when
+  // JWKS_REFRESH_ENABLED=false; idempotent; its interval is unref'd).
+  //
+  // It must start AFTER the OTel SDK, never before: the refresher imports the
+  // database module, which loads `pg`, and OTel patches `pg.Client.prototype.query`
+  // through a require hook that only exists once `sdk.start()` has run. A `pg`
+  // loaded earlier is never patched, so with OTEL_ENABLED=true every database
+  // query would silently lose its span. The shipped-image harness pins exactly
+  // this (check 21), and `src/instrumentation.test.ts` pins the order.
+  const startBackgroundJobs = async () => {
+    const { startJwksRefresher } = await import(
+      './lib/trust-anchors/jwks-refresher'
+    );
+    startJwksRefresher();
+  };
+
   if (process.env.OTEL_ENABLED !== 'true') {
     registerShutdownHooks();
+    await startBackgroundJobs();
     return;
   }
 
@@ -132,6 +144,7 @@ export async function register(): Promise<void> {
   // The OTel SDK flush runs as a shutdown hook so trace spans for the
   // request that triggered the signal still make it to the collector.
   registerShutdownHooks([() => sdk.shutdown()]);
+  await startBackgroundJobs();
 }
 
 /**
