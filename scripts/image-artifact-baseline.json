@@ -46,6 +46,7 @@
     "/api/tcts",
     "/api/trust-anchors",
     "/api/trust-anchors/[id]",
+    "/api/trust-anchors/[id]/jwks",
     "/api/webhooks",
     "/api/webhooks/[id]",
     "/api/webhooks/[id]/circuit-breaker",
@@ -53,7 +54,7 @@
     "/api/well-known/aitp-manifest",
     "/api/well-known/aitp-revocation-list"
   ],
-  "apiRouteCount": 30,
+  "apiRouteCount": 31,
   "rewrites": [
     {
       "phase": "afterFiles",
@@ -122,6 +123,14 @@
       "namedRegex": "^/api/trust\\-anchors/(?<nxtPid>[^/]+?)(?:/)?$",
       "page": "/api/trust-anchors/[id]",
       "regex": "^/api/trust\\-anchors/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      }
+    },
+    {
+      "namedRegex": "^/api/trust\\-anchors/(?<nxtPid>[^/]+?)/jwks(?:/)?$",
+      "page": "/api/trust-anchors/[id]/jwks",
+      "regex": "^/api/trust\\-anchors/([^/]+?)/jwks(?:/)?$",
       "routeKeys": {
         "nxtPid": "nxtPid"
       }
@@ -318,19 +327,24 @@
       "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__02dw6h7._.js",
-      "bytes": 2251,
-      "sha256": "a31626b703e304f9b23b8c7354b896094fbc2148001af89c258ee5acdbaa9f05"
-    },
-    {
       "path": "instrumentation/chunks/[root-of-the-server]__05orm08._.js",
       "bytes": 2705,
       "sha256": "ce657d3d5d9e38ffaa24ee039e75a98d47c18a940dfbe3757b0197cb0648f555"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__0krknrx._.js",
+      "path": "instrumentation/chunks/[root-of-the-server]__0oqnzw5._.js",
       "bytes": 2588,
-      "sha256": "60422987211635f7ce607a8644c9c4655ef68111f89624ffcdb1bc0c2e9bbf30"
+      "sha256": "8b6783e6af05ec53346725dbbb401d2e1a3a51938eaca84f88ce40bb04e9c471"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__0w8ssgc._.js",
+      "bytes": 2476,
+      "sha256": "806c07cdb4e62159cc91390c0cab814fb5f27bcd91b1489976711a6e88824988"
+    },
+    {
+      "path": "instrumentation/chunks/[root-of-the-server]__1isajwa._.js",
+      "bytes": 5329,
+      "sha256": "f3c2df48bad3faa305add462001a46d07515b178cebc12e8023347e0978be11c"
     },
     {
       "path": "instrumentation/chunks/[turbopack]_runtime.js",
@@ -338,14 +352,19 @@
       "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
     },
     {
+      "path": "instrumentation/chunks/_0jazx56._.js",
+      "bytes": 109037,
+      "sha256": "09cc5eb66e166993600eb5b9a15d72185fb16cd774dba2cb91675a19b6026528"
+    },
+    {
       "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7.js",
       "bytes": 10159,
       "sha256": "ad62a0d102f86f9013af971fb61c9511e1bc6f28b5f2c8b8573945fa004bc934"
     },
     {
-      "path": "instrumentation/chunks/src_lib_0hxtwyh._.js",
-      "bytes": 5050,
-      "sha256": "65b98bd08f133b3865eeeb0ca8047c3b9892f62bda0dfc6d6f6a14e456957edb"
+      "path": "instrumentation/chunks/src_lib_12e0lj-._.js",
+      "bytes": 5358,
+      "sha256": "ef46729c209007828c70af9640566b2c449c473758e081ec67646f8644aa8bb5"
     },
     {
       "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdiv._.js",
@@ -355,7 +374,7 @@
     {
       "path": "instrumentation/instrumentation.js",
       "bytes": 179,
-      "sha256": "51d158e6054185810f158d19373eef87a508e9191d51543ecd0e2e0001056539"
+      "sha256": "f33f5be0bba800e2cdd2553fc4226413d81dd86a08387fb4e72846421a884f7e"
     },
     {
       "path": "middleware/chunks/[externals]__06hzl-k._.js",
@@ -364,8 +383,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
-      "bytes": 236508,
-      "sha256": "ea8f6505627dbfa2574da6a4702732e527a1893d1a8f72fe6850ed93e9505ef1"
+      "bytes": 236750,
+      "sha256": "b910e8eb6b3c625d9523da7f175f88e3cba5e20b4865d49c361733163df5574d"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -405,6 +424,6 @@
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
     "bytes": 2837,
-    "sha256": "5493e5d31b7ca8b1eb191bb8aa109de994cf6dacf3f2bf375c82cdc58153a2c2"
+    "sha256": "e96e4db710a8c4a714ee016a2a08d8a30d6c793c98e7063da138e78a4275fbe9"
   }
 }

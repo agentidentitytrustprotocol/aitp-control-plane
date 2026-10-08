@@ -47,6 +47,34 @@ jest.mock('./lib/shutdown', () => ({
   },
 }));
 
+// The OTel packages are mocked only to record WHEN the SDK starts: the order
+// against the JWKS refresher is the whole point of the OTel-on test below.
+jest.mock('@opentelemetry/sdk-node', () => ({
+  NodeSDK: class {
+    start() {
+      calls.push('sdk.start');
+    }
+    shutdown() {
+      return Promise.resolve();
+    }
+  },
+}));
+jest.mock('@opentelemetry/exporter-trace-otlp-http', () => ({
+  OTLPTraceExporter: class {},
+}));
+jest.mock('@opentelemetry/auto-instrumentations-node', () => ({
+  getNodeAutoInstrumentations: () => [],
+}));
+jest.mock('@opentelemetry/resources', () => ({
+  resourceFromAttributes: () => ({}),
+}));
+
+jest.mock('./lib/trust-anchors/jwks-refresher', () => ({
+  startJwksRefresher: () => {
+    calls.push('startJwksRefresher');
+  },
+}));
+
 const reportRequestErrorMock = jest.fn((..._args: unknown[]): unknown => undefined);
 jest.mock('./lib/request-error', () => ({
   reportRequestError: (...args: unknown[]) => reportRequestErrorMock(...args),
@@ -118,6 +146,24 @@ describe('register', () => {
       'warnOnUnrecognisedNodeEnv',
       'enforceEnrollmentSecretAtBoot',
       'registerShutdownHooks',
+      'startJwksRefresher',
+    ]);
+  });
+
+  it('starts the JWKS refresher AFTER the OTel SDK, so pg is still patched', async () => {
+    // The refresher imports the database module, which loads `pg`. OTel patches
+    // `pg` through a require hook that only exists once `sdk.start()` has run, so
+    // a refresher started first would leave every database query untraced.
+    // Check 21 of the shipped-image harness catches this in the built image;
+    // this pins the order where it is cheap to read.
+    mutableEnv.OTEL_ENABLED = 'true';
+    await register();
+    expect(calls).toEqual([
+      'warnOnUnrecognisedNodeEnv',
+      'enforceEnrollmentSecretAtBoot',
+      'sdk.start',
+      'registerShutdownHooks',
+      'startJwksRefresher',
     ]);
   });
 

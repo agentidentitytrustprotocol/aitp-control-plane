@@ -1398,6 +1398,47 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/trust-anchors/{id}/jwks:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [trust]
+      summary: CP-cached JWKS for a trust anchor
+      description: >-
+        For agents in OIDC mode that cannot reach the issuer. Populated by a
+        background refresher; `X-JWKS-Cached-At` carries the cache time.
+      responses:
+        "200":
+          description: The cached JWKS document.
+          headers:
+            X-JWKS-Cached-At: { schema: { type: string, format: date-time } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys: { type: array, items: { type: object } }
+        "400":
+          description: "`id` is not a UUID. `code` is `ID_INVALID`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No trust anchor with this id. `code` is `NOT_FOUND`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: >-
+            Nothing cached yet (`code` is `JWKS_NOT_CACHED`; body includes
+            `issuerUrl`). Retry after `Retry-After` seconds.
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/pinned-keys:
     get:
       tags: [trust]

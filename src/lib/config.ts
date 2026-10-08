@@ -168,6 +168,19 @@ export const config = {
   trustedProxyHops: readNumber('TRUSTED_PROXY_HOPS', 0),
   rateLimitEnabled:
     (process.env.RATE_LIMIT_ENABLED ?? 'true').toLowerCase() !== 'false',
+  // ── JWKS cache refresh ───────────────────────────────────────────────
+  // The CP caches each trust anchor's JWKS (`trust_anchors.jwks_cache`) so
+  // agents that cannot reach the OIDC issuer can fetch it from
+  // GET /api/trust-anchors/:id/jwks. A background job refreshes anchors whose
+  // cache is missing or older than JWKS_STALE_AFTER_MS. Set
+  // JWKS_REFRESH_ENABLED=false to disable it (the endpoint then serves only
+  // what is already cached).
+  jwksRefreshEnabled:
+    (process.env.JWKS_REFRESH_ENABLED ?? 'true').toLowerCase() !== 'false',
+  jwksRefreshIntervalMs: readNumber('JWKS_REFRESH_INTERVAL_MS', 15 * 60 * 1000),
+  jwksStaleAfterMs: readNumber('JWKS_STALE_AFTER_MS', 60 * 60 * 1000),
+  jwksFetchTimeoutMs: readNumber('JWKS_FETCH_TIMEOUT_MS', 10_000),
+
   // ── Observed-artifact verification ───────────────────────────────────
   // The CP projects TCT/delegation telemetry that agents REPORT. When a report
   // carries the full signed token (the v0.2 `{ token, claims }` wrapper), the CP

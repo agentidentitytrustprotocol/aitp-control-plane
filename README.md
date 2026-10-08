@@ -94,6 +94,15 @@ rate-limit, retention, and telemetry subsystems behave.
 | `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
 | `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |
 
+**Trust-anchor JWKS cache** (background refresh of `trust_anchors.jwks_cache`, served at `GET /api/trust-anchors/:id/jwks`)
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `JWKS_REFRESH_ENABLED` | no | `true` | Master switch for the refresher |
+| `JWKS_REFRESH_INTERVAL_MS` | no | `900000` | Pass cadence (15 min; floor 1 s) |
+| `JWKS_STALE_AFTER_MS` | no | `3600000` | An anchor is refreshed when its cache is missing or older than this |
+| `JWKS_FETCH_TIMEOUT_MS` | no | `10000` | Per-request timeout for discovery and JWKS fetches |
+
 **Observed-artifact verification**
 
 | Variable | Required | Default | Purpose |
