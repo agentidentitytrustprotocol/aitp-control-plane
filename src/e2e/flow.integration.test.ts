@@ -40,6 +40,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 
 import { POST as enrollPost } from '@/app/api/registry/enroll/route';
+import { getEnrollmentService, manifestDigest } from '@/lib/registry/enrollment';
 import {
   POST as registerPost,
   GET as listAgentsGet,
@@ -256,12 +257,6 @@ describe('integration: enroll → register → discover → event → revoke flo
     // (`ManifestRejectedError.cpCode` here, an inline literal there), so only
     // reading them off two real responses proves they agree.
     const shortLived = AitpAgent.generate();
-    const longManifest = shortLived.buildManifest({
-      displayName: 'e2e-cross-route',
-      handshakeEndpoint: 'http://e2e-cross.local/aitp',
-      offeredCaps: ['demo.echo'],
-      ttlSecs: 3600, // long enough to earn a token
-    });
     const shortManifest = shortLived.buildManifest({
       displayName: 'e2e-cross-route',
       handshakeEndpoint: 'http://e2e-cross.local/aitp',
@@ -279,19 +274,22 @@ describe('integration: enroll → register → discover → event → revoke flo
     expect(enrollRes.status).toBe(400);
     const enrollBody = (await enrollRes.json()) as { code: string; error: string };
 
-    // Register side: needs a valid token, which only the long manifest can
-    // earn — the same agent, so the token's `sub` still matches the short
-    // manifest's aid. That is what lets the register-time guard be reached at
-    // all, and it is exactly the round-trip the enroll-time guard exists to
-    // save a caller from.
-    const tokenRes = await enrollPost(
-      mkReq('http://localhost/api/registry/enroll', {
-        method: 'POST',
-        body: longManifest,
-      }),
-    );
-    expect(tokenRes.status).toBe(200);
-    const { token } = (await tokenRes.json()) as { token: string };
+    // Register side: enroll refuses the short manifest, so no real token is
+    // bound to it. Mint one the way enroll would have had it not refused (same
+    // aid, msh = digest of the short manifest's bytes) so the register-time
+    // guard can be reached at all — exactly the round-trip the enroll-time
+    // guard exists to save a caller from.
+    const now = Math.floor(Date.now() / 1000);
+    const token = (
+      getEnrollmentService() as unknown as { sign(p: object): string }
+    ).sign({
+      sub: shortLived.aid,
+      scope: 'register',
+      iat: now,
+      exp: now + 300,
+      jti: randomUUID(),
+      msh: manifestDigest(shortManifest),
+    });
 
     const registerRes = await registerPost(
       mkReq('http://localhost/api/registry/agents', {

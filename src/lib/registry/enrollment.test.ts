@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { AitpAgent } from 'aitp';
 import { EnrollmentService, getEnrollmentService } from './enrollment';
 import { EnrollmentConfigError } from './enrollment-config';
@@ -55,7 +56,7 @@ describe('EnrollmentService', () => {
     const { token, expiresIn, aid } = service.verifyAndIssueToken(manifest);
     expect(aid).toMatch(/^aid:pubkey:/);
     expect(expiresIn).toBe(300);
-    expect(() => service.validateToken(token, aid)).not.toThrow();
+    expect(() => service.validateToken(token, aid, manifest)).not.toThrow();
   });
 
   it('rejects an invalid manifest envelope', () => {
@@ -123,19 +124,48 @@ describe('EnrollmentService', () => {
       'a-different-secret-also-padded-to-min-length-bound',
     );
     const { token, aid } = service.verifyAndIssueToken(manifest);
-    expect(() => other.validateToken(token, aid)).toThrow(/signature/);
+    expect(() => other.validateToken(token, aid, manifest)).toThrow(/signature/);
   });
 
   it('rejects a token whose sub does not match the manifest aid', () => {
     const manifest = buildManifest();
     const { token } = service.verifyAndIssueToken(manifest);
     expect(() =>
-      service.validateToken(token, 'aid:pubkey:someone-else'),
+      service.validateToken(token, 'aid:pubkey:someone-else', manifest),
     ).toThrow(/does not match/);
   });
 
+  it('rejects a token presented with a different manifest (msh binding)', () => {
+    const { token, aid } = service.verifyAndIssueToken(buildManifest());
+    // A second, validly signed manifest (even for the same agent) must not
+    // ride on this token.
+    expect(() => service.validateToken(token, aid, buildManifest())).toThrow(
+      /different manifest/,
+    );
+    // Byte-exact: re-serialising the same envelope changes the digest.
+    const manifest = buildManifest();
+    const t2 = service.verifyAndIssueToken(manifest);
+    const reserialised = JSON.stringify(JSON.parse(manifest), null, 2);
+    expect(() => service.validateToken(t2.token, t2.aid, reserialised)).toThrow(
+      /different manifest/,
+    );
+  });
+
+  it('rejects a legacy token minted without the msh claim', () => {
+    const manifest = buildManifest();
+    const { aid } = service.verifyAndIssueToken(manifest);
+    const now = Math.floor(Date.now() / 1000);
+    const data = Buffer.from(
+      JSON.stringify({ sub: aid, scope: 'register', iat: now, exp: now + 300, jti: 'j-1' }),
+    ).toString('base64url');
+    const sig = createHmac('sha256', secret).update(data).digest('base64url');
+    expect(() => service.validateToken(`${data}.${sig}`, aid, manifest)).toThrow(
+      /not bound to a manifest/,
+    );
+  });
+
   it('rejects a malformed token', () => {
-    expect(() => service.validateToken('no-dot-here', 'aid:x')).toThrow();
+    expect(() => service.validateToken('no-dot-here', 'aid:x', '{}')).toThrow();
   });
 
   it('rejects a token past its expiry', () => {
@@ -148,7 +178,7 @@ describe('EnrollmentService', () => {
       .spyOn(Date, 'now')
       .mockReturnValue(realNow + (expiresIn + 60) * 1000);
     try {
-      expect(() => service.validateToken(token, aid)).toThrow(/expired/);
+      expect(() => service.validateToken(token, aid, manifest)).toThrow(/expired/);
     } finally {
       spy.mockRestore();
     }

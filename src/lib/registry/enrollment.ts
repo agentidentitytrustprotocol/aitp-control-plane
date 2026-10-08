@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { assertEnrollmentSecretUsable } from './enrollment-config';
@@ -35,6 +35,15 @@ interface EnrollmentPayload {
   iat: number;
   exp: number;
   jti: string;
+  /** SHA-256 (hex) of the exact ManifestEnvelope bytes verified at enrollment.
+   * Registration recomputes it over its own body and requires a match, so a
+   * token cannot be replayed against a different manifest for the same aid. */
+  msh: string;
+}
+
+/** SHA-256 hex digest of the exact ManifestEnvelope body bytes (UTF-8). */
+export function manifestDigest(manifestEnvelopeJson: string): string {
+  return createHash('sha256').update(manifestEnvelopeJson, 'utf8').digest('hex');
 }
 
 export interface EnrollmentResult {
@@ -144,15 +153,24 @@ export class EnrollmentService {
       iat: now,
       exp: now + TOKEN_LIFETIME_SECS,
       jti: randomUUID(),
+      msh: manifestDigest(manifestEnvelopeJson),
     };
     return { token: this.sign(payload), expiresIn: TOKEN_LIFETIME_SECS, aid };
   }
 
-  /** Verify the token's signature, scope, expiry, and subject binding.
+  /** Verify the token's signature, scope, expiry, subject binding, and that it
+   * is bound to `manifestEnvelopeJson` (the exact request-body bytes) via the
+   * `msh` claim. A token without a string `msh` (minted before this binding
+   * existed) is rejected, not waved through: there is no safe way to tell a
+   * legitimately old token from a stripped one, and they live 5 minutes.
    * Returns the validated payload so the caller can atomically consume
    * the `jti` (one-time-token enforcement — see `consumeEnrollmentJti`).
    * Throws on any failure. */
-  validateToken(token: string, expectedAid: string): EnrollmentPayload {
+  validateToken(
+    token: string,
+    expectedAid: string,
+    manifestEnvelopeJson: string,
+  ): EnrollmentPayload {
     const payload = this.verify(token);
     if (payload.scope !== 'register') {
       throw new Error('token scope must be register');
@@ -167,6 +185,16 @@ export class EnrollmentService {
     }
     if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
       throw new Error('enrollment token missing jti');
+    }
+    if (typeof payload.msh !== 'string' || payload.msh.length === 0) {
+      throw new Error(
+        'enrollment token is not bound to a manifest — re-enroll to get a new token',
+      );
+    }
+    if (payload.msh !== manifestDigest(manifestEnvelopeJson)) {
+      throw new Error(
+        'enrollment token was issued for a different manifest than the one submitted',
+      );
     }
     return payload;
   }

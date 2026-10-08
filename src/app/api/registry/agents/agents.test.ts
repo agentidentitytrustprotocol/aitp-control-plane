@@ -198,6 +198,12 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
       }),
     );
     expect(res.status).toBe(201);
+    // The raw request body is what the token's manifest digest is checked against.
+    expect(validateTokenMock).toHaveBeenCalledWith(
+      'ok-token',
+      expect.any(String),
+      expect.stringContaining('"manifest"'),
+    );
     expect(upsertAgentMock).toHaveBeenCalledTimes(1);
     // event published + webhook dispatched (Plan §3.6-related parity)
     expect(eventBusPublishMock).toHaveBeenCalledTimes(1);
