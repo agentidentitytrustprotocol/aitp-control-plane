@@ -15,12 +15,10 @@ import { NextRequest } from 'next/server';
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { delegations } from '@/lib/db/schema';
+import { JTI_UUID_RE } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface DelegationRow {
   jti: string;
@@ -56,7 +54,7 @@ export async function GET(req: NextRequest) {
   // Root-rooted descendant tree query — recursive CTE.
   const rootJti = sp.get('root_jti') ?? sp.get('rootJti');
   if (rootJti) {
-    if (!UUID_RE.test(rootJti)) {
+    if (!JTI_UUID_RE.test(rootJti)) {
       return Response.json(
         { error: 'root_jti must be a UUID', code: 'BAD_REQUEST' },
         { status: 400 },
@@ -79,7 +77,7 @@ export async function GET(req: NextRequest) {
   const wheres: SQL[] = [];
   const parentJti = sp.get('parent_jti') ?? sp.get('parentJti');
   if (parentJti) {
-    if (!UUID_RE.test(parentJti)) {
+    if (!JTI_UUID_RE.test(parentJti)) {
       return Response.json(
         { error: 'parent_jti must be a UUID', code: 'BAD_REQUEST' },
         { status: 400 },

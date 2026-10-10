@@ -459,6 +459,15 @@ retries:
 Inspect or reset a breaker via `GET /api/webhooks/:id/circuit-breaker` and
 `POST /api/webhooks/:id/circuit-breaker/reset` (see [`api.md`](api.md#webhooks)).
 
+**Webhook secrets and the admin audit log.** A `PATCH /api/webhooks/:id` that
+changes `secret` is audited as `secretRotated: true`, never by value. Earlier
+releases wrote the new secret itself into `admin_audit_log.details`, where
+`GET /api/audit` returned it to any API-key holder. Migration
+`0008_scrub_webhook_secret_audit.sql` (applied by `npm run db:migrate`) removes
+those values from existing rows, but it cannot un-read them: **rotate every
+webhook secret that was ever set via PATCH** (PATCH a new `secret`, then update
+the receiver).
+
 ## Trust-anchor JWKS refresh
 
 A background job (started at boot from `src/instrumentation.ts`, interval

@@ -1,6 +1,8 @@
 // Unit tests for /api/webhooks (collection).
 //   • GET  — lists webhooks WITHOUT leaking the secret
-//   • POST — 400 on non-JSON body / missing url; 400 URL_NOT_ALLOWED when
+//   • POST — 400 on non-JSON / non-object body / missing url; 400
+//     BODY_INVALID for a secret > 255 code points or a NUL in
+//     url/events/secret; 400 URL_NOT_ALLOWED when
 //     the SSRF guard rejects; 201 on success (secret IS returned once at
 //     create time), non-string events filtered out, active defaults true.
 //
@@ -112,6 +114,51 @@ describe('POST /api/webhooks', () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
     expect(createWebhookMock).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 BODY_INVALID for a JSON body that is not an object', async () => {
+    for (const b of ['null', '[]', '5', '"x"']) {
+      const res = await post(b);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'body must be a JSON object', code: 'BODY_INVALID' });
+    }
+    expect(createWebhookMock).not.toHaveBeenCalled();
+  });
+
+  it('secret: 255 code points accepted, 256 or a NUL rejected', async () => {
+    const url = 'https://receiver.example.com/hook';
+    expect((await post({ url, secret: 's'.repeat(255) })).status).toBe(201);
+    for (const [secret, error] of [
+      ['s'.repeat(256), 'secret exceeds 255 character limit'],
+      ['s\u0000', 'secret must not contain a NUL character'],
+    ]) {
+      const res = await post({ url, secret });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: 'BODY_INVALID' });
+    }
+    expect(createWebhookMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a NUL in url or an events entry before the URL guard', async () => {
+    for (const [body, error] of [
+      [{ url: 'https://x.example.com/\u0000' }, 'url must not contain a NUL character'],
+      [
+        { url: 'https://x.example.com/', events: ['ok', 'b\u0000'] },
+        'events must not contain a NUL character',
+      ],
+    ] as const) {
+      const res = await post(body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: 'BODY_INVALID' });
+    }
+    expect(assertSafeMock).not.toHaveBeenCalled();
+    expect(createWebhookMock).not.toHaveBeenCalled();
+  });
+
+  it('never writes the secret to the admin audit details', async () => {
+    await post({ url: 'https://receiver.example.com/hook', secret: 'whsec_TOPSECRET' });
+    expect(writeAdminAuditMock).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(writeAdminAuditMock.mock.calls[0][0])).not.toContain('whsec_TOPSECRET');
   });
 
   it('returns 400 URL_NOT_ALLOWED when the SSRF guard rejects the url', async () => {

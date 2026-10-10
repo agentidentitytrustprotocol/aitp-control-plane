@@ -3,6 +3,14 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import {
+  badRequest,
+  checkColumnString,
+  invalidId,
+  isUuid,
+  readJsonObject,
+} from '@/lib/http/validate';
+import { NAME_MAX, checkIssuerUrl, checkJwksUrl } from '@/lib/trust-anchors/columns';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,17 +28,14 @@ function rowOut(r: typeof trustAnchors.$inferSelect) {
   };
 }
 
-interface PatchBody {
-  issuerUrl?: unknown;
-  jwksUrl?: unknown;
-  label?: unknown;
-}
-
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // `id` is a Postgres uuid column: a non-UUID would fail to parse (22P02)
+  // and surface as a 500. Checked before any database access.
+  if (!isUuid(id)) return invalidId();
   const rows = await db
     .select()
     .from(trustAnchors)
@@ -47,20 +52,34 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  let body: PatchBody;
-  try {
-    body = (await req.json()) as PatchBody;
-  } catch {
-    return Response.json(
-      { error: 'body must be JSON', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
+  if (!isUuid(id)) return invalidId();
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
   const patch: Record<string, unknown> = { updatedAt: new Date().toISOString() };
-  if (typeof body.issuerUrl === 'string') patch.issuerUrl = body.issuerUrl;
-  if (typeof body.jwksUrl === 'string' || body.jwksUrl === null)
-    patch.jwksUrl = body.jwksUrl;
-  if (typeof body.label === 'string' || body.label === null) patch.label = body.label;
+  // Column checks only (storability). URL-scheme and duplicate-issuer rules
+  // for PATCH are not applied here.
+  if (typeof body.issuerUrl === 'string') {
+    const problem = checkIssuerUrl(body.issuerUrl);
+    if (problem) return badRequest(problem);
+    patch.issuerUrl = body.issuerUrl;
+  }
+  if (typeof body.jwksUrl === 'string' || body.jwksUrl === null) {
+    // '' clears the explicit JWKS URL (back to OIDC discovery), like null.
+    const jwksUrl = body.jwksUrl === '' ? null : body.jwksUrl;
+    if (jwksUrl !== null) {
+      const problem = checkJwksUrl(jwksUrl);
+      if (problem) return badRequest(problem);
+    }
+    patch.jwksUrl = jwksUrl;
+  }
+  if (typeof body.label === 'string') {
+    const problem = checkColumnString(body.label, { field: 'label', max: NAME_MAX });
+    if (problem) return badRequest(problem);
+    patch.label = body.label;
+  } else if (body.label === null) {
+    patch.label = null;
+  }
   const updated = await db
     .update(trustAnchors)
     .set(patch)
@@ -83,6 +102,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  if (!isUuid(id)) return invalidId();
   const deleted = await db
     .delete(trustAnchors)
     .where(eq(trustAnchors.id, id))

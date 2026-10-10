@@ -10,12 +10,10 @@ import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { tctMonitor } from '@/lib/tcts/monitor';
+import { JTI_UUID_RE } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * The instants a revocation may be dated, as millisecond bounds.
@@ -78,7 +76,7 @@ export async function POST(req: NextRequest) {
   }
 
   return withIdempotency(req, 'revocation.entries', async () => {
-    if (typeof body.jti !== 'string' || !UUID_RE.test(body.jti)) {
+    if (typeof body.jti !== 'string' || !JTI_UUID_RE.test(body.jti)) {
       return { status: 400, body: { error: 'jti must be a UUID', code: 'JTI_INVALID' } };
     }
 

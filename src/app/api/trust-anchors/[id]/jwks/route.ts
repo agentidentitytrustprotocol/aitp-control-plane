@@ -13,12 +13,10 @@ import { NextRequest } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
+import { invalidId, isUuid } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function GET(
   _req: NextRequest,
@@ -26,9 +24,8 @@ export async function GET(
 ) {
   const { id } = await params;
   // A non-UUID would reach Postgres as an invalid uuid and surface as a 500.
-  if (!UUID_RE.test(id)) {
-    return Response.json({ error: 'id must be a UUID', code: 'ID_INVALID' }, { status: 400 });
-  }
+  // Syntax-only (any version), like the other /api/trust-anchors/:id routes.
+  if (!isUuid(id)) return invalidId();
 
   const [anchor] = await db
     .select()

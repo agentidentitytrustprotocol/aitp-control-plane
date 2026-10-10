@@ -20,7 +20,7 @@ spec rather than restate it.
 - **Request ID:** Every `/api/*` response carries `x-request-id`. Clients may pre-set the header; the CP echoes it.
 - **CORS:** On `/api/*`, `Access-Control-Allow-Origin` is set to `CORS_ORIGIN` (defaults to `http://localhost:3000`). Applied per-request by the proxy, so it reads from the runtime environment — set it to the UI console's origin. A single origin is supported. `OPTIONS` preflights are answered `204` by the proxy.
 - **Filter key casing:** List filters are accepted in **both** camelCase and snake_case where noted (e.g. `runId` or `run_id`). The playground emits snake_case; UI clients tend to use camelCase. Both resolve to the same column.
-- **UUIDs:** where a route validates that a value "must be a UUID" (`jti`, `root_jti`, `parent_jti`, the JWKS route's `:id`), it accepts RFC 4122 **versions 1–5** only; a v6/v7/v8 UUID is rejected as malformed.
+- **UUIDs:** two different rules. A **token id** that "must be a UUID" (`jti`, `root_jti`, `parent_jti`) must be RFC 4122 **versions 1–5**; a v6/v7/v8 UUID is rejected as malformed. A **path `:id`** on `/api/trust-anchors/:id` (and its `/jwks`) and `/api/webhooks/:id` (and its `/circuit-breaker` routes) is checked for **syntax only** — the canonical hyphenated `8-4-4-4-12` hex form, any version, either case — and anything else is `400 ID_INVALID` before the database is touched. Ids the CP hands out are always in that form.
 - **Error shape:**
   ```json
   { "error": "human message", "code": "MACHINE_CODE" }
@@ -82,7 +82,7 @@ These mutating endpoints honor an optional `Idempotency-Key` request header:
 - A key is scoped to its endpoint. Replaying the same `(endpoint, key)` returns the stored status and body without re-running the handler, and adds the response header `Idempotency-Replayed: true`.
 - The key is **not** bound to the request body: a replay with the same key and a *different* body still returns the first response.
 - Only stable outcomes are stored: `200`, `201`, `202`, `204`, `400`, `409`, `422`. A `401`, `429` or `5xx` is not stored, so a retry with the same key runs the handler again.
-- Some `400 BODY_INVALID`s (a body that is not JSON) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
+- Some `400 BODY_INVALID`s (a body that is not JSON — and, on `POST /api/trust-anchors` and `POST /api/webhooks`, a JSON body that is not an object) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
 - Two concurrent requests with the same key may both run; the first one stored wins and the other caller receives the winner's response.
 - A key that is empty, longer than 255 characters, or contains control characters is rejected `400 IDEMPOTENCY_KEY_INVALID`.
 
@@ -295,7 +295,7 @@ retry: 15000
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/audit` | API key | Admin audit log (who did what when), newest first. Filters: `?limit=` (default 100, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. Response `{ entries, count }`. |
+| GET | `/api/audit` | API key | Admin audit log (who did what when), newest first. Filters: `?limit=` (default 100, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. Response `{ entries, count }`. Entry `details` never carry a webhook secret: a `webhook.update` that sets it records `secretRotated: true`. |
 
 This is the **admin action** log (registrations, revocations, webhook changes), distinct from the telemetry event store served by `/api/events/history`.
 
@@ -344,11 +344,13 @@ A genuine database fault is a framework `500` with no `{error, code}` body, per 
 
 `url` must be `http(s)` — `https` only in production — and pass the SSRF guard (private/loopback/link-local ranges and hosts outside `WEBHOOK_URL_ALLOWLIST` are rejected `400 URL_NOT_ALLOWED`); a non-string `url` is `400 BODY_INVALID`. An empty/omitted `events` array means **all deliverable event types**. Only a fixed set of event types is deliverable — see [`events.md`](events.md#webhook-deliverable-events). If `secret` is omitted the server generates one. The `201` response is the **only** place the secret is returned (`{ id, url, events, secret, active, createdAt }`); store it then.
 
-`PATCH /api/webhooks/:id` applies only the fields present (a new `url` passes the same guard) and answers `200 { id, url, events, active, updatedAt }`. A `:id` that is not a UUID currently answers `500` on PATCH and DELETE rather than `404`.
+`400 BODY_INVALID` on POST and PATCH when: the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `secret` is longer than 255 characters (Unicode code points); or `url`, `secret` or any `events` entry contains a NUL (U+0000). These are checked before the SSRF guard.
+
+`PATCH /api/webhooks/:id` applies only the fields present (a new `url` passes the same guard) and answers `200 { id, url, events, active, updatedAt }`. On PATCH and DELETE a `:id` that is not a UUID is `400 ID_INVALID` (see [Conventions](#conventions)); an unknown UUID is `404 NOT_FOUND`. A PATCH that sets `secret` is recorded in the admin audit log as `secretRotated: true` — the secret itself is never written there. (Releases before this one did write it; the `0008` migration scrubs those rows, but **rotate any webhook secret that was ever set via PATCH**, since it may already have been read through `GET /api/audit`.)
 
 Deliveries are POSTed with body `{ deliveryId, eventType, payload, enqueuedAt }` (`payload` is the full event record) and headers `X-Aitp-Signature: sha256=<hex>` — an HMAC-SHA256 over the exact body bytes using the webhook's `secret` — plus `X-Aitp-Event` (the event type) and `X-Aitp-Delivery` (the delivery id). The body is fixed at enqueue time, so every retry of a delivery carries the same bytes and signature. Retries follow `WEBHOOK_RETRY_ATTEMPTS` (default 3) with exponential backoff; a circuit breaker trips a repeatedly-failing endpoint open (thresholds configurable via `WEBHOOK_BREAKER_FAILURE_THRESHOLD` / `WEBHOOK_BREAKER_RESET_MS` — see [`operations.md`](operations.md#webhook-delivery)).
 
-Circuit-breaker state is held **per process**: each replica has its own breaker per webhook, and the snapshot and reset routes see only the replica that served them. Both routes accept any `:id` — an unknown id returns a fresh `closed` snapshot rather than `404`, and a reset of an unknown id still writes an admin audit entry.
+Circuit-breaker state is held **per process**: each replica has its own breaker per webhook, and the snapshot and reset routes see only the replica that served them. Both routes answer `400 ID_INVALID` for a `:id` that is not a UUID. Any UUID is accepted otherwise — an unknown id returns a fresh `closed` snapshot rather than `404`, and a reset of an unknown id still writes an admin audit entry.
 
 ### Dashboard JSON
 
@@ -379,14 +381,16 @@ By default the projection records reported claims without checking any signature
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/trust-anchors` | API key | List. `?namespace=` filter |
-| POST | `/api/trust-anchors` | API key | Create. Body: `{ issuerUrl, namespace?, jwksUrl?, label? }`. `400 BODY_INVALID` if `issuerUrl` is not an `http(s)://` string or the body is not JSON. `409 ALREADY_EXISTS` (with `existing: { id }`) if `(namespace, issuerUrl)` exists. A `namespace` or `label` longer than 128 characters currently answers `500`. |
+| GET | `/api/trust-anchors` | API key | List. `?namespace=` filter (a NUL in it is `400 BAD_REQUEST`) |
+| POST | `/api/trust-anchors` | API key | Create. Body: `{ issuerUrl, namespace?, jwksUrl?, label? }`. `400 BODY_INVALID` if the body is not a JSON object, `issuerUrl` or a non-empty `jwksUrl` is not an `http(s)://` string, or a field is not storable (limits below). `409 ALREADY_EXISTS` (with `existing: { id }`) if `(namespace, issuerUrl)` exists. |
 | GET | `/api/trust-anchors/:id` | API key | Fetch one (without `addedBy`) |
-| PATCH | `/api/trust-anchors/:id` | API key | Update `issuerUrl` / `jwksUrl` / `label` (without `addedBy` in the response). `issuerUrl` is not checked for `http(s)`. Changing `issuerUrl` to one another anchor in the namespace already has, or a `label` longer than 128 characters, currently answers `500`. |
+| PATCH | `/api/trust-anchors/:id` | API key | Update `issuerUrl` / `jwksUrl` / `label` (without `addedBy` in the response). `400 BODY_INVALID` if the body is not a JSON object or a field is not storable (limits below). `issuerUrl` is not checked for `http(s)`. Changing `issuerUrl` to one another anchor in the namespace already has currently answers `500`. |
 | DELETE | `/api/trust-anchors/:id` | API key | Remove (`204`) |
 | GET | `/api/trust-anchors/:id/jwks` | API key | The CP-cached JWKS for the anchor, for agents that cannot reach the issuer |
 
-On `GET`/`PATCH`/`DELETE /api/trust-anchors/:id`, an `:id` that is not a UUID currently answers `500`; only the `/jwks` route validates it (`400 ID_INVALID`).
+On every `/api/trust-anchors/:id` route (including `/jwks`), an `:id` that is not a UUID is `400 ID_INVALID` (see [Conventions](#conventions)); an unknown UUID is `404 NOT_FOUND`.
+
+**Field limits** (POST and PATCH, `400 BODY_INVALID` when exceeded): `namespace` and `label` at most 128 characters (Unicode code points); `issuerUrl` at most 2048 characters **and** 2048 UTF-8 bytes (it sits in a unique index whose row limit is in bytes); `jwksUrl` at most 2048 characters; none may contain a NUL (U+0000). An empty-string `jwksUrl` means "no explicit JWKS URL" and is stored as `null` (on PATCH it clears the field, like `null`).
 
 **JWKS route.** The cache is filled by a background refresher (see [`operations.md`](operations.md#trust-anchor-jwks-refresh)), never by this request.
 
@@ -394,7 +398,7 @@ On `GET`/`PATCH`/`DELETE /api/trust-anchors/:id`, an `:id` that is not a UUID cu
 - `503 JWKS_NOT_CACHED` (body includes `issuerUrl`; headers `Retry-After: 60`, `Cache-Control: no-store`) until the refresher has fetched the keyset once. If it never succeeds — the issuer is unreachable, `JWKS_REFRESH_ENABLED=false`, or the URL is `http://` in production — this persists.
 - After one successful fetch, later failures do **not** clear the cache: the route keeps serving the last good keyset with `200`. Check `X-JWKS-Cached-At` to judge its age.
 - A `PATCH` that changes `issuerUrl` or `jwksUrl` does not clear the cache, so the old issuer's keyset is served until the refresher next treats the entry as stale (`JWKS_STALE_AFTER_MS`).
-- `400 ID_INVALID` (not a UUID), `404 NOT_FOUND`.
+- `400 ID_INVALID` (not a UUID — syntax only, any version), `404 NOT_FOUND`.
 
 ### Pinned keys
 

@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { invalidId, isUuid } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,6 +11,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // Webhook ids are UUIDs; reject anything else before touching the
+  // in-memory breaker map or writing an audit row.
+  if (!isUuid(id)) return invalidId();
   webhookBreaker.reset(id);
   await writeAdminAudit({
     action: 'webhook.circuit-breaker.reset',

@@ -114,7 +114,7 @@ Backs the signed `/.well-known/aitp-revocation-list` (format: [RFC-AITP-0008](ht
 | `id` | uuid PK | |
 | `url` | text | SSRF-guarded at write time |
 | `events` | jsonb `string[]` | Empty = all deliverable types |
-| `secret` | varchar(255) | HMAC-SHA256 signing key |
+| `secret` | varchar(255) | HMAC-SHA256 signing key. Never written to `admin_audit_log` (a rotation is recorded as `secretRotated: true`) |
 | `active` | boolean | Indexed |
 | `created_at`, `updated_at` | timestamptz | |
 
@@ -144,7 +144,7 @@ Distinct from `audit_events`; records who hit the admin mutating endpoints.
 | `action` | varchar(128) | One of `agent.register`, `agent.deregister`, `revocation.add`, `webhook.create`, `webhook.update`, `webhook.delete`, `webhook.circuit-breaker.reset`, `trust-anchor.create`, `trust-anchor.update`, `trust-anchor.delete`, `pinned-key.upsert`, `pinned-key.delete` |
 | `actor_id` | varchar(255) | Indexed |
 | `target_id` | varchar(512) | Affected AID/JTI |
-| `details` | jsonb | |
+| `details` | jsonb | Action-specific context. Never contains a webhook secret: `webhook.update` records `secretRotated: true` instead (migration `0008` scrubbed rows written before that) |
 | `request_id` | varchar(255) | Correlation |
 | `created_at` | timestamptz | Indexed; aged out after `ADMIN_AUDIT_TTL_DAYS` |
 
@@ -155,8 +155,8 @@ OIDC identity mode ([RFC-AITP-0002](https://agentidentitytrustprotocol.io/spec/i
 |---|---|---|
 | `id` | uuid PK | |
 | `namespace` | varchar(128) | Indexed |
-| `issuer_url` | text | |
-| `jwks_url` | text | Optional override of issuer's `jwks_uri` |
+| `issuer_url` | text | The API caps it at 2048 characters and 2048 UTF-8 bytes (it is in the unique btree, whose row limit is in bytes) |
+| `jwks_url` | text | Optional override of issuer's `jwks_uri`; the API caps it at 2048 characters and stores an empty string as `NULL` |
 | `jwks_cache`, `jwks_cached_at` | jsonb / timestamptz | Issuer keyset cached by the CP's background JWKS refresher; served by `GET /api/trust-anchors/:id/jwks`. List/detail responses expose only `jwksCachedAt`. See [`operations.md`](operations.md#trust-anchor-jwks-refresh) |
 | `label`, `added_by` | varchar | |
 | `created_at`, `updated_at` | timestamptz | |
@@ -210,6 +210,7 @@ See [`drizzle/README.md`](../drizzle/README.md) for the migration workflow.
 | `0005_aitp_depth.sql` | `issued_tcts`, `delegations`, `trust_anchors`, `pinned_keys` tables + their indexes |
 | `0006_trust_anchors_uniq.sql` | Unique `(namespace, issuer_url)` |
 | `0007_enrollment_jtis.sql` | `enrollment_jtis` table + index on `expires_at` |
+| `0008_scrub_webhook_secret_audit.sql` | Data-only, no schema change: removes webhook secrets leaked into `admin_audit_log.details` by `webhook.update` rows (replaced with `secretRotated: true`). Idempotent |
 
 `drizzle/manual/0002_offered_caps_gin.concurrent.sql` is a parallel, operator-applied
 variant of `0002` that builds the same GIN index with `CREATE INDEX CONCURRENTLY`

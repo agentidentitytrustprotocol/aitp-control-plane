@@ -27,14 +27,12 @@ import { delegations, issuedTcts } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
 import { logger } from '../logger';
 import { config } from '../config';
+import { JTI_UUID_RE } from '../http/validate';
 import {
   decideProjection,
   verifyObservedTct,
   verifyObservedDelegation,
 } from './verify-observed';
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function readString(o: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const k of keys) {
@@ -193,7 +191,7 @@ export function parseTct(raw: unknown, fallbackTs: string): ParsedTct | null {
   const issuer = readString(claims, 'iss', 'issuer', 'issuer_aid', 'issuerAid');
   const subject = readString(claims, 'sub', 'subject', 'subject_aid', 'subjectAid');
   const audience = readString(claims, 'aud', 'audience', 'audience_aid', 'audienceAid');
-  if (!jti || !UUID_RE.test(jti) || !issuer || !subject) return null;
+  if (!jti || !JTI_UUID_RE.test(jti) || !issuer || !subject) return null;
 
   return {
     jti,
@@ -272,7 +270,7 @@ export function parseDelegation(
     if (token) jti = syntheticDelegationJti(token);
   }
 
-  if (!jti || !UUID_RE.test(jti) || !parentJti || !UUID_RE.test(parentJti)) return null;
+  if (!jti || !JTI_UUID_RE.test(jti) || !parentJti || !JTI_UUID_RE.test(parentJti)) return null;
   if (!delegator || !delegatee) return null;
 
   return {
@@ -363,7 +361,7 @@ class TctMonitorService {
 
   private async recordRevocation(event: AuditEventRecord): Promise<void> {
     const jti = readString(event.payload, 'jti');
-    if (!jti || !UUID_RE.test(jti)) return;
+    if (!jti || !JTI_UUID_RE.test(jti)) return;
     const revokedAt = event.ts;
     // Atomic: TCT row update + descendant cascade must commit together so
     // active-chain queries never observe a half-applied revocation.
@@ -410,7 +408,7 @@ class TctMonitorService {
 
   private async recordDelegationRevocation(event: AuditEventRecord): Promise<void> {
     const jti = readString(event.payload, 'jti');
-    if (!jti || !UUID_RE.test(jti)) return;
+    if (!jti || !JTI_UUID_RE.test(jti)) return;
     const revokedAt = event.ts;
 
     // Atomic: explicit revocation + descendant cascade must commit

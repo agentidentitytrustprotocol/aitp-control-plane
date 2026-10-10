@@ -5,31 +5,25 @@ import {
   UnsafeWebhookUrlError,
 } from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { badRequest, invalidId, isUuid, readJsonObject } from '@/lib/http/validate';
+import { checkWebhookFields } from '@/lib/webhooks/validate-body';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-interface PatchBody {
-  url?: unknown;
-  events?: unknown;
-  secret?: unknown;
-  active?: unknown;
-}
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  let body: PatchBody;
-  try {
-    body = (await req.json()) as PatchBody;
-  } catch {
-    return Response.json(
-      { error: 'body must be JSON', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
+  // `webhooks.id` is a Postgres uuid: a non-UUID would fail to parse (22P02)
+  // and surface as a 500. Checked before the body is read.
+  if (!isUuid(id)) return invalidId();
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
+  const fieldProblem = checkWebhookFields(body);
+  if (fieldProblem) return badRequest(fieldProblem);
   const patch: {
     url?: string;
     events?: string[];
@@ -63,10 +57,13 @@ export async function PATCH(
       { status: 404 },
     );
   }
+  // NEVER put the secret in the audit details: GET /api/audit returns them to
+  // any API-key holder. Record only that it was rotated.
+  const { secret, ...auditDetails } = patch;
   await writeAdminAudit({
     action: 'webhook.update',
     targetId: id,
-    details: patch,
+    details: secret !== undefined ? { ...auditDetails, secretRotated: true } : auditDetails,
     requestId: req.headers.get('x-request-id') ?? undefined,
   });
   return Response.json({
@@ -83,6 +80,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  if (!isUuid(id)) return invalidId();
   const ok = await deleteWebhook(id);
   if (!ok) {
     return Response.json(

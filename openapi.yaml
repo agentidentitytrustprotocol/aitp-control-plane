@@ -104,6 +104,14 @@ components:
       description: Client-supplied request correlation ID. Echoed on the response.
 
   responses:
+    IdInvalid:
+      description: >-
+        `code` is `ID_INVALID` — the `{id}` path segment is not a UUID. The
+        check is syntax-only (canonical hyphenated 8-4-4-4-12 hex, any version,
+        either case) and runs before the database or service is touched.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: >-
         `code` is `INVALID_API_KEY` — the request gate found no API key, or one
@@ -565,7 +573,13 @@ components:
         action: { type: string, example: revocation.add }
         actorId: { type: string, nullable: true }
         targetId: { type: string, nullable: true }
-        details: { type: object, additionalProperties: true, nullable: true }
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: >-
+            Action-specific context. Never carries a webhook secret: a
+            `webhook.update` that sets it records `secretRotated: true`.
         requestId: { type: string, nullable: true }
         createdAt: { type: string, format: date-time }
 
@@ -610,21 +624,33 @@ components:
         events:
           type: array
           items: { type: string }
-          description: Empty or omitted means "all deliverable event types". Non-string entries are dropped.
+          description: >-
+            Empty or omitted means "all deliverable event types". Non-string
+            entries are dropped; a string entry containing a NUL (U+0000) is
+            `400 BODY_INVALID`.
         secret:
           type: string
-          description: HMAC key for `X-Aitp-Signature`. Server-generated when omitted.
+          maxLength: 255
+          description: >-
+            HMAC key for `X-Aitp-Signature`. Server-generated when omitted. At
+            most 255 characters (Unicode code points; the column is
+            varchar(255)) and no NUL (U+0000), else `400 BODY_INVALID`.
         active: { type: boolean, default: true }
 
     WebhookUpdateRequest:
-      description: Every field optional; only the fields present (with the right type) are applied.
+      description: >-
+        Every field optional; only the fields present (with the right type) are
+        applied. Same storability limits as `WebhookCreateRequest`. A changed
+        `secret` is recorded in the admin audit log as `secretRotated: true`,
+        never by value.
       type: object
       properties:
-        url: { type: string, format: uri }
+        url: { type: string, format: uri, description: "No NUL (U+0000)." }
         events:
           type: array
           items: { type: string }
-        secret: { type: string }
+          description: Non-string entries are dropped; no NUL (U+0000) in a string entry.
+        secret: { type: string, maxLength: 255, description: "At most 255 code points; no NUL (U+0000)." }
         active: { type: boolean }
 
     WebhookUpdated:
@@ -710,15 +736,32 @@ components:
         updatedAt: { type: string, format: date-time }
 
     TrustAnchorCreateRequest:
+      description: >-
+        Lengths are Unicode code points. No string field may contain a NUL
+        (U+0000). Any violation is `400 BODY_INVALID`.
       type: object
       required: [issuerUrl]
       properties:
-        namespace: { type: string, maxLength: 128, default: default }
+        namespace:
+          type: string
+          maxLength: 128
+          default: default
+          description: An empty string or non-string means `default`.
         issuerUrl:
           type: string
           format: uri
-          description: Must start with `http://` or `https://`, or `400 BODY_INVALID`.
-        jwksUrl: { type: string, format: uri }
+          maxLength: 2048
+          description: >-
+            Must start with `http://` or `https://`. At most 2048 characters
+            and 2048 UTF-8 bytes (it is part of a unique index whose row limit
+            is in bytes).
+        jwksUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: >-
+            When non-empty, must start with `http://` or `https://`. An empty
+            string means "none" (OIDC discovery) and is stored as `null`.
         label: { type: string, maxLength: 128 }
 
     PinnedKey:
@@ -1444,7 +1487,10 @@ paths:
               schema: { $ref: "#/components/schemas/WebhookCreated" }
         "400":
           description: >-
-            `BODY_INVALID` when the body is not JSON or `url` is not a string;
+            `BODY_INVALID` when the body is not JSON, is JSON but not an object
+            (`null`, an array, a primitive), `url` is not a string, `secret`
+            exceeds 255 characters, or `url`/`secret`/an `events` entry contains
+            a NUL (U+0000);
             `URL_NOT_ALLOWED` when `url` is not a valid http(s) URL (https only
             in production), resolves to a private/loopback/link-local address,
             or is outside `WEBHOOK_URL_ALLOWLIST`; `IDEMPOTENCY_KEY_INVALID`
@@ -1465,8 +1511,9 @@ paths:
       tags: [webhooks]
       summary: Update a subscription
       description: >-
-        A non-UUID `id` currently answers `500` rather than `404` (also on
-        DELETE).
+        A non-UUID `id` is `400 ID_INVALID` (also on DELETE), checked before
+        the body is read. A changed `secret` is audited as `secretRotated:
+        true`, never by value.
       requestBody:
         required: true
         content:
@@ -1480,8 +1527,11 @@ paths:
               schema: { $ref: "#/components/schemas/WebhookUpdated" }
         "400":
           description: >-
-            `BODY_INVALID` when the body is not JSON; `URL_NOT_ALLOWED` when a
-            supplied `url` fails the same guard as on create.
+            `ID_INVALID` when `id` is not a UUID; `BODY_INVALID` when the body
+            is not JSON, is JSON but not an object, `secret` exceeds 255
+            characters, or `url`/`secret`/an `events` entry contains a NUL
+            (U+0000); `URL_NOT_ALLOWED` when a supplied `url` fails the same
+            guard as on create.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1515,6 +1565,7 @@ paths:
                     description: >-
                       Always `true` on a `200`. A subscription that was not there
                       is a `404`, not a `200` with `false`.
+        "400": { $ref: "#/components/responses/IdInvalid" }
         "404":
           description: >-
             No webhook subscription with this id, so nothing was deleted. `code`
@@ -1657,6 +1708,11 @@ paths:
                   trustAnchors:
                     type: array
                     items: { $ref: "#/components/schemas/TrustAnchor" }
+        "400":
+          description: "`namespace` contains a NUL (U+0000). `code` is `BAD_REQUEST`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
@@ -1677,8 +1733,10 @@ paths:
               schema: { $ref: "#/components/schemas/TrustAnchor" }
         "400":
           description: >-
-            `BODY_INVALID` when the body is not JSON or `issuerUrl` is not a
-            string starting `http://` or `https://`; `IDEMPOTENCY_KEY_INVALID`
+            `BODY_INVALID` when the body is not JSON or not a JSON object,
+            `issuerUrl` (or a non-empty `jwksUrl`) is not a string starting
+            `http://` or `https://`, or a field breaks a limit in
+            `TrustAnchorCreateRequest` (length, NUL); `IDEMPOTENCY_KEY_INVALID`
             for a bad `Idempotency-Key`.
           content:
             application/json:
@@ -1699,11 +1757,6 @@ paths:
                         type: object
                         properties:
                           id: { type: string, format: uuid }
-        "500":
-          description: >-
-            Currently returned when `namespace` or `label` exceeds 128
-            characters (the column width) instead of a `400`. The body is
-            whatever the framework renders, not the shared `Error` shape.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
@@ -1714,9 +1767,8 @@ paths:
         required: true
         schema: { type: string, format: uuid }
         description: >-
-          Not validated on these three operations: a non-UUID value currently
-          answers `500` rather than `404` (only the `/jwks` route returns `400
-          ID_INVALID`).
+          A non-UUID value is `400 ID_INVALID` (syntax-only check, any UUID
+          version), before the database is touched.
     get:
       tags: [trust]
       summary: Fetch one trust anchor (without `addedBy`)
@@ -1726,6 +1778,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TrustAnchor" }
+        "400": { $ref: "#/components/responses/IdInvalid" }
         "404":
           description: No trust anchor with this id. `code` is `NOT_FOUND`.
           content:
@@ -1739,9 +1792,10 @@ paths:
       description: >-
         Applies only the fields present. `issuerUrl` is not checked for an
         http(s) scheme; changing it to a value another anchor in the same
-        namespace already has currently answers `500`, as does a `label`
-        longer than 128 characters (the column width). Changing `issuerUrl` or
-        `jwksUrl` does not clear the cached JWKS. The response omits `addedBy`.
+        namespace already has currently answers `500`. Changing `issuerUrl` or
+        `jwksUrl` does not clear the cached JWKS. An empty-string `jwksUrl`
+        clears it (stored as `null`), like `null`. The response omits
+        `addedBy`.
       requestBody:
         required: true
         content:
@@ -1749,9 +1803,22 @@ paths:
             schema:
               type: object
               properties:
-                issuerUrl: { type: string, format: uri }
-                jwksUrl: { type: string, format: uri, nullable: true }
-                label: { type: string, nullable: true }
+                issuerUrl:
+                  type: string
+                  format: uri
+                  maxLength: 2048
+                  description: At most 2048 characters and 2048 UTF-8 bytes; no NUL (U+0000).
+                jwksUrl:
+                  type: string
+                  format: uri
+                  nullable: true
+                  maxLength: 2048
+                  description: At most 2048 characters; no NUL. `""` or `null` clears it.
+                label:
+                  type: string
+                  nullable: true
+                  maxLength: 128
+                  description: At most 128 characters (code points); no NUL.
       responses:
         "200":
           description: Updated
@@ -1759,7 +1826,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TrustAnchor" }
         "400":
-          description: The body is not JSON. `code` is `BODY_INVALID`.
+          description: >-
+            `ID_INVALID` when `id` is not a UUID; `BODY_INVALID` when the body
+            is not JSON or not a JSON object, or a field breaks a limit above
+            (length, NUL).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1775,6 +1845,7 @@ paths:
       summary: Delete a trust anchor
       responses:
         "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/IdInvalid" }
         "404":
           description: >-
             No trust anchor with this id, so nothing was deleted. `code` is
@@ -1814,7 +1885,7 @@ paths:
                 properties:
                   keys: { type: array, items: { type: object } }
         "400":
-          description: "`id` is not a UUID. `code` is `ID_INVALID`."
+          description: "`id` is not a UUID (syntax-only, any version). `code` is `ID_INVALID`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2072,13 +2143,13 @@ paths:
 
   /api/webhooks/{id}/circuit-breaker:
     parameters:
-      - { name: id, in: path, required: true, schema: { type: string }, description: "Webhook id. Not validated or looked up." }
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: "Webhook id. Must be a UUID (else `400 ID_INVALID`); not looked up." }
     get:
       tags: [webhooks]
       summary: Get circuit-breaker snapshot for a webhook
       description: >-
         Breaker state is in-memory and per process: the snapshot reflects only
-        the replica that served the request. Any `id` is accepted — an unknown
+        the replica that served the request. Any UUID is accepted — an unknown
         id returns a fresh `closed` snapshot, never `404`.
       responses:
         "200":
@@ -2086,24 +2157,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
+        "400": { $ref: "#/components/responses/IdInvalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}/circuit-breaker/reset:
     parameters:
-      - { name: id, in: path, required: true, schema: { type: string }, description: "Webhook id. Not validated or looked up." }
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: "Webhook id. Must be a UUID (else `400 ID_INVALID`); not looked up." }
     post:
       tags: [webhooks]
       summary: Manually reset a webhook's circuit breaker to closed
       description: >-
         Resets only the breaker held by the replica that served the request.
-        Any `id` is accepted (no `404`), and every call writes an admin audit
-        entry.
+        Any UUID is accepted (no `404`), and every call with a UUID writes an
+        admin audit entry; a non-UUID is `400 ID_INVALID` and writes none.
       responses:
         "200":
           description: Reset; returns the post-reset snapshot
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
+        "400": { $ref: "#/components/responses/IdInvalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }

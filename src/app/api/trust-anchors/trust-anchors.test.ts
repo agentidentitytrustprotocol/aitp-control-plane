@@ -1,7 +1,10 @@
 // Unit tests for /api/trust-anchors (collection).
-//   • GET  — lists anchors via rowOut projection; ?namespace= adds a WHERE
-//   • POST — 400 on non-JSON body / non-http(s) issuerUrl, 201 on success
-//            (defaulting namespace to 'default'), 409 ALREADY_EXISTS when
+//   • GET  — lists anchors via rowOut projection; ?namespace= adds a WHERE;
+//            a NUL in ?namespace= is 400 BAD_REQUEST
+//   • POST — 400 on non-JSON / non-object body, non-http(s) issuerUrl or
+//            jwksUrl, unstorable namespace/label (> 128 code points, NUL) or
+//            URLs (> 2048, NUL); 201 on success (defaulting namespace to
+//            'default', '' jwksUrl stored as null), 409 ALREADY_EXISTS when
 //            the unique-violation (PG 23505) surfaces from the insert.
 //
 // @/lib/db is mocked with chained stubs (no Postgres). No Idempotency-Key
@@ -93,6 +96,112 @@ describe('GET /api/trust-anchors', () => {
     const res = await GET(makeReq('/api/trust-anchors?namespace=prod'));
     expect(res.status).toBe(200);
     expect(whereCalls).toHaveLength(1);
+  });
+});
+
+describe('GET /api/trust-anchors — query validation', () => {
+  it('returns 400 BAD_REQUEST for a NUL in ?namespace= and never queries', async () => {
+    const res = await GET(makeReq('/api/trust-anchors?namespace=a%00b'));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: 'namespace must not contain a NUL character',
+      code: 'BAD_REQUEST',
+    });
+    expect(whereCalls).toHaveLength(0);
+  });
+});
+
+describe('POST /api/trust-anchors — field validation', () => {
+  function post(body: unknown) {
+    return POST(
+      makeReq('/api/trust-anchors', {
+        method: 'POST',
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      }),
+    );
+  }
+  const ISSUER = 'https://issuer.example.com';
+
+  async function expectBodyInvalid(res: Response, error: string) {
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error, code: 'BODY_INVALID' });
+  }
+
+  it('rejects a JSON body that is not an object (null, array, primitive)', async () => {
+    for (const b of ['null', '[]', '5', '"x"', 'true']) {
+      await expectBodyInvalid(await post(b), 'body must be a JSON object');
+    }
+    expect(insertedValues).toHaveLength(0);
+  });
+
+  it('namespace and label: 128 code points accepted, 129 rejected', async () => {
+    selectResults = [[anchorRow()], [anchorRow()]];
+    expect((await post({ issuerUrl: ISSUER, namespace: 'n'.repeat(128) })).status).toBe(201);
+    expect((await post({ issuerUrl: ISSUER, label: '\u{1F600}'.repeat(128) })).status).toBe(201);
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, namespace: 'n'.repeat(129) }),
+      'namespace exceeds 128 character limit',
+    );
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, label: 'l'.repeat(129) }),
+      'label exceeds 128 character limit',
+    );
+    expect(insertedValues).toHaveLength(2);
+  });
+
+  it('rejects a NUL in namespace, label, issuerUrl or jwksUrl', async () => {
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, namespace: 'a\u0000' }),
+      'namespace must not contain a NUL character',
+    );
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, label: 'a\u0000' }),
+      'label must not contain a NUL character',
+    );
+    await expectBodyInvalid(
+      await post({ issuerUrl: `${ISSUER}/\u0000` }),
+      'issuerUrl must not contain a NUL character',
+    );
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, jwksUrl: `${ISSUER}/\u0000` }),
+      'jwksUrl must not contain a NUL character',
+    );
+    expect(insertedValues).toHaveLength(0);
+  });
+
+  it('issuerUrl: 2048 accepted, 2049 code points or > 2048 UTF-8 bytes rejected', async () => {
+    selectResults = [[anchorRow()]];
+    const base = 'https://x.example.com/';
+    expect((await post({ issuerUrl: base + 'a'.repeat(2048 - base.length) })).status).toBe(201);
+    await expectBodyInvalid(
+      await post({ issuerUrl: base + 'a'.repeat(2049 - base.length) }),
+      'issuerUrl exceeds 2048 character limit',
+    );
+    // 600 code points, 2400+ bytes: fits the code-point cap, not the index.
+    await expectBodyInvalid(
+      await post({ issuerUrl: base + '\u{1F600}'.repeat(600) }),
+      'issuerUrl exceeds 2048 byte limit',
+    );
+    expect(insertedValues).toHaveLength(1);
+  });
+
+  it('jwksUrl: must be http(s), at most 2048 code points', async () => {
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, jwksUrl: 'ftp://keys.example.com' }),
+      'jwksUrl must be an http(s) URL',
+    );
+    await expectBodyInvalid(
+      await post({ issuerUrl: ISSUER, jwksUrl: `${ISSUER}/${'k'.repeat(2048)}` }),
+      'jwksUrl exceeds 2048 character limit',
+    );
+    expect(insertedValues).toHaveLength(0);
+  });
+
+  it('an empty-string jwksUrl is stored as null', async () => {
+    selectResults = [[anchorRow()]];
+    const res = await post({ issuerUrl: ISSUER, jwksUrl: '' });
+    expect(res.status).toBe(201);
+    expect((insertedValues[0] as { jwksUrl: unknown }).jwksUrl).toBeNull();
   });
 });
 
