@@ -8,20 +8,20 @@ what the CP may or may not change without coordinating. Anything marked
 
 It is deliberately **not** a description of how the playground works. The
 playground-side map — which playground feature calls which CP endpoint, the
-`CpClient` methods, the scenario step types that drive them, and the
-degradation mechanics — is owned by and documented in the playground repo:
-[`aitp-playground/docs/control-plane.md`][pg-cp] (see its "CP endpoints the
-playground uses" and "What lives where" sections). This page links there rather
-than restating it, exactly as that page links back here for endpoint shapes.
+`CpClient` methods, the scenario step types that drive them, discovery and
+failover, timeouts, and the degradation mechanics — is owned by and documented
+in the playground repo: [`aitp-playground/docs/control-plane.md`][pg-cp] (see
+its "CP endpoints the playground uses", "Event ingest" and "What lives where"
+sections). This page links there rather than restating it, exactly as that page
+links back here for endpoint shapes.
 
 ## The one invariant: everything degrades gracefully
 
 **No CP call is required for a scenario to run.** The playground treats every CP
-call as optional and best-effort — when `CP_BASE_URL` is unset, or any call
-times out or errors, it falls back to a no-op and the run still completes,
-losing only the CP-backed discovery, telemetry, and inspection features. The
-exact fallback values and per-call timeout are the playground's concern; see
-[`control-plane.md`][pg-cp].
+call as optional and best-effort; when the CP is not configured or a call fails,
+the run still completes, losing only the CP-backed discovery, telemetry, and
+inspection features. The fallback values and client timeouts are the
+playground's concern; see [`control-plane.md`][pg-cp].
 
 The CP obligation this implies — and the only part of the invariant this repo
 owns — is: **return 2xx quickly** on the hot-path calls (discovery and
@@ -37,45 +37,74 @@ Breaking either is a breaking change.
 
 ### 1. Capability discovery — `GET /api/registry/agents?capability=<cap>`
 
-Used when a scenario sets `trust.discovery: cp_registry` for an `org: external`
-agent (`discover_by_capability`, driven from the trust orchestrator). The
-playground reads `agents[0].handshakeEndpoint` to point its peer-discovery
-TrustOrchestrator at the first match.
+Public (no API key). Used for the playground's `cp_registry` discovery mode: it
+takes the first returned agent's handshake endpoint and derives the peer's
+manifest URL from it. How the playground picks the capability and falls back
+when nothing matches is described in
+[`control-plane.md` § Discovery][pg-cp].
 
 ```json
-{ "agents": [ { "aid": "aid:pubkey:z:...", "handshakeEndpoint": "http://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
+{ "agents": [ { "aid": "aid:pubkey:ed25519:...", "handshakeEndpoint": "http://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
 ```
 
-The CP **must** include `handshakeEndpoint` on every record. If this call returns
-`[]` or a non-2xx, the scenario fails over to `static` discovery. (Full record
-shape: [`api.md`](api.md#get-apiregistryagents).)
+The CP **must** include `handshakeEndpoint` on every record and keep the
+`agents` envelope. (Full record shape:
+[`api.md`](api.md#get-apiregistryagents).) See
+[Known contract drift](#known-contract-drift) — the playground currently reads a
+different key name.
 
 ### 2. Telemetry ingestion — `POST /api/events`
 
-Fire-and-forget after a run completes (`ingest_events`). Body is
-`{ "events": [...] }` with **snake_case** keys — this is canonical from the
-playground:
+Requires an API key when `API_KEYS` is set. Body is `{ "events": [...] }`. The
+playground does **not** wrap fields in `payload` or use the CP's camelCase
+envelope: each event is a flat object made of the playground's own fields. A
+typical batch mixes runner events and agent-reported events (field set from the
+playground's `RunEvent` model in `src/aitp_playground/runner/context.py` and
+`emit_event` in `agents/base/telemetry.py`):
 
 ```json
-{ "events": [ { "type": "handshake.completed", "ts": "2026-05-25T12:00:00.000Z", "aid_a": "aid:pubkey:z:...", "aid_b": "aid:pubkey:z:...", "session_id": "uuid", "run_id": "run-abc", "grants": ["demo.echo"], "payload": { "...": "..." }, "playground": { "run_id": "run-abc", "scenario": "research-and-write" } } ] }
+{ "events": [
+  { "type": "trust.established", "ts": 1779710400.123, "run_id": "run-abc",
+    "initiator": "researcher", "target": "writer", "grants": ["demo.echo"] },
+  { "type": "handshake.complete", "ts": 1779710400.456, "run_id": "run-abc",
+    "agent_id": "writer", "session_id": "uuid", "peer_aid": "aid:pubkey:ed25519:...",
+    "grants": ["demo.echo"], "role": "responder",
+    "tct": { "token": "<compact JWS>", "claims": { "...": "..." } } }
+] }
 ```
 
-The CP must: return 2xx quickly; normalize `aid_a`/`aid_b`/`session_id`/`run_id`
-to camelCase internally; de-dupe on event `id` (`ON CONFLICT DO NOTHING`); and
-tolerate unknown event types (record as-is, never 4xx). See
-[`events.md`](events.md) for which types drive projections and webhooks.
+Runner events also carry the other `RunEvent` fields, mostly `null`. The CP
+normalizes each event as described in
+[`events.md` § Ingest normalization](events.md#ingest-normalization). The parts
+of that normalization this contract relies on are **load-bearing**:
 
-Batch limits still apply: ≤ 256 KiB per request, **≤ 500 events per batch**,
-≤ 64 KiB per event `payload` — an over-cap batch gets `413 PAYLOAD_TOO_LARGE`,
-not a fire-and-forget 2xx. Runners producing more than 500 events per run must
-split the batch.
+- **Missing `payload` ⇒ the whole raw event is the payload.** This is how
+  `tct`, `peer_aid` and the other flat fields reach the projections — e.g. the
+  TCT projection reads `payload.tct` (see
+  [`events.md` § TCT & delegation projection](events.md#tct--delegation-projection)).
+- **`initiator` / `target` → `aidA` / `aidB`**, `run_id` → `runId`,
+  `session_id` → `sessionId`.
+- **Numeric `ts` is a Unix epoch** (the playground sends float seconds).
+- Unknown event types are stored and streamed, never rejected.
 
-> ⚠️ The playground emits `handshake.completed` (past tense), but the CP's
-> session/TCT projection and webhook fan-out key on `handshake.complete`. Events
-> are stored and streamed either way, but `completed` projects **no** session.
-> This is a known naming mismatch between the two repos — see
-> [`events.md` § naming nuance](events.md#sessions-projection). Resolve it on one
-> side before relying on session projections from playground telemetry.
+`aidA` / `aidB` are stored as given and not validated as AIDs; the playground's
+runner events put scenario agent ids (e.g. `researcher`) there, so those rows
+carry agent ids, not AIDs. The agent-reported `handshake.complete` /
+`handshake.started` events carry no `initiator`/`target`.
+
+**Duplicates.** The playground sends no `Idempotency-Key`, and the CP gives
+every ingested event a fresh `id` (client ids are discarded). When a run uses
+the mid-run flush (the `cp_delegation_tree` step) and then the post-run batch
+re-sends the run's full event log, those events are stored **twice** in
+`audit_events` (and appear twice in `/api/events/history` and session replay).
+The projections themselves are insert-if-absent or update-only, so sessions,
+TCTs and delegations are not duplicated. See
+[`events.md` § How an ingested event is handled](events.md#how-an-ingested-event-is-handled).
+
+Batch limits still apply (see
+[`api.md`](api.md#post-apievents-body)): an over-cap batch gets
+`413 PAYLOAD_TOO_LARGE`, not a fire-and-forget 2xx, so a producer with more
+events than the per-batch cap must split them.
 
 ## Endpoints the playground depends on
 
@@ -88,17 +117,17 @@ record of what those calls depend on.
 
 | Endpoint | Load-bearing? | CP-side contract the playground relies on |
 |---|---|---|
-| `GET /api/registry/agents?capability=` | **yes** | reads `agents[0].handshakeEndpoint` (see above) |
-| `POST /api/events` | **yes** | snake_case envelope keys; 2xx quickly (see above) |
-| `POST /api/revocation/entries` | no | body `{jti, reason?}`; idempotent |
-| `GET /.well-known/aitp-revocation-list` | no | **public, no auth**; reads `entries[].jti` (tolerates a `revocation_list` wrapper) |
-| `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit` |
-| `GET /api/sessions` | no | params `run_id`, `aid`, `status`, `limit` |
+| `GET /api/registry/agents?capability=` | **yes** | public; `agents[]` with a handshake endpoint (see above) |
+| `POST /api/events` | **yes** | flat events, normalization above; 2xx quickly |
+| `POST /api/revocation/entries` | no | body `{jti, reason?}`; `jti` must be a UUID. Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
+| `GET /.well-known/aitp-revocation-list` | no | fetched by the playground's **agents**, not its service; see [Revocation list](#revocation-list) |
+| `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit`; reads `events` |
+| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. The playground also sends `limit`, which this route ignores: it always returns up to 200 newest sessions |
 | `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
-| `POST /api/webhooks` | no | run-scoped delivery URL; `events: []` ⇒ all deliverable types |
-| `DELETE /api/webhooks/{id}` | no | 404 treated as success |
-| `GET /api/tcts` | no | sends `sessionId` (camelCase), `active=true` as string |
-| `GET /api/delegations` | no | `root_jti` walks the tree |
+| `POST /api/webhooks` | no | body `{url, events, secret?, active}`; `events: []` ⇒ all deliverable types |
+| `DELETE /api/webhooks/{id}` | no | the playground treats `404` as success |
+| `GET /api/tcts` | no | sends `sessionId` (camelCase), `active=true` as a string; reads `tcts` |
+| `GET /api/delegations` | no | `root_jti` walks the tree; reads `delegations` |
 | `GET /api/dashboard/overview` | no | ⚠️ param drift — see below |
 | `GET /api/dashboard/agents` | no | reads `agents` |
 | `GET /api/trust-anchors` | no | reads `trustAnchors`; `namespace` filter |
@@ -108,17 +137,39 @@ record of what those calls depend on.
 
 The playground also **receives** webhook deliveries the CP POSTs to a run-scoped
 URL it registers via `POST /api/webhooks`. The CP signs those with
-`X-AITP-Signature` — see [`api.md` § Webhooks](api.md#webhooks).
+`X-AITP-Signature` — see [`events.md` § Webhook-deliverable events](events.md#webhook-deliverable-events)
+and [`api.md` § Webhooks](api.md#webhooks).
 
 Enrollment (`POST /api/registry/enroll` → `POST /api/registry/agents`) is **not**
-called by the playground — agents enroll themselves; the playground only
+called by the playground service — agents enroll themselves; the playground only
 discovers them.
+
+### Revocation list
+
+`GET /.well-known/aitp-revocation-list` is public; the CP ignores any
+`Authorization` header on it (the playground's agents send their configured CP
+API key as a Bearer token when one is set). The response is the signed envelope
+defined by [RFC-AITP-0008 §1.5][rfc8-15], signed with the CP's own identity.
+The playground's agents verify that signature against the AID pinned in their
+`CP_AID` setting and discard any snapshot that does not verify — there is no
+unsigned or alternative-shape fallback. So the CP **must** keep serving exactly
+the RFC-AITP-0008 §1.5 envelope, and its signing identity (`CP_AID_SEED_HEX`,
+see [`operations.md` § Identity](operations.md#identity)) must stay stable for
+pinned agents to keep accepting it.
+
+[rfc8-15]: https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md
 
 ## Known contract drift
 
 Surfaced while reconciling this doc with the live client — fix on whichever side
 owns the field:
 
+- **Discovery key casing.** The CP returns `handshakeEndpoint` (camelCase); the
+  playground's `cp_registry` discovery reads `handshake_endpoint` (snake_case)
+  from each record. The key is therefore never found, and the playground falls
+  back to its local handshake address even when the CP returns a match. Fix on
+  either side: read `handshakeEndpoint` in the playground, or have the CP also
+  emit the snake_case key.
 - **Dashboard window is ignored.** The playground sends `?window=<window>` to
   `GET /api/dashboard/overview`, but the CP route reads **`?range=`**. The CP
   therefore always returns the default `24h` window regardless of what the
@@ -127,11 +178,15 @@ owns the field:
 
 ## Configuration mapping
 
-| Playground config | CP env var | Notes |
+| Playground setting | CP side | Notes |
 |---|---|---|
-| `cp_base_url` | `CP_BASE_URL` | Empty ⇒ the whole client is a no-op |
-| `cp_api_key` | one of `API_KEYS` | Sent as `Authorization: Bearer` on every call except the public revocation-list fetch. If unset on the playground but `API_KEYS` is set on the CP, gated calls 401 (and degrade). In dev with `API_KEYS=` the CP accepts unauthenticated calls. |
-| `cp_timeout_ms` | n/a | Client-side timeout, default 5000 ms |
+| `CP_BASE_URL` | the CP's base URL | Empty ⇒ the playground's CP integration is disabled. |
+| `CP_API_KEY` | one of `API_KEYS` | Sent as `Authorization: Bearer` when set. If unset on the playground but `API_KEYS` is set on the CP, the gated calls get `401` (and degrade). With `API_KEYS` empty outside production the CP accepts unauthenticated calls (see [`api.md` § Authentication](api.md#authentication)). |
+| `CP_AID` | the CP's own AID | Must equal the CP's AID — `manifest.aid` in the envelope served at `/.well-known/aitp-manifest` (derived from `CP_AID_SEED_HEX`). Empty or wrong ⇒ the playground's agents discard every revocation snapshot. |
+
+Timeouts and other client tuning are playground-owned; see
+[`control-plane.md`][pg-cp] and the playground's
+[`getting-started.md` § Configure][pg-gs-cfg].
 
 ## Versioning
 
@@ -139,9 +194,14 @@ The CP follows semver; this contract is **stable under v0.x** — additions are
 allowed, breaking changes need coordination.
 
 - Adding optional fields to the agent record or event envelope: non-breaking.
-- Renaming/removing `handshakeEndpoint`, `aid`, `aid_a`, `aid_b`, `session_id`, `run_id`: **breaking** (load-bearing).
+- Renaming/removing `handshakeEndpoint` or `aid` on the agent record, or dropping
+  the ingest aliases the playground relies on (`initiator`, `target`,
+  `session_id`, `run_id`, numeric `ts`, raw event as `payload`): **breaking**
+  (load-bearing).
 - Changing auth on discovery or `/api/events`: **breaking**.
-- Renaming response keys the client reads (`agents`, `events`, `sessions`, `tcts`, `delegations`, `trustAnchors`, `pinnedKeys`, `entries`) or request keys it sends (`issuerUrl`, `jwksUrl`, `pubkey`, `sessionId`, `jti`): breaking for that feature — coordinate.
+- Changing the revocation-list envelope or rotating the CP identity: breaks
+  revocation propagation for agents pinned to the old `CP_AID`.
+- Renaming response keys the client reads (`agents`, `events`, `sessions`, `tcts`, `delegations`, `trustAnchors`, `pinnedKeys`) or request keys it sends (`issuerUrl`, `jwksUrl`, `pubkey`, `sessionId`, `jti`): breaking for that feature — coordinate.
 
 ## Verifying locally
 
@@ -159,6 +219,7 @@ payloads are playground-owned; follow
 ```bash
 export CP_BASE_URL=http://localhost:4000
 export CP_API_KEY=""   # leave empty for local dev (no API_KEYS set on the CP)
+export CP_AID="$(curl -s http://localhost:4000/.well-known/aitp-manifest | jq -r .manifest.aid)"
 ```
 
 After a run, confirm the load-bearing telemetry path from the CP side:
@@ -173,3 +234,4 @@ surface is exercised by scenarios using the `cp_subscribe_webhook`, `revoke_tct`
 types — all defined and documented in the playground repo.
 
 [pg-gs]: https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/getting-started.md
+[pg-gs-cfg]: https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/getting-started.md#configure
