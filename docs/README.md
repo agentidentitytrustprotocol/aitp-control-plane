@@ -25,7 +25,7 @@ The control plane answers those **around** the protocol, without weakening it:
 
 - **It is not a TCT issuer.** Agents issue TCTs to each other (RFC-AITP-0005). A central issuer would break the threat model.
 - **It is not a gateway or proxy.** Handshake traffic (RFC-AITP-0004) is agent-to-agent; the CP never sees handshake payloads.
-- **It is not a UI.** It serves JSON only; build a console separately (see [`aitp-ui-console`](https://github.com/agentidentitytrustprotocol)).
+- **It is not a UI.** It serves JSON only; build a console separately (see [`aitp-ui-console`](https://github.com/agentidentitytrustprotocol/aitp-ui-console/blob/main/README.md)).
 
 ## Features
 
@@ -79,12 +79,15 @@ it, happen **agent-to-agent** using the protocol — see `aitp-rs` and the RFCs.
 | [`api.md`](api.md) | HTTP API reference — every route, auth, filters, request/response shapes, error codes, rate limiting, idempotency. Companion to [`../openapi.yaml`](../openapi.yaml). |
 | [`events.md`](events.md) | Event reference — the envelope, which event types are recognized vs. merely stored, what each projects, and the webhook-deliverable set. |
 | [`data-model.md`](data-model.md) | Postgres schema — every table, column, index, and the migration history. |
-| [`operations.md`](operations.md) | Runbook — identity seed, auth/exposure, rate limiting, SSE capacity, data retention, observability/OTel, health & graceful shutdown, multi-tenancy. |
+| [`operations.md`](operations.md) | Runbook — identity seed, revocation list, auth/exposure (and summaries of the request-gate, shipped-image and SSE harnesses), rate limiting, SSE capacity, webhook delivery, trust-anchor JWKS refresh, observed-artifact verification, data retention, observability/OTel, health & graceful shutdown, database, multi-tenancy. The per-check index of the shipped-image harness lives in [`internal_docs/IMAGE-HARNESS.md`](https://github.com/agentidentitytrustprotocol/aitp-control-plane/blob/main/internal_docs/IMAGE-HARNESS.md). |
 | [`integration-playground.md`](integration-playground.md) | The stable integration contract with [`aitp-playground`](https://github.com/agentidentitytrustprotocol/aitp-playground). |
 
-> **Published pages** (these are mirrored to the docs website). Deployment and
-> CI/CD live in [`../internal_docs/DEPLOY.md`](../internal_docs/DEPLOY.md), which
-> is **internal-only** and deliberately not published.
+> **Published pages:** the docs listed above (and the top-level `README.md`) are
+> mirrored to the docs website. This index page itself is **not** synced. Deployment
+> and CI/CD live in [`../internal_docs/DEPLOY.md`](../internal_docs/DEPLOY.md), and
+> the image-harness index in
+> [`../internal_docs/IMAGE-HARNESS.md`](../internal_docs/IMAGE-HARNESS.md); both are
+> **internal-only** and deliberately not published.
 
 For build/quickstart and the env-var tables, see the top-level [`../README.md`](../README.md).
 
@@ -98,15 +101,20 @@ semantics. Canonical sources:
 
 | Concept used by the CP | Normative RFC |
 |---|---|
+| Core: AID forms ([§5.3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md#53-agent-id-aid)), JCS signing input ([§5.4.1](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md#541-signing-input-jcs-profile)), Ed25519 / P-256 signature algorithms ([§5.4.3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md#543-algorithm-tagged-signature-wire-format-jcs-profile-only)), `cnf` JWK thumbprint ([§5.4.4](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md#544-jwk-thumbprint-for-cnf)) | [RFC-AITP-0001 Core][rfc1] |
 | Identity binding, trust anchors, pinned keys | [RFC-AITP-0002 Identity][rfc2] |
 | Agent Manifest (the signed self-description the registry caches) | [RFC-AITP-0003 Manifest][rfc3] |
 | Four-message mutual handshake (the CP never participates) | [RFC-AITP-0004 Handshake][rfc4] |
-| Trust Context Token — issuer/subject/audience/`cnf` (what `issued_tcts` mirrors) | [RFC-AITP-0005 TCT][rfc5] |
+| Trust Context Token — issuer/subject/audience/`cnf` ([§3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0005-tct.md#3-confirmation-claim-cnf)) (what `issued_tcts` mirrors) | [RFC-AITP-0005 TCT][rfc5] |
 | Single-hop delegation | [RFC-AITP-0006 Delegation][rfc6] |
 | Peer-key resolution | [RFC-AITP-0007 Key Resolution][rfc7] |
-| Revocation (the signed list the CP serves) | [RFC-AITP-0008 Revocation][rfc8] |
+| Revocation (the signed list the CP serves; envelope signing [§1.5](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#15-signed-revocation-response)) | [RFC-AITP-0008 Revocation][rfc8] |
 | Threat model & required defenses | [RFC-AITP-0009 Security][rfc9] |
-| Multi-hop delegation (draft) | [RFC-AITP-0011 Multi-hop][rfc11] |
+| Session Trust Bundle (Draft, opt-in — not part of v0.2 core conformance; the CP has no specific handling for it) | [RFC-AITP-0010 Session Trust Bundle][rfc10] |
+| Multi-hop delegation (Draft, opt-in — not part of v0.2 core conformance) | [RFC-AITP-0011 Multi-hop][rfc11] |
+| TCT renewal (Planned — a stub reserving the number; the CP has no specific handling for it) | [RFC-AITP-0013 TCT Renewal][rfc13] |
+| Error-code registry — the CP reuses `MANIFEST_INVALID` / `MANIFEST_EXPIRED` from the [manifest codes](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/registries/error-codes.md#manifest-codes-rfc-aitp-0003) (the CP's `MANIFEST_INVALID` is broader than the registry's schema-only meaning); its other codes, such as `REVOCATION_UNAVAILABLE`, are CP HTTP codes, not registry entries. Agents verifying the CP's list report the [revocation codes](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/registries/error-codes.md#revocation-codes-rfc-aitp-0008) | [`registries/error-codes.md`](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/registries/error-codes.md) |
+| Which repo owns which fact ([ownership rule](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/docs/ecosystem.md#ownership-rule), [repositories](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/docs/ecosystem.md#the-repositories)) | [`docs/ecosystem.md`](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/docs/ecosystem.md) |
 
 Non-normative protocol guides: [Initial Peer Discovery][disc] · [Integration Guide][intg] · [Threat Model][threat] · [Glossary][gloss].
 
@@ -116,16 +124,30 @@ verify them ([Node][rsnode] · [Python][rspy]). The CP depends on the published
 [`@agentidentitytrustprotocol/aitp`](https://www.npmjs.com/package/@agentidentitytrustprotocol/aitp)
 package for its own identity and signing, not for any trust-path role.
 
+## Sibling docs
+
+These repos own the facts below; the CP docs link to them instead of copying.
+
+| Repo | Doc | Use it for |
+|---|---|---|
+| Spec | [`rfcs/README.md`](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/README.md) · [`docs/ecosystem.md`](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/docs/ecosystem.md) | RFC index and status; which repo owns what |
+| `aitp-rs` | [`docs/sdk-node.md`](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md) ([manifest verification](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification), [revocation lists](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008)) · [`docs/multihop-delegation.md`](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/multihop-delegation.md) · [`bindings/aitp-node/README.md`](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/bindings/aitp-node/README.md) | The Node SDK the CP calls, its verify-code lists, multi-hop chain semantics |
+| `aitp-playground` | [`docs/control-plane.md`](https://github.com/agentidentitytrustprotocol/aitp-playground/blob/main/docs/control-plane.md) | How the playground uses the CP (endpoints, discovery, event ingest, webhooks) |
+| `aitp-docs` | [`README.md`](https://github.com/agentidentitytrustprotocol/aitp-docs/blob/main/README.md) | Cross-repo knowledge base and read-only MCP server |
+| `aitp-ui-console` | [`README.md`](https://github.com/agentidentitytrustprotocol/aitp-ui-console/blob/main/README.md) | The console that reads this API |
+
 ## Source of truth
 
 For **control-plane behavior**, the code wins — `src/proxy.ts` (auth + rate
 limiting), `src/lib/config.ts` (env vars), `src/app/api/**/route.ts` (routes),
 `src/lib/db/schema.ts` (tables). Keep these docs in sync when those change. For
-**protocol behavior**, the RFCs win. This repo's `docs/**` and `README.md` are
-mirrored to the [docs website](https://agentidentitytrustprotocol.io/control-plane)
-on every push to `main` (files in `../internal_docs/` are excluded).
+**protocol behavior**, the RFCs win. This repo's `docs/*.md` (except this
+`docs/README.md`) and the top-level `README.md` are mirrored to the
+[docs website](https://agentidentitytrustprotocol.io/control-plane) on every push
+to `main`; files in `../internal_docs/` are excluded.
 
 [spec]: https://agentidentitytrustprotocol.io/spec
+[rfc1]: https://agentidentitytrustprotocol.io/spec/core
 [aitprs]: https://agentidentitytrustprotocol.io/implementation
 [rfc2]: https://agentidentitytrustprotocol.io/spec/identity
 [rfc3]: https://agentidentitytrustprotocol.io/spec/manifest
@@ -135,7 +157,9 @@ on every push to `main` (files in `../internal_docs/` are excluded).
 [rfc7]: https://agentidentitytrustprotocol.io/spec/key-resolution
 [rfc8]: https://agentidentitytrustprotocol.io/spec/revocation
 [rfc9]: https://agentidentitytrustprotocol.io/spec/security
+[rfc10]: https://agentidentitytrustprotocol.io/spec/session-trust-bundle
 [rfc11]: https://agentidentitytrustprotocol.io/spec/multihop-delegation
+[rfc13]: https://agentidentitytrustprotocol.io/spec/tct-renewal-extension
 [disc]: https://agentidentitytrustprotocol.io/docs/discovery
 [intg]: https://agentidentitytrustprotocol.io/docs/integration-guide
 [threat]: https://agentidentitytrustprotocol.io/docs/threat-model

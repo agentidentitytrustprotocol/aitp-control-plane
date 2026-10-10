@@ -101,7 +101,7 @@ export async function GET() {
     // than as the absence of one string.
     //
     // Nothing is lost for the scraper: `aitp_control_plane_db_up 0` below is the
-    // signal, and docs/operations.md says so explicitly ("Alert on `db_up`, not
+    // signal, and docs/operations.md#metrics says so explicitly ("Alert on `db_up`, not
     // on the absence of the others"). The message-free comment is still emitted
     // — see below.
     //
@@ -131,7 +131,7 @@ export async function GET() {
   // Kept as a literal, with no detail. It is the human hint for whoever is
   // curling this endpoint during an incident, it costs a scraper nothing
   // (comments other than # HELP / # TYPE are ignored), and it keeps
-  // docs/operations.md's "`db_up 0` plus a `# DB unavailable` comment appears
+  // docs/operations.md#metrics's "`db_up 0` plus a `# DB unavailable` comment appears
   // instead" true. Emitted here rather than in the catch so the line cannot be
   // built from `err`, and positioned before the db_up block so scrape output
   // ordering is unchanged from before the fix.

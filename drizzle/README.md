@@ -6,7 +6,9 @@ in `meta/NNNN_snapshot.json`.
 
 ## Files
 
-- `0000_init.sql` — initial six-table schema.
+- `0000_init.sql` — initial seven-table schema (`agents`,
+  `handshake_sessions`, `audit_events`, `revocation_entries`, `webhooks`,
+  `webhook_deliveries`, `admin_audit_log`).
 - `0001_plan_v0_2.sql` — v0.2 schema upgrade: status normalize,
   `namespace`, `last_enrolled_at`, namespace btree index.
 - `0002_offered_caps_gin.sql` — GIN index on `agents.offered_caps`
@@ -14,6 +16,16 @@ in `meta/NNNN_snapshot.json`.
 - `0003_webhook_delivery_body.sql` — adds `body` + `signature` columns
   to `webhook_deliveries` so retries POST byte-identical bytes with
   a stable HMAC signature.
+- `0004_idempotency_keys.sql` — `idempotency_keys` table (PK
+  `(scope, key)`) + `created_at` index.
+- `0005_aitp_depth.sql` — `issued_tcts`, `delegations`,
+  `trust_anchors`, `pinned_keys` tables + their indexes.
+- `0006_trust_anchors_uniq.sql` — unique index on
+  `trust_anchors (namespace, issuer_url)`.
+- `0007_enrollment_jtis.sql` — `enrollment_jtis` table + `expires_at`
+  index.
+
+Column-level reference: [`docs/data-model.md`](../docs/data-model.md).
 
 ## Applying migrations
 

@@ -32,7 +32,7 @@ import { config } from '../config';
  * Minimum usable secret length, in characters.
  *
  * 32 is a floor on entropy for an HMAC-SHA256 key, and it is a *published*
- * number: `README.md`, `.env.example`, `docs/operations.md`,
+ * number: `README.md`, `.env.example`, `docs/operations.md#authentication--exposure`,
  * `internal_docs/DEPLOY.md` and both routes' documented 503 all state it, and
  * the harnesses in `scripts/` pin secrets comfortably above it. Raising it is a
  * breaking change for existing deployments — every one of them would refuse to
@@ -151,7 +151,7 @@ export function enrollmentSecretBootFailure(): {
   // Both routes are named explicitly. The register half is the one operators
   // miss: it is invisible in the metrics (`enroll_verification_failures` is the
   // enroll route's own counter and never moves for it — see
-  // docs/operations.md), so a log line that mentioned only enrollment would
+  // docs/operations.md#metrics), so a log line that mentioned only enrollment would
   // understate the outage by half.
   const consequence =
     'POST /api/registry/enroll cannot mint enrollment tokens and ' +

@@ -52,8 +52,9 @@
  * matched by the pinned matcher, invoked on every request — and still DECIDE WRONGLY,
  * because its decision is compiled code that no manifest describes. The previous answer
  * was to probe the gate's behaviour over the whole route population (360 requests: six
- * verbs x thirty pinned routes x four id shapes) and it was defeated five times running,
- * each time by a dimension the probes held constant:
+ * verbs over the then-thirty pinned routes, each of the ten dynamic ones in four id
+ * shapes) and it was defeated five times running, each time by a dimension the probes
+ * held constant:
  *
  *     the gate BODY     rewrite the compiled isPublicRequest -> 12/12 green while five
  *                       admin routes answered 200
@@ -565,7 +566,7 @@ const GATE_CANONICAL_PATH = path.join(ROOT, 'scripts', 'image-gate-canonical.txt
  * `RATE_LIMIT_EXEMPT_PATHS` would refuse BOTH rewrites that exist today, which are the
  * `/.well-known/*` manifest and revocation-list routes the protocol requires to be reachable
  * at those exact paths. The authentication bypass is the one this check exists to stop; the
- * rate-limit residual is named here, in the failure text, and in `docs/operations.md` so that
+ * rate-limit residual is named here, in the failure text, and in `docs/operations.md#rate-limiting` so that
  * a future reader weighing a new clearance entry knows what it costs.
  *
  * WHY THIS IS NOT THE `publicApiRoutes` PIN THAT WAS DELETED AS ROT. That one was a SECOND,
@@ -2243,7 +2244,7 @@ const UNPINNED_ENV_KEYS = new Set(['NODE_VERSION', 'YARN_VERSION']);
  * cannot survive.
  *
  * WHY THIS IS NOT "teaching the comparison to tolerate variation". The prohibition that
- * matters — stated in this file's header and in docs/operations.md — is against tolerating
+ * matters — stated in this file's header and in internal_docs/IMAGE-HARNESS.md — is against tolerating
  * variation in COMPILED OUTPUT, because that is the thing an attacker edits and the thing
  * five probe-based formulations were defeated on. `experimental.cpus` is not compiled
  * output and not this repo's code: it is `os.cpus().length` from whichever machine ran
@@ -4353,7 +4354,7 @@ async function startPostgres(net) {
  * one. An unmigrated harness is a harness that lies.
  *
  * On the host because the runtime image bundles no drizzle-kit — see
- * docs/operations.md. That is why Postgres publishes an ephemeral host port at
+ * docs/operations.md#database. That is why Postgres publishes an ephemeral host port at
  * all.
  */
 async function migrate(hostPort) {
@@ -4762,12 +4763,13 @@ async function assertGateReallyRuns(app) {
   // and created a trust anchor pointing at an attacker-controlled issuer.
   //
   // ONE request, deliberately. An earlier version of this phase answered the same
-  // finding with a 360-request cross product of six verbs, thirty routes and four id
-  // shapes, and was then defeated by the request shape and the id length — because
-  // the answer to "your sample missed a dimension" is not a bigger sample. That
-  // proof now lives in check 13, which compares the gate's compiled bytes to a
-  // committed copy and so covers every verb at once without sending anything. What
-  // this line adds, and what check 13 structurally cannot, is that the pinned bytes
+  // finding with a 360-request cross product (six verbs over the then-thirty routes,
+  // the ten dynamic ones in four id shapes each), and was then defeated by the request
+  // shape and the id length — because the answer to "your sample missed a dimension"
+  // is not a bigger sample. That proof now lives in check 13, which compares the
+  // gate's compiled bytes to a committed copy and so covers every verb at once
+  // without sending anything. What this line adds, and what check 13 structurally
+  // cannot, is that the pinned bytes
   // are REACHED on a verb other than GET: a mutating request really does arrive at
   // the gate and really is refused. `/api/trust-anchors` because it is the route
   // whose exposure was actually measured, and POST because that is what created the
@@ -6240,7 +6242,7 @@ async function main() {
   //
   // CALLED HERE, IN THE STATIC HALF, and not where its id would suggest. The id is 24
   // because this file APPENDS check ids and never renumbers them — renumbering to slot
-  // this next to check 11 would touch ~60 live references plus docs/operations.md prose
+  // this next to check 11 would touch ~60 live references plus internal_docs/IMAGE-HARNESS.md
   // and bury a security addition in a rename, and the historical counts in the header are
   // part of the evidence. But `runCheck` takes the id as an argument, so the CALL SITE is
   // free, and this one is a pure function of a file copied out of the image plus the

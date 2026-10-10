@@ -46,8 +46,8 @@ export async function register(): Promise<void> {
   // pass its health checks, and then answer 503 SERVER_MISCONFIGURED to
   // every POST /api/registry/enroll and every POST /api/registry/agents
   // for as long as it ran — with no counter and no log line anywhere in
-  // the process to say so (issue #99; see docs/operations.md's metrics
-  // section for why that silence is deliberate on the request path).
+  // the process to say so (issue #99; see docs/operations.md#metrics
+  // for why that silence is deliberate on the request path).
   // This turns that into one loud failure at deploy time, before any
   // traffic.
   //
@@ -72,7 +72,8 @@ export async function register(): Promise<void> {
   // snapshotted at import and the service memoizes on success), so failing
   // readiness on it could only ever mean "this process should never have
   // started" — while pulling the replica out of rotation for every route
-  // over a fault that breaks two. See docs/operations.md.
+  // over a fault that breaks two. See
+  // docs/operations.md#what-apireadyz-deliberately-does-not-check.
   const { warnOnUnrecognisedNodeEnv } = await import('./lib/node-env');
   warnOnUnrecognisedNodeEnv();
 

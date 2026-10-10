@@ -226,7 +226,7 @@ describe('enrollmentSecretBootFailure', () => {
 
   it('names BOTH routes, because the register half is invisible in the metrics', () => {
     // enroll_verification_failures is the enroll route's own counter and never
-    // moves for this fault (docs/operations.md), so a line mentioning only
+    // moves for this fault (docs/operations.md#metrics), so a line mentioning only
     // enrollment would understate the outage by half and send the operator
     // looking in the wrong place for the other one.
     withEnv({ NODE_ENV: 'production', ENROLLMENT_SECRET: 'short' }, (mod) => {

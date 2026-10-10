@@ -2,8 +2,8 @@
 
 Postgres schema, defined in [`src/lib/db/schema.ts`](../src/lib/db/schema.ts)
 with Drizzle and migrated by the SQL files in [`drizzle/`](../drizzle). All
-timestamps are `timestamptz` stored as ISO-8601 strings. JSON columns are
-`jsonb`.
+timestamps are native Postgres `timestamptz`; the application reads and writes
+them as ISO-8601 strings (Drizzle `mode: 'string'`). JSON columns are `jsonb`.
 
 This is a reference for operators querying the database directly and for anyone
 extending the schema. For the events that populate the derived tables, see
@@ -25,7 +25,7 @@ One row per enrolled agent.
 | `status` | varchar(32) | `active` \| `expired` \| `deregistered` (`inactive` is a legacy synonym) |
 | `registered_at` | timestamptz | Set once at first enrollment |
 | `last_enrolled_at` | timestamptz | Updated on every (re-)register |
-| `last_seen_at` | timestamptz | Last event reported by the agent |
+| `last_seen_at` | timestamptz | Set to the ingest time whenever the AID appears as `aidA`/`aidB` of an event ingested via `POST /api/events` |
 | `org`, `cloud` | varchar(128) | Optional labels (not set by the current enroll path) |
 | `namespace` | varchar(128) | Tenant scope, default `default` |
 | `metadata` | jsonb | Operator-provided blob |
@@ -49,11 +49,11 @@ Projected from `handshake.*` events. The CP never sees handshake traffic; this i
 Indexes: `status`, `aid_a`, `aid_b`, `run_id`.
 
 ### `audit_events` — append-only event store
-Every ingested or CP-emitted event. Source of truth behind `/api/events/history` and SSE.
+Every ingested or CP-emitted event. Backs `/api/events/history`. The SSE stream (`/api/events/stream`) is served from an in-memory bus and backlog, not from this table.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | uuid PK | De-dupe key (`ON CONFLICT DO NOTHING`) |
+| `id` | uuid PK | Always server-generated (a client-supplied event `id` is discarded), so it does not de-duplicate re-sent events; use `Idempotency-Key` on ingest |
 | `type` | varchar(128) | e.g. `handshake.complete` |
 | `ts` | timestamptz | Event time |
 | `aid_a`, `aid_b` | varchar(512) | |
@@ -73,11 +73,14 @@ Projected from `tct.issued` / `handshake.complete` payloads. The CP observes; it
 | `jti` | uuid PK | |
 | `issuer_aid`, `subject_aid`, `audience_aid` | varchar(512) | All indexed |
 | `grants` | jsonb `string[]` | GIN-indexed |
-| `binding_cnf` | varchar(128) | `cnf` confirmation key |
+| `binding_cnf` | varchar(128) | Opaque key-binding value: the `cnf.jkt` JWK thumbprint ([RFC-AITP-0005 §3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0005-tct.md)); older v0.1 reports stored `binding.cnf` here |
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `session_id` | varchar(255) | Indexed |
-| `revoked`, `revoked_at` | boolean / timestamptz | Mirrored from `revocation_entries` and `tct.revoked` |
+| `revoked`, `revoked_at` | boolean / timestamptz | Set by any `tct.revoked` event — CP-emitted on `POST /api/revocation/entries`, or ingested |
+| `created_at` | timestamptz | Row insert time |
+
+Indexes: `issuer_aid`, `subject_aid`, `audience_aid`, `session_id`, GIN on `grants`.
 
 ### `delegations` — delegation chains
 Parent→child TCT relationships — single-hop [RFC-AITP-0006](https://agentidentitytrustprotocol.io/spec/delegation); multi-hop draft [RFC-AITP-0011](https://agentidentitytrustprotocol.io/spec/multihop-delegation). `?root_jti=` queries walk this tree via a recursive CTE.
@@ -91,9 +94,12 @@ Parent→child TCT relationships — single-hop [RFC-AITP-0006](https://agentide
 | `issued_at`, `expires_at` | timestamptz | |
 | `revoked`, `revoked_at` | boolean / timestamptz | |
 | `revoked_reason` | varchar(64) | `explicit` \| `parent_revoked` (cascade) |
+| `created_at` | timestamptz | Row insert time |
+
+Indexes: `parent_jti`, `delegator_aid`, `delegatee_aid`. For how `jti` and `parent_jti` are derived from reported tokens, see [`events.md`](events.md#tct--delegation-projection).
 
 ### `revocation_entries` — revoked JTIs
-Backs the signed `/.well-known/aitp-revocation-list`. Adding a row also flips `issued_tcts.revoked`.
+Backs the signed `/.well-known/aitp-revocation-list` (format: [RFC-AITP-0008](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md)). Adding a row via `POST /api/revocation/entries` emits `tct.revoked`, which flips `issued_tcts.revoked`. An ingested `tct.revoked` event flips `issued_tcts.revoked` but does **not** add a row here.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -135,7 +141,7 @@ Distinct from `audit_events`; records who hit the admin mutating endpoints.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `action` | varchar(128) | e.g. `agent.register` |
+| `action` | varchar(128) | One of `agent.register`, `agent.deregister`, `revocation.add`, `webhook.create`, `webhook.update`, `webhook.delete`, `webhook.circuit-breaker.reset`, `trust-anchor.create`, `trust-anchor.update`, `trust-anchor.delete`, `pinned-key.upsert`, `pinned-key.delete` |
 | `actor_id` | varchar(255) | Indexed |
 | `target_id` | varchar(512) | Affected AID/JTI |
 | `details` | jsonb | |
@@ -151,7 +157,7 @@ OIDC identity mode ([RFC-AITP-0002](https://agentidentitytrustprotocol.io/spec/i
 | `namespace` | varchar(128) | Indexed |
 | `issuer_url` | text | |
 | `jwks_url` | text | Optional override of issuer's `jwks_uri` |
-| `jwks_cache`, `jwks_cached_at` | jsonb / timestamptz | CP-refreshed keyset cache |
+| `jwks_cache`, `jwks_cached_at` | jsonb / timestamptz | Issuer keyset cached by the CP's background JWKS refresher; served by `GET /api/trust-anchors/:id/jwks`. List/detail responses expose only `jwksCachedAt`. See [`operations.md`](operations.md#trust-anchor-jwks-refresh) |
 | `label`, `added_by` | varchar | |
 | `created_at`, `updated_at` | timestamptz | |
 
@@ -162,7 +168,7 @@ Pinned-key identity mode ([RFC-AITP-0002](https://agentidentitytrustprotocol.io/
 |---|---|---|
 | `namespace` | varchar(128) | PK part |
 | `aid` | varchar(512) | PK part; also indexed |
-| `pubkey` | varchar(128) | Ed25519 public key |
+| `pubkey` | varchar(128) | Ed25519 public key, 43-char base64url (the only form the API accepts) |
 | `label`, `added_by` | varchar | |
 | `expires_at` | timestamptz | Optional |
 | `created_at`, `updated_at` | timestamptz | |
@@ -172,7 +178,7 @@ Caches the response of a mutating request keyed by `(scope, key)`.
 
 | Column | Type | Notes |
 |---|---|---|
-| `scope` | varchar(64) | PK part — endpoint id (e.g. `agents.register`, `events.ingest`) |
+| `scope` | varchar(64) | PK part — endpoint id: `agents.register`, `events.ingest`, `pinned-keys.upsert`, `revocation.entries`, `trust-anchors.create`, `webhooks.create` |
 | `key` | varchar(255) | PK part — the client `Idempotency-Key` value |
 | `response_status` | integer | Cached HTTP status |
 | `response_body` | jsonb | Cached body |
@@ -184,14 +190,15 @@ A consumed enrollment-token `jti` lands here; a replay conflicts on the PK.
 | Column | Type | Notes |
 |---|---|---|
 | `jti` | varchar(64) PK | |
-| `expires_at` | timestamptz | Token TTL; row aged out after it |
-| `created_at` | timestamptz | Indexed |
+| `expires_at` | timestamptz | Token TTL; indexed; row aged out after it |
+| `created_at` | timestamptz | |
 
 ## Migrations
 
 Applied in order by `npm run db:migrate` (drizzle-kit). Each push to `main`
 that changes the schema adds a new file; run migrations against the target
 database from a checkout (the runtime image does not bundle `drizzle-kit`).
+See [`drizzle/README.md`](../drizzle/README.md) for the migration workflow.
 
 | File | Adds |
 |---|---|
@@ -202,7 +209,12 @@ database from a checkout (the runtime image does not bundle `drizzle-kit`).
 | `0004_idempotency_keys.sql` | `idempotency_keys` table |
 | `0005_aitp_depth.sql` | `issued_tcts`, `delegations`, `trust_anchors`, `pinned_keys` tables + their indexes |
 | `0006_trust_anchors_uniq.sql` | Unique `(namespace, issuer_url)` |
-| `0007_enrollment_jtis.sql` | `enrollment_jtis` table |
+| `0007_enrollment_jtis.sql` | `enrollment_jtis` table + index on `expires_at` |
+
+`drizzle/manual/0002_offered_caps_gin.concurrent.sql` is a parallel, operator-applied
+variant of `0002` that builds the same GIN index with `CREATE INDEX CONCURRENTLY`
+(no write lock on a large live `agents` table). It is **not** run by
+`npm run db:migrate`; its header documents the procedure.
 
 > **Retention note:** `revocation_entries`, `issued_tcts`, `delegations`,
 > `trust_anchors`, and `pinned_keys` are **not** swept — they're authoritative

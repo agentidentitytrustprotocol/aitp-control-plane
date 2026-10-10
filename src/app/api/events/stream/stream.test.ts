@@ -18,6 +18,7 @@
 //     close line carrying the reason
 //   • the three SSE metrics move as streams open, close and get refused, and the
 //     open/close/reject log lines carry the fields docs/operations.md documents
+//     (#is-the-stream-healthy-three-metrics-no-log-access-needed)
 //     (including truncation of caller-supplied values) and never take the stream
 //     down when the logger itself throws
 //   • the heartbeat runs at config.sseHeartbeatMs rather than a hardcoded 15s,
