@@ -1,5 +1,4 @@
 import { NextRequest } from 'next/server';
-import { randomUUID } from 'node:crypto';
 import { ingestEvents } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { sessionMonitor } from '@/lib/sessions/monitor';
@@ -16,38 +15,19 @@ import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { BodyTooLargeError, readBodyTextWithLimit } from '@/lib/http/read-body';
 import { checkColumnString } from '@/lib/http/validate';
-import { recordEventsDropped } from '@/lib/audit/ingest-metrics';
+import { recordEventsDropped, recordEventsDuplicate } from '@/lib/audit/ingest-metrics';
+import { eventIdFor, parseEventTimestamp } from '@/lib/audit/event-id';
+import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 /**
- * A `Date` the `ts` column can store: a valid instant (a number beyond the
- * ECMAScript range of +-8.64e15 ms yields an Invalid Date, whose
- * `toISOString()` throws) whose UTC year is 0001-9999 (outside that,
- * `toISOString()` renders an expanded `+010000-...` / `-000001-...` year).
- */
-function inStorableRange(d: Date): boolean {
-  if (Number.isNaN(d.getTime())) return false;
-  const year = d.getUTCFullYear();
-  return year >= 1 && year <= 9999;
-}
-
-/**
- * The event's `ts` as ISO-8601. An absent, unparseable or out-of-range value
- * (see {@link inStorableRange}) falls back to the ingest time.
+ * The event's `ts` as ISO-8601; an absent, unparseable or out-of-range value
+ * (see `parseEventTimestamp`) falls back to the ingest time.
  */
 function normalizeTimestamp(raw: unknown): string {
-  if (typeof raw === 'string') {
-    const d = new Date(raw);
-    if (inStorableRange(d)) return d.toISOString();
-  }
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    const ms = raw < 1e12 ? raw * 1000 : raw;
-    const d = new Date(ms);
-    if (inStorableRange(d)) return d.toISOString();
-  }
-  return new Date().toISOString();
+  return parseEventTimestamp(raw) ?? new Date().toISOString();
 }
 
 function pickString(...values: unknown[]): string | undefined {
@@ -64,11 +44,11 @@ function pickStringArray(value: unknown): string[] | undefined {
   return undefined;
 }
 
-function normalize(raw: Record<string, unknown>): AuditEventRecord {
+function normalize(raw: Record<string, unknown>, id: string): AuditEventRecord {
   const playground = (raw.playground as Record<string, unknown>) ?? {};
   const payload = (raw.payload as Record<string, unknown>) ?? {};
   return {
-    id: randomUUID(),
+    id,
     type: typeof raw.type === 'string' ? raw.type : 'unknown',
     ts: normalizeTimestamp(raw.ts),
     aidA: pickString(raw.aidA, (raw as { aid_a?: unknown }).aid_a, raw.initiator),
@@ -317,15 +297,25 @@ export async function POST(req: NextRequest) {
     // Non-object entries are skipped silently, as they always were (not
     // counted in `dropped`). Each object keeps its index in the ORIGINAL
     // array so `errors[].index` points at what the caller sent.
+    //
+    // The id is derived from the RAW event (content-derived id recipe v1,
+    // src/lib/audit/event-id.ts): same producer key + same raw content +
+    // a valid `ts` => same id on every request, so a re-sent event collides
+    // on the primary key instead of becoming a second row. Computed only for
+    // items that pass validation (canonicalJson is iterative, so even a
+    // deeply nested sibling field cannot overflow the stack).
+    const producerKey = actorIdFromAuthHeader(req.headers.get('authorization'));
     const candidates: Array<{
       index: number;
+      raw: Record<string, unknown>;
       event: AuditEventRecord;
       problem: ItemProblem | null;
     }> = [];
     rawEvents.forEach((e, index) => {
       if (typeof e !== 'object' || e === null) return;
-      const event = normalize(e as Record<string, unknown>);
-      candidates.push({ index, event, problem: itemProblem(event) });
+      const raw = e as Record<string, unknown>;
+      const event = normalize(raw, '');
+      candidates.push({ index, raw, event, problem: itemProblem(event) });
     });
 
     // Per-event payload cap — still whole-batch, unchanged. Measured on every
@@ -359,7 +349,7 @@ export async function POST(req: NextRequest) {
     const normalized: AuditEventRecord[] = [];
     const errors: ItemError[] = [];
     let dropped = 0;
-    for (const { index, event, problem } of candidates) {
+    for (const { index, raw, event, problem } of candidates) {
       if (problem) {
         dropped += 1;
         if (errors.length < MAX_REPORTED_ERRORS) {
@@ -367,6 +357,7 @@ export async function POST(req: NextRequest) {
         }
         continue;
       }
+      event.id = eventIdFor(raw, producerKey);
       normalized.push(event);
     }
     if (dropped > 0) {
@@ -378,7 +369,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await ingestEvents(normalized);
+    // De-duplicate within the batch (first occurrence wins), then let the
+    // primary key decide against what is already stored: `ingestEvents`
+    // returns only the ids it actually inserted. With several replicas, only
+    // the replica whose INSERT won fans the event out.
+    const unique: AuditEventRecord[] = [];
+    const seenIds = new Set<string>();
+    for (const event of normalized) {
+      if (seenIds.has(event.id)) continue;
+      seenIds.add(event.id);
+      unique.push(event);
+    }
+    const insertedIds = new Set(await ingestEvents(unique));
+    const inserted = insertedIds.size;
+    const duplicates = normalized.length - inserted;
+    if (duplicates > 0) recordEventsDuplicate(duplicates);
 
     const activeWebhooks = await listActiveWebhooks().catch((err) => {
       logger.warn({ err }, 'webhooks list failed, skipping fan-out');
@@ -386,7 +391,7 @@ export async function POST(req: NextRequest) {
     });
 
     const seenAids = new Set<string>();
-    for (const event of normalized) {
+    for (const event of unique) {
       if (event.aidA) seenAids.add(event.aidA);
       if (event.aidB) seenAids.add(event.aidB);
     }
@@ -398,8 +403,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    for (const event of normalized) {
-      eventBus.publish(event);
+    // Projections run for EVERY event, duplicates included: they are
+    // idempotent (insert-if-absent / guarded updates), and re-running them on
+    // a re-send repairs a projection that failed the first time. The SSE
+    // publish and webhook enqueue run ONLY for newly inserted events — a
+    // re-send must not reach live viewers or webhook receivers twice.
+    // Trade-off: a crash between the INSERT and the enqueue loses that
+    // event's fan-out for good (a re-send is then a duplicate) — at-most-once
+    // in that window, documented in docs/events.md.
+    const fresh = unique.filter((event) => insertedIds.has(event.id));
+    for (const event of unique) {
+      if (insertedIds.has(event.id)) eventBus.publish(event);
       await sessionMonitor.onEvent(event);
       await tctMonitor.onEvent(event);
     }
@@ -407,8 +421,8 @@ export async function POST(req: NextRequest) {
     // Webhook fan-out with bounded concurrency. The batch is already
     // capped at MAX_BATCH_EVENTS; this caps the in-flight enqueue width
     // so a full batch can't burst the outbound delivery layer.
-    for (let i = 0; i < normalized.length; i += WEBHOOK_DISPATCH_CONCURRENCY) {
-      const slice = normalized.slice(i, i + WEBHOOK_DISPATCH_CONCURRENCY);
+    for (let i = 0; i < fresh.length; i += WEBHOOK_DISPATCH_CONCURRENCY) {
+      const slice = fresh.slice(i, i + WEBHOOK_DISPATCH_CONCURRENCY);
       await Promise.all(
         slice.map((event) =>
           dispatchWebhooksWithList(event, activeWebhooks).catch((err) =>
@@ -418,6 +432,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return { status: 200, body: { ingested: normalized.length, dropped, errors } };
+    // `ingested` = items that passed validation (handed to the store);
+    // `inserted` + `duplicates` === `ingested`.
+    return {
+      status: 200,
+      body: { ingested: normalized.length, dropped, errors, inserted, duplicates },
+    };
   });
 }

@@ -74,6 +74,8 @@ describe('integration: POST /api/events drops unstorable items, keeps the rest',
         { index: 1, field: 'sessionId', reason: 'sessionId exceeds 255 character limit' },
         { index: 2, field: 'payload', reason: 'payload contains a NUL character' },
       ],
+      inserted: 2,
+      duplicates: 0,
     };
     expect(await res.json()).toEqual(expected);
 
@@ -135,6 +137,8 @@ describe('integration: POST /api/events drops unstorable items, keeps the rest',
         { index: 3, field: 'grants', reason: lone('grants') },
         { index: 4, field: 'payload', reason: lone('payload') },
       ],
+      inserted: 2,
+      duplicates: 0,
     };
     expect(await res.json()).toEqual(expected);
     expect(getEventsDroppedTotal()).toBe(droppedBefore + 4);

@@ -13,6 +13,11 @@
 //     or with a payload nested too deep is
 //     dropped and reported in `dropped` / `errors[]` while the rest ingest;
 //     out-of-range `ts` falls back to ingest time
+//   • de-duplication (#P5): content-derived ids (recipe v1) — same raw event
+//     + same bearer token + valid ts => same id across requests; key order
+//     irrelevant; ts-less events keep random ids; in-batch duplicates
+//     collapsed; events the store did not insert still reach the monitors but
+//     are NOT published or dispatched; `inserted` / `duplicates` reported
 //   • fan-out: eventBus.publish + session/tct monitors per event, last-seen
 //     touch with the union of AIDs, webhook dispatch with the active list —
 //     and graceful degradation when listing webhooks fails.
@@ -22,7 +27,8 @@
 import { jest } from '@jest/globals';
 import type { AuditEventRecord } from '@/lib/audit/stream';
 
-const ingestEventsMock = jest.fn(async (_e: AuditEventRecord[]) => undefined);
+// Default: the store inserts every record it is handed (returns all ids).
+const ingestEventsMock = jest.fn(async (e: AuditEventRecord[]) => e.map((r) => r.id));
 const publishMock = jest.fn();
 const sessionOnEventMock = jest.fn(async (_e: unknown) => undefined);
 const tctOnEventMock = jest.fn(async (_e: unknown) => undefined);
@@ -78,7 +84,7 @@ function makeReq(body: string, headers: Record<string, string> = {}): NextReques
 
 beforeEach(() => {
   ingestEventsMock.mockReset();
-  ingestEventsMock.mockResolvedValue(undefined);
+  ingestEventsMock.mockImplementation(async (e: AuditEventRecord[]) => e.map((r) => r.id));
   publishMock.mockReset();
   sessionOnEventMock.mockReset();
   sessionOnEventMock.mockResolvedValue(undefined);
@@ -169,7 +175,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
       ),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [], inserted: 1, duplicates: 0 });
 
     expect(ingestEventsMock).toHaveBeenCalledTimes(1);
     const rec = ingestEventsMock.mock.calls[0][0][0];
@@ -188,7 +194,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
   it('accepts a bare top-level array body', async () => {
     const res = await POST(makeReq(JSON.stringify([{ type: 'x' }])));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [], inserted: 1, duplicates: 0 });
   });
 
   it('silently drops non-object entries', async () => {
@@ -196,7 +202,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
       makeReq(JSON.stringify({ events: [null, 'str', 42, { type: 'ok' }] })),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [], inserted: 1, duplicates: 0 });
     expect(ingestEventsMock.mock.calls[0][0]).toHaveLength(1);
   });
 
@@ -211,7 +217,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
   it('ingests an empty batch as {ingested: 0}', async () => {
     const res = await POST(makeReq(JSON.stringify({ events: [] })));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [], inserted: 0, duplicates: 0 });
     expect(touchLastSeenBatchMock).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
   });
@@ -255,6 +261,8 @@ type IngestBody = {
   ingested: number;
   dropped: number;
   errors: Array<{ index: number; field: string; reason: string }>;
+  inserted: number;
+  duplicates: number;
 };
 
 describe('POST /api/events — `events` must be an array', () => {
@@ -283,7 +291,7 @@ describe('POST /api/events — `events` must be an array', () => {
   ])('keeps answering 200 {ingested: 0} for %s', async (_label, raw) => {
     const res = await POST(makeReq(raw));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [], inserted: 0, duplicates: 0 });
   });
 });
 
@@ -336,6 +344,8 @@ describe('POST /api/events — per-item drop', () => {
       ingested: 0,
       dropped: 1,
       errors: [{ index: 0, field, reason: `${field} must not contain a NUL character` }],
+      inserted: 0,
+      duplicates: 0,
     });
   });
 
@@ -353,6 +363,8 @@ describe('POST /api/events — per-item drop', () => {
       ingested: 2,
       dropped: 1,
       errors: [{ index: 1, field: 'payload', reason: 'payload contains a NUL character' }],
+      inserted: 2,
+      duplicates: 0,
     });
     // The reason never echoes caller content.
     expect(JSON.stringify(body)).not.toContain('\\u0000');
@@ -389,6 +401,8 @@ describe('POST /api/events — per-item drop', () => {
       ingested: 2,
       dropped: 1,
       errors: [{ index: 1, field: 'payload', reason: 'payload contains a lone UTF-16 surrogate' }],
+      inserted: 2,
+      duplicates: 0,
     });
     expect(ingestEventsMock.mock.calls[0][0].map((e) => e.type)).toEqual(['ok.0', 'ok.2']);
   });
@@ -429,7 +443,7 @@ describe('POST /api/events — per-item drop', () => {
       ),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ingested: 2, dropped: 0, errors: [] });
+    expect(await res.json()).toEqual({ ingested: 2, dropped: 0, errors: [], inserted: 2, duplicates: 0 });
   });
 
   it('reports indices into the ORIGINAL array (non-objects counted) and preserves order', async () => {
@@ -568,5 +582,147 @@ describe('POST /api/events — out-of-range ts falls back to ingest time', () =>
       makeReq(JSON.stringify({ events: [{ type: 't', ts: '9999-12-31T23:59:59.999Z' }] })),
     );
     expect(ingestEventsMock.mock.calls[0][0][0].ts).toBe('9999-12-31T23:59:59.999Z');
+  });
+});
+
+describe('POST /api/events — content-derived ids and de-duplication', () => {
+  const V8_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const TOKEN = { authorization: 'Bearer key-one' };
+
+  async function idsFor(events: unknown[], headers: Record<string, string> = TOKEN) {
+    ingestEventsMock.mockClear();
+    const res = await POST(makeReq(JSON.stringify({ events }), headers));
+    expect(res.status).toBe(200);
+    return ingestEventsMock.mock.calls[0][0].map((r) => r.id);
+  }
+
+  const ev = {
+    type: 'handshake.complete',
+    ts: '2026-10-01T12:00:00.123456Z',
+    aid_a: 'aid:pubkey:A',
+    session_id: 'sess-1',
+    payload: { boundary: 'intra-org', nested: { b: 2, a: [1, { y: 1, x: 0 }] } },
+  };
+
+  it('gives the same raw event the same v8 id across requests', async () => {
+    const [first] = await idsFor([ev]);
+    const [second] = await idsFor([ev]);
+    expect(first).toMatch(V8_UUID);
+    expect(second).toBe(first);
+  });
+
+  it('ignores key order at every level', async () => {
+    const [a] = await idsFor([ev]);
+    const reordered = {
+      payload: { nested: { a: [1, { x: 0, y: 1 }], b: 2 }, boundary: 'intra-org' },
+      session_id: 'sess-1',
+      aid_a: 'aid:pubkey:A',
+      ts: '2026-10-01T12:00:00.123456Z',
+      type: 'handshake.complete',
+    };
+    const [b] = await idsFor([reordered]);
+    expect(b).toBe(a);
+  });
+
+  it('hashes the RAW event: sub-millisecond ts digits and array order matter', async () => {
+    const [a] = await idsFor([ev]);
+    const [b] = await idsFor([{ ...ev, ts: '2026-10-01T12:00:00.123999Z' }]);
+    const [c] = await idsFor([{ ...ev, payload: { ...ev.payload, nested: { b: 2, a: [{ y: 1, x: 0 }, 1] } } }]);
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it('gives a different token a different id; Bearer and raw token forms agree', async () => {
+    const [one] = await idsFor([ev], { authorization: 'Bearer key-one' });
+    const [raw] = await idsFor([ev], { authorization: 'key-one' });
+    const [two] = await idsFor([ev], { authorization: 'Bearer key-two' });
+    const [none] = await idsFor([ev], {});
+    expect(raw).toBe(one);
+    expect(two).not.toBe(one);
+    expect(none).not.toBe(one);
+    expect(none).toMatch(V8_UUID);
+  });
+
+  it.each([
+    ['no ts', {}],
+    ['an unparseable ts', { ts: 'yesterday' }],
+    ['an out-of-range ts', { ts: 1e20 }],
+  ])('keeps random ids for events with %s (two identical events both kept)', async (_l, extra) => {
+    const e = { type: 'tick', payload: { n: 1 }, ...extra };
+    const ids = await idsFor([e, e]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).not.toMatch(V8_UUID);
+    const [again] = await idsFor([e]);
+    expect(ids).not.toContain(again);
+  });
+
+  it('collapses duplicates inside one batch (first wins) and counts them', async () => {
+    const other = { ...ev, type: 'handshake.started' };
+    const res = await POST(makeReq(JSON.stringify({ events: [ev, other, ev] }), TOKEN));
+    expect(await res.json()).toEqual({
+      ingested: 3,
+      dropped: 0,
+      errors: [],
+      inserted: 2,
+      duplicates: 1,
+    });
+    const stored = ingestEventsMock.mock.calls[0][0];
+    expect(stored.map((r) => r.type)).toEqual(['handshake.complete', 'handshake.started']);
+    expect(publishMock).toHaveBeenCalledTimes(2);
+    expect(sessionOnEventMock).toHaveBeenCalledTimes(2);
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs monitors but NOT publish/dispatch for events the store did not insert', async () => {
+    listActiveWebhooksMock.mockResolvedValue([{ id: 'wh1' }]);
+    ingestEventsMock.mockImplementation(async () => []);
+    const { getEventsDuplicateTotal } = jest.requireActual(
+      '@/lib/audit/ingest-metrics',
+    ) as typeof import('@/lib/audit/ingest-metrics');
+    const before = getEventsDuplicateTotal();
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [ev, { ...ev, type: 'b' }] }), TOKEN),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ingested: 2,
+      dropped: 0,
+      errors: [],
+      inserted: 0,
+      duplicates: 2,
+    });
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(sessionOnEventMock).toHaveBeenCalledTimes(2);
+    expect(tctOnEventMock).toHaveBeenCalledTimes(2);
+    expect(getEventsDuplicateTotal()).toBe(before + 2);
+  });
+
+  it('fans out only the newly inserted subset of a partially stored batch', async () => {
+    const second = { ...ev, type: 'second' };
+    const [firstId] = await idsFor([ev]);
+    publishMock.mockClear();
+    dispatchMock.mockClear();
+    sessionOnEventMock.mockClear();
+    ingestEventsMock.mockImplementation(async (e: AuditEventRecord[]) =>
+      e.map((r) => r.id).filter((id) => id !== firstId),
+    );
+    const res = await POST(makeReq(JSON.stringify({ events: [ev, second] }), TOKEN));
+    const body = (await res.json()) as IngestBody;
+    expect(body).toMatchObject({ ingested: 2, inserted: 1, duplicates: 1 });
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect((publishMock.mock.calls[0][0] as AuditEventRecord).type).toBe('second');
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect((dispatchMock.mock.calls[0][0] as AuditEventRecord).type).toBe('second');
+    expect(sessionOnEventMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('computes ids for a kept item even with a deeply nested sibling field (iterative hash)', async () => {
+    const depth = 100_000;
+    const raw = `{"events":[{"type":"t","ts":"2026-01-01T00:00:00Z","payload":{},"extra":${'['.repeat(depth)}${']'.repeat(depth)}}]}`;
+    const res = await POST(makeReq(raw, TOKEN));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as IngestBody).inserted).toBe(1);
+    expect(ingestEventsMock.mock.calls[0][0][0].id).toMatch(V8_UUID);
   });
 });

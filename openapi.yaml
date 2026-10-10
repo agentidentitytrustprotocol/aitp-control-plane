@@ -434,8 +434,22 @@ components:
       description: >-
         One event as submitted to `POST /api/events`. No field is required;
         the server normalizes each item (full rules: docs/events.md#ingest-normalization).
-        A client-supplied `id` is ignored — the server assigns a fresh one, so
-        `id` is not a de-duplication key. Items that are not JSON objects are
+        The server always assigns the stored `id` (a client-supplied `id` is
+        never used as the id; it is just part of the content). Recipe v1: an
+        item with a valid `ts` gets a deterministic UUID (RFC 9562 version 8)
+        derived from SHA-256 over the tag `aitp-event:v1`, a fingerprint of the
+        caller's bearer token, and the item exactly as received in canonical
+        JSON (keys sorted — key order is irrelevant); an item without a valid
+        `ts` gets a random id. So the same producer re-sending the same event
+        is recognised as a duplicate (`EventIngestResponse.duplicates`): stored,
+        streamed and delivered to webhooks once; different API keys never
+        collide (callers sending no key share one fingerprint). Two distinct
+        events with identical content and `ts` from one key are merged — add a
+        distinguishing field to genuinely repeated events. Caveats: the SSE publish and webhook enqueue follow the INSERT,
+        so a crash between them loses that event's fan-out for good (a re-send
+        is then a duplicate) — at-most-once in that window; and an event
+        re-sent after the retention sweep deleted its row is stored again
+        (docs/events.md#event-ids-and-de-duplication). Items that are not JSON objects are
         skipped silently (not counted in `dropped`). After normalization an
         item is DROPPED (reported in `EventIngestResponse.dropped`/`errors`,
         the rest of the batch still ingested) when a text field exceeds its
@@ -505,13 +519,28 @@ components:
 
     EventIngestResponse:
       type: object
-      required: [ingested, dropped, errors]
+      required: [ingested, dropped, errors, inserted, duplicates]
       properties:
         ingested:
           type: integer
           description: >-
             Items that passed per-item validation and were handed to the event
-            store. Non-object items and dropped items are not counted.
+            store. Non-object items and dropped items are not counted. Always
+            `inserted + duplicates`.
+        inserted:
+          type: integer
+          description: >-
+            Of `ingested`, the events newly stored by this request. Only these
+            are published to `GET /api/events/stream` and dispatched to
+            webhooks. Always present.
+        duplicates:
+          type: integer
+          description: >-
+            Of `ingested`, the events whose content-derived id was already
+            stored, or that repeated an earlier item of the same batch (see
+            `EventIngestItem`). Not stored, streamed or delivered again; still
+            run through the (idempotent) session/TCT projections. Always
+            present (0 when none).
         dropped:
           type: integer
           description: >-
@@ -1404,7 +1433,9 @@ paths:
             projections, last-seen touch and webhook steps are best-effort and
             never fail it). Malformed input does not reach a `500`: an item the
             database cannot store is dropped and reported in the `200` instead.
-            A `500` is not stored against the key, so retry with the same one.
+            A `500` is not stored against the key, so retry with the same one;
+            events of the batch that were already stored come back as
+            `duplicates`.
             The body is whatever the framework renders, not the shared `Error`
             shape.
         "401": { $ref: "#/components/responses/Unauthorized" }

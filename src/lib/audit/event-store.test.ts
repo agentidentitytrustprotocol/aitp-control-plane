@@ -4,8 +4,19 @@
 // SQL execution (that lives in integration tests).
 import { jest } from '@jest/globals';
 
-const captured: { limit?: number; offset?: number; whereCalled: boolean } = {
+const captured: {
+  limit?: number;
+  offset?: number;
+  whereCalled: boolean;
+  insertCalls: number;
+  insertedValues?: unknown[];
+  onConflict?: boolean;
+  returningKeys?: string[];
+  returnRows: Array<{ id: string }>;
+} = {
   whereCalled: false,
+  insertCalls: 0,
+  returnRows: [],
 };
 
 jest.mock('../db', () => {
@@ -24,15 +35,43 @@ jest.mock('../db', () => {
     captured.offset = n;
     return Promise.resolve([]);
   };
-  return { db: { select: () => chain } };
+  const insertChain = {
+    values: (rows: unknown[]) => {
+      captured.insertedValues = rows;
+      return insertChain;
+    },
+    onConflictDoNothing: () => {
+      captured.onConflict = true;
+      return insertChain;
+    },
+    returning: (shape: Record<string, unknown>) => {
+      captured.returningKeys = Object.keys(shape);
+      return Promise.resolve(captured.returnRows);
+    },
+  };
+  return {
+    db: {
+      select: () => chain,
+      insert: () => {
+        captured.insertCalls += 1;
+        return insertChain;
+      },
+    },
+  };
 });
 
-import { InvalidFilterError, queryHistory } from './event-store';
+import { InvalidFilterError, ingestEvents, queryHistory } from './event-store';
+import type { AuditEventRecord } from './stream';
 
 beforeEach(() => {
   captured.limit = undefined;
   captured.offset = undefined;
   captured.whereCalled = false;
+  captured.insertCalls = 0;
+  captured.insertedValues = undefined;
+  captured.onConflict = undefined;
+  captured.returningKeys = undefined;
+  captured.returnRows = [];
 });
 
 describe('queryHistory date validation', () => {
@@ -79,5 +118,33 @@ describe('queryHistory limit/offset clamping', () => {
   it('floors a negative offset at 0', async () => {
     await queryHistory({ offset: -10 });
     expect(captured.offset).toBe(0);
+  });
+});
+
+describe('ingestEvents', () => {
+  const rec = (id: string): AuditEventRecord => ({
+    id,
+    type: 't',
+    ts: '2026-01-01T00:00:00.000Z',
+    payload: {},
+  });
+
+  it('returns [] without touching the DB for an empty batch', async () => {
+    await expect(ingestEvents([])).resolves.toEqual([]);
+    expect(captured.insertCalls).toBe(0);
+  });
+
+  it('inserts ON CONFLICT DO NOTHING and returns only the ids RETURNING yielded', async () => {
+    captured.returnRows = [{ id: 'b' }];
+    await expect(ingestEvents([rec('a'), rec('b')])).resolves.toEqual(['b']);
+    expect(captured.insertCalls).toBe(1);
+    expect(captured.insertedValues).toHaveLength(2);
+    expect(captured.onConflict).toBe(true);
+    expect(captured.returningKeys).toEqual(['id']);
+  });
+
+  it('returns [] when every row already existed', async () => {
+    captured.returnRows = [];
+    await expect(ingestEvents([rec('a')])).resolves.toEqual([]);
   });
 });

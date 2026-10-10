@@ -598,7 +598,8 @@ All series are prefixed `aitp_control_plane_`. Three different kinds of value si
 in this table, and conflating them will give you wrong numbers:
 
 - **Process-local** — `rate_limit_drops`, `admin_audit_insert_failures`,
-  `event_backlog_dropped`, `events_dropped_total`, `enroll_verification_failures`,
+  `event_backlog_dropped`, `events_dropped_total`, `events_duplicate_total`,
+  `enroll_verification_failures`,
   `sse_streams_open`, `sse_streams_opened_total`, `sse_streams_rejected_total`,
   `webhook_circuit_breaker_open`. Held in memory and **per replica**, so
   aggregating across instances is the scraper's job, and all of them **reset on
@@ -635,6 +636,7 @@ in this table, and conflating them will give you wrong numbers:
 | `admin_audit_insert_failures` | counter | — | Admin-audit writes that failed (silent-degradation surface) |
 | `event_backlog_dropped` | counter | — | Audit events evicted from the in-memory SSE backlog |
 | `events_dropped_total` | counter | — | `POST /api/events` items dropped by per-item validation (column limit, NUL, lone UTF-16 surrogate in `payload`/`grants`, nesting); the rest of each batch was ingested |
+| `events_duplicate_total` | counter | — | `POST /api/events` items accepted but not stored because the same event (same content-derived id) was already stored or appeared earlier in the batch — a producer re-sending its log; not streamed or delivered again ([events.md](events.md#event-ids-and-de-duplication)) |
 | `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
 | `sse_streams_open` | gauge | — | `/api/events/stream` connections open right now on this replica |
 | `sse_streams_opened_total` | counter | — | Stream connections accepted since process start |

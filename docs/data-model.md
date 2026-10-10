@@ -53,7 +53,7 @@ Every ingested or CP-emitted event. Backs `/api/events/history`. The SSE stream 
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | uuid PK | Always server-generated (a client-supplied event `id` is discarded), so it does not de-duplicate re-sent events; use `Idempotency-Key` on ingest |
+| `id` | uuid PK | Always server-assigned. For an ingested event with a valid `ts`: a deterministic version-8 UUID from the event's content and the producer's API-key fingerprint (recipe v1), so a re-sent event hits this key and is not stored twice (`ON CONFLICT DO NOTHING`); otherwise (no valid `ts`, CP-emitted events) random. See [`events.md`](events.md#event-ids-and-de-duplication) |
 | `type` | varchar(128) | e.g. `handshake.complete` |
 | `ts` | timestamptz | Event time |
 | `aid_a`, `aid_b` | varchar(512) | |

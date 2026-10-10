@@ -261,11 +261,13 @@ Accepts either a bare array or `{ "events": [...] }`. Each event:
 
 No field is required. Snake_case and playground aliases are accepted, defaults are applied (e.g. `type` → `"unknown"`, `source` → `"playground"`, a missing `payload` → the whole event object), and items that are not JSON objects are silently dropped — see [`events.md`](events.md#ingest-normalization) for the full normalization. Unknown event types are stored as-is (never `4xx`); only a known set drives projections and webhooks.
 
-The CP assigns every stored event a fresh `id`; a client-supplied `id` is ignored and is **not** a de-duplication key. Re-sending a batch without an `Idempotency-Key` stores the events again.
+The CP assigns every stored event's `id` (a client-supplied `id` is never used as the id). An event with a valid `ts` gets an id derived from its content and the caller's API key, so the same producer re-sending the same event — a retry, or a superset batch that repeats earlier events — is recognised as a **duplicate** (so give genuinely repeated, otherwise identical events a distinguishing field): stored once, streamed once, delivered to webhooks once. An event without a valid `ts` gets a random id and is stored again on every send. Recipe, caveats (at-most-once fan-out if the CP dies between the insert and the fan-out; a re-send after retention deleted the row is stored again) in [`events.md`](events.md#event-ids-and-de-duplication).
 
-Response `200`: `{ "ingested": <n>, "dropped": <m>, "errors": [...] }`. All three fields are always present.
+Response `200`: `{ "ingested": <n>, "dropped": <m>, "errors": [...], "inserted": <i>, "duplicates": <d> }`. All five fields are always present.
 
-- `ingested` — the items that passed per-item validation and were handed to the event store (non-object items and dropped items are not counted).
+- `ingested` — the items that passed per-item validation and were handed to the event store (non-object items and dropped items are not counted). Always `inserted + duplicates`.
+- `inserted` — of those, the events newly stored by this request. Only these are streamed over SSE and sent to webhooks.
+- `duplicates` — of those, the events that were already stored (same content-derived id) or repeated earlier in the same batch. They are still run through the session/TCT projections (idempotently), but not stored, streamed or delivered again.
 - `dropped` — object items refused by per-item validation (below). The rest of the batch is still ingested; a dropped item is not stored, streamed, projected or sent to webhooks. Non-object items are skipped silently and are **not** counted here.
 - `errors` — one `{ "index", "field", "reason" }` per dropped item, **at most 20** (`dropped` is the full count). `index` is the item's position in the array you sent (counting non-object items); `field` names the normalized field (`type`, `aidA`, `aidB`, `sessionId`, `runId`, `source`, `grants`, `payload` — e.g. an over-long `session_id` reports `sessionId`); `reason` is human prose and never echoes your data.
 
@@ -280,7 +282,7 @@ A `ts` that is out of range (a number beyond ±8.64×10¹⁵ ms, or one that ren
 
 Limits: a single batch must be ≤ 256 KiB on the wire and contain ≤ 500 events, and each event's `payload` must be ≤ 65,536 **characters** when serialized with `JSON.stringify` (UTF-16 code units, not bytes; when `payload` is absent the whole event is measured). Over-cap requests return `413 PAYLOAD_TOO_LARGE` (the offending `eventType` is included when a single event is too big). Split large batches into multiple requests.
 
-A body that is not JSON is `400 BODY_INVALID`. A body whose `events` member is present and not `null` but is not an array (a string, number, boolean or object — including one with a numeric `length`) is `400 BODY_INVALID` (`"events must be an array"`), checked before the 500-event cap; like any `400` it is stored against an `Idempotency-Key`, so resend the corrected body with a new key. A JSON body that is neither an array nor an object with an `events` member (or has `"events": null`) ingests nothing and answers `200 { "ingested": 0, "dropped": 0, "errors": [] }`. The `413` caps above stay whole-batch: a batch with one over-cap payload is refused entirely, even if that item would also have been dropped.
+A body that is not JSON is `400 BODY_INVALID`. A body whose `events` member is present and not `null` but is not an array (a string, number, boolean or object — including one with a numeric `length`) is `400 BODY_INVALID` (`"events must be an array"`), checked before the 500-event cap; like any `400` it is stored against an `Idempotency-Key`, so resend the corrected body with a new key. A JSON body that is neither an array nor an object with an `events` member (or has `"events": null`) ingests nothing and answers `200 { "ingested": 0, "dropped": 0, "errors": [], "inserted": 0, "duplicates": 0 }`. The `413` caps above stay whole-batch: a batch with one over-cap payload is refused entirely, even if that item would also have been dropped.
 
 #### `GET /api/events/history` response
 
