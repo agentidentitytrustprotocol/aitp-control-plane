@@ -11,7 +11,8 @@ export const WEBHOOK_SECRET_MAX = 255;
  * `url`/`secret` or a non-array `events` keeps each route's existing handling.
  *   - `url` (text): no U+0000.
  *   - `events` (jsonb array of strings): no U+0000 in any string entry
- *     (Postgres jsonb cannot hold `\u0000`: 22P05).
+ *     (Postgres jsonb cannot hold `\u0000`: 22P05) and no lone UTF-16
+ *     surrogate (22P02).
  *   - `secret` (varchar(255)): <= 255 code points, no U+0000.
  */
 export function checkWebhookFields(body: Record<string, unknown>): string | null {
@@ -22,6 +23,10 @@ export function checkWebhookFields(body: Record<string, unknown>): string | null
     for (const e of body.events) {
       if (typeof e === 'string' && e.includes('\u0000')) {
         return 'events must not contain a NUL character';
+      }
+      // jsonb rejects a lone UTF-16 surrogate escape (22P02) — a 500 otherwise.
+      if (typeof e === 'string' && !e.isWellFormed()) {
+        return 'events entries must be well-formed Unicode';
       }
     }
   }

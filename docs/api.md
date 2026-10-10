@@ -102,7 +102,7 @@ Stored responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7).
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest. Rewritten to `/api/well-known/aitp-manifest`. `Cache-Control: max-age=3600`. |
+| GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest. Rewritten to `/api/well-known/aitp-manifest`. `Cache-Control: max-age=3600`. Its `handshake_endpoint` is `<CP_BASE_URL>/api/aitp/handshake/hello` — required by the manifest schema, but the CP is not a handshake peer and that URL answers `404` (see [`operations.md` § Identity](operations.md#identity)). |
 | GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. `Cache-Control: max-age=60`. `503 REVOCATION_UNAVAILABLE` when the database cannot be read — see [Revocation](#revocation). |
 
 The CP's own manifest has an 86400s TTL and is kept fresh automatically — it rebuilds itself once it nears expiry, no restart required.
@@ -361,7 +361,7 @@ A genuine database fault is a framework `500` with no `{error, code}` body, per 
 
 `url` must be `http(s)` — `https` only in production — and pass the SSRF guard (private/loopback/link-local ranges and hosts outside `WEBHOOK_URL_ALLOWLIST` are rejected `400 URL_NOT_ALLOWED`); a non-string `url` is `400 BODY_INVALID`. An empty/omitted `events` array means **all deliverable event types**. Only a fixed set of event types is deliverable — see [`events.md`](events.md#webhook-deliverable-events). If `secret` is omitted the server generates one. The `201` response is the **only** place the secret is returned (`{ id, url, events, secret, active, createdAt }`); store it then.
 
-`400 BODY_INVALID` on POST and PATCH when: the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `secret` is longer than 255 characters (Unicode code points); or `url`, `secret` or any `events` entry contains a NUL (U+0000). These are checked before the SSRF guard.
+`400 BODY_INVALID` on POST and PATCH when: the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `secret` is longer than 255 characters (Unicode code points); or `url`, `secret` or any `events` entry contains a NUL (U+0000), or an `events` entry holds a lone UTF-16 surrogate (e.g. `"\ud800"`, which `jsonb` cannot store). These are checked before the SSRF guard.
 
 `PATCH /api/webhooks/:id` applies only the fields present (a new `url` passes the same guard) and answers `200 { id, url, events, active, updatedAt }`. On PATCH and DELETE a `:id` that is not a UUID is `400 ID_INVALID` (see [Conventions](#conventions)); an unknown UUID is `404 NOT_FOUND`. A PATCH that sets `secret` is recorded in the admin audit log as `secretRotated: true` — the secret itself is never written there. (Releases before this one did write it; the `0008` migration scrubs those rows, but **rotate any webhook secret that was ever set via PATCH**, since it may already have been read through `GET /api/audit`.)
 

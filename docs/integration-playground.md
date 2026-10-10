@@ -132,7 +132,7 @@ record of what those calls depend on.
 | `POST /api/revocation/entries` | no | body `{jti, reason?}`; `jti` must be a UUID. Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
 | `GET /.well-known/aitp-revocation-list` | no | fetched by the playground's **agents**, not its service; see [Revocation list](#revocation-list) |
 | `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit`; reads `events` |
-| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. reads `limit` (default 200, max 1000) and `offset`; the playground sends `limit` |
+| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. Honours `limit` (default 200, max 1000) and `offset`; the playground sends `limit` |
 | `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
 | `POST /api/webhooks` | no | body `{url, events, secret?, active}`; `events: []` ⇒ all deliverable types |
 | `DELETE /api/webhooks/{id}` | no | the playground treats `404` as success |
@@ -179,7 +179,7 @@ owns the field:
   from each record. The key is therefore never found, and the playground falls
   back to its local handshake address even when the CP returns a match. Fix on
   either side: read `handshakeEndpoint` in the playground, or have the CP also
-  emit the snake_case key.
+  emit the snake_case key. Tracked in aitp-playground.
 - **Dashboard window is ignored.** The playground sends `?window=<window>` to
   `GET /api/dashboard/overview`, but the CP route reads **`?range=`**. The CP
   therefore always returns the default `24h` window regardless of what the

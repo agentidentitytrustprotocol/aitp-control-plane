@@ -142,6 +142,7 @@ describe('POST /api/webhooks', () => {
   it('rejects a NUL in url or an events entry before the URL guard', async () => {
     for (const [body, error] of [
       [{ url: 'https://x.example.com/\u0000' }, 'url must not contain a NUL character'],
+      [{ url: 'https://x.example.com/', events: ['a\ud800'] }, 'events entries must be well-formed Unicode'],
       [
         { url: 'https://x.example.com/', events: ['ok', 'b\u0000'] },
         'events must not contain a NUL character',

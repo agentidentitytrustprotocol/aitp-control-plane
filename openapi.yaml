@@ -966,6 +966,9 @@ paths:
         "200":
           description: >-
             Signed ManifestEnvelope JSON, with `Cache-Control: max-age=3600`.
+            Its `handshake_endpoint` is `<CP_BASE_URL>/api/aitp/handshake/hello`:
+            the field is required by the manifest schema, but the CP is not a
+            handshake peer and serves no route there (`404`).
           headers:
             Cache-Control:
               schema: { type: string, example: max-age=3600 }
