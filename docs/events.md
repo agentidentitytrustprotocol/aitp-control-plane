@@ -36,7 +36,7 @@ Each ingested event is normalized before it is stored:
 |---|---|---|
 | `id` | always a fresh server-generated UUID — a client-supplied `id` is **discarded** | — |
 | `type` | `type` (string) | `"unknown"` |
-| `ts` | `ts` — an ISO-8601 string, or a numeric Unix epoch (values below 10¹² are read as seconds, otherwise milliseconds); stored as ISO-8601 UTC | ingest time (also used when `ts` is unparseable) |
+| `ts` | `ts` — an ISO-8601 string, or a numeric Unix epoch (values below 10¹² are read as seconds, otherwise milliseconds); stored as ISO-8601 UTC | ingest time (also used when `ts` is unparseable or out of range: beyond ±8.64×10¹⁵ ms, or outside years 0001–9999) |
 | `aidA` | `aidA`, `aid_a`, `initiator` | none |
 | `aidB` | `aidB`, `aid_b`, `target` | none |
 | `sessionId` | `sessionId`, `session_id` | none |
@@ -48,21 +48,45 @@ Each ingested event is normalized before it is stored:
 Non-object entries in the batch are skipped. `source` is `cp` for CP-emitted
 events.
 
+### Per-item limits
+
+After normalization, each item is checked against what `audit_events` can
+store. An item that fails is **dropped** — not stored, streamed, projected or
+dispatched — and reported in the response's `dropped` count and `errors[]`
+(`{index, field, reason}`, at most 20; `index` is the item's position in the
+array sent). The rest of the batch is ingested normally.
+
+| Field | Limit (Unicode code points) |
+|---|---|
+| `type`, `source` | 128 |
+| `aidA`, `aidB` | 512 |
+| `sessionId`, `runId` | 255 |
+| any of the above, every `grants` entry, every key and string value in `payload` | no NUL (U+0000) |
+| every `grants` entry, every key and string value in `payload` | no lone (unpaired) UTF-16 surrogate — `jsonb` rejects it; surrogate pairs (emoji) are fine |
+| `payload` | at most 64 levels of nesting |
+
+The limits apply to the normalized field, whichever alias carried it
+(`session_id` over 255 is reported as `sessionId`). The batch-level caps — 256
+KiB body, 500 items, 65,536 characters per serialized payload — still reject the
+**whole** batch with `413` (see [`api.md`](api.md#post-apievents-body)).
+
 ## How an ingested event is handled
 
 For each `POST /api/events` batch, in order:
 
-1. **Persisted** to `audit_events`. Because every event gets a fresh server-side
+1. **Validated** per item ([Per-item limits](#per-item-limits)); dropped items
+   take no further part in the steps below.
+2. **Persisted** to `audit_events`. Because every event gets a fresh server-side
    `id`, re-sending the same batch creates **new rows** — there is no per-event
    de-duplication. Only an `Idempotency-Key` header makes a retried batch a
    no-op (see [`api.md`](api.md#idempotency)).
-2. **Last-seen touched:** every distinct AID appearing as `aidA` or `aidB` in the
+3. **Last-seen touched:** every distinct AID appearing as `aidA` or `aidB` in the
    batch has `agents.last_seen_at` set to the ingest time (best-effort; AIDs not
    in the registry are ignored).
-3. Per event: **published** to the in-memory bus (→ live `GET /api/events/stream`
+4. Per event: **published** to the in-memory bus (→ live `GET /api/events/stream`
    subscribers), then **projected** if its `type` is recognized by a monitor
    (below). Unknown types are stored and streamed but project nothing — never a `4xx`.
-4. **Dispatched** to webhooks if its `type` is in the deliverable set (below).
+5. **Dispatched** to webhooks if its `type` is in the deliverable set (below).
 
 ## Recognized event types
 

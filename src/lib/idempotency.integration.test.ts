@@ -70,6 +70,25 @@ describe('integration: withIdempotency', () => {
     expect(await r2.json()).toEqual({ id: 'first', call: 1 });
   });
 
+  it('does not mark the first response replayed when jsonb reorders its keys', async () => {
+    // jsonb sorts object keys (by length, then bytes): `{error, code}` is
+    // read back as `{code, error}`. The first attempt must still be a
+    // non-replay; only the second is.
+    const key = randomUUID();
+    const exec = async () => ({
+      status: 400,
+      body: { error: 'nope', code: 'BODY_INVALID', nested: { zzzz: 1, a: 2 } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const req = makeReq({ 'Idempotency-Key': key }) as any;
+    const r1 = await withIdempotency(req, SCOPE, exec);
+    expect(r1.status).toBe(400);
+    expect(r1.headers.get('Idempotency-Replayed')).toBeNull();
+    const r2 = await withIdempotency(req, SCOPE, exec);
+    expect(r2.headers.get('Idempotency-Replayed')).toBe('true');
+    expect(await r2.json()).toEqual(await r1.json());
+  });
+
   it('persists exactly one row for parallel calls with the same key', async () => {
     const key = randomUUID();
     let calls = 0;

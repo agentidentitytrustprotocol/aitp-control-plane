@@ -436,29 +436,47 @@ components:
         the server normalizes each item (full rules: docs/events.md#ingest-normalization).
         A client-supplied `id` is ignored — the server assigns a fresh one, so
         `id` is not a de-duplication key. Items that are not JSON objects are
-        dropped silently.
+        skipped silently (not counted in `dropped`). After normalization an
+        item is DROPPED (reported in `EventIngestResponse.dropped`/`errors`,
+        the rest of the batch still ingested) when a text field exceeds its
+        `maxLength` (Unicode code points, applied to the normalized field
+        whichever alias carried it), when any text field, `grants` entry, or
+        key or string value anywhere in `payload` contains U+0000, when any
+        `grants` entry or key or string value anywhere in `payload` contains a
+        lone (unpaired) UTF-16 surrogate such as `"\ud800"` — jsonb cannot
+        store one — or when `payload` is nested more than 64 levels deep
+        (docs/events.md#per-item-limits). When `payload` is absent the whole
+        event is the payload, so these payload rules then cover every field.
+        Reasons per field: `<field> must not contain a NUL character` (text
+        fields), `<field> contains a NUL character` / `<field> contains a lone
+        UTF-16 surrogate` (`grants`, `payload`), `<field> exceeds <n>
+        character limit`, `payload is nested too deep (more than 64 levels)`.
       type: object
       additionalProperties: true
       properties:
         type:
           type: string
-          description: Defaults to `unknown` when absent or not a string.
+          maxLength: 128
+          description: Defaults to `unknown` when absent or not a string. No NUL.
         ts:
           description: >-
             ISO-8601 string, or a number of epoch seconds (values below 1e12)
-            or milliseconds. Defaults to the time of ingest when absent or
-            unparseable.
+            or milliseconds. Defaults to the time of ingest when absent,
+            unparseable, or out of range (a number beyond +-8.64e15 ms, or a
+            value that renders outside years 0001-9999) — never a drop.
           oneOf:
             - { type: string }
             - { type: number }
-        aidA: { type: string, description: "Aliases: `aid_a`, `initiator`." }
-        aidB: { type: string, description: "Aliases: `aid_b`, `target`." }
-        sessionId: { type: string, description: "Alias: `session_id`." }
-        runId: { type: string, description: "Aliases: `run_id`, `playground.run_id`." }
+        aidA: { type: string, maxLength: 512, description: "Aliases: `aid_a`, `initiator`. No NUL." }
+        aidB: { type: string, maxLength: 512, description: "Aliases: `aid_b`, `target`. No NUL." }
+        sessionId: { type: string, maxLength: 255, description: "Alias: `session_id`. No NUL." }
+        runId: { type: string, maxLength: 255, description: "Aliases: `run_id`, `playground.run_id`. No NUL." }
         grants:
           type: array
           items: { type: string }
-          description: Ignored unless an array of strings.
+          description: >-
+            Ignored unless an array of strings. No entry may contain NUL or a
+            lone UTF-16 surrogate.
         payload:
           type: object
           additionalProperties: true
@@ -466,10 +484,14 @@ components:
             Stored verbatim. When absent (or not an object), the whole raw
             event object is stored as the payload. Serialized size is capped
             at 65,536 characters (UTF-16 code units of `JSON.stringify`, not
-            bytes).
+            bytes; over it the whole batch is `413`). No key or string value
+            may contain NUL or a lone UTF-16 surrogate (well-formed surrogate
+            pairs — emoji and other astral characters — are fine), and nesting
+            is limited to 64 levels (the item is dropped otherwise).
         source:
           type: string
-          description: Defaults to `playground`.
+          maxLength: 128
+          description: Defaults to `playground`. No NUL.
 
     EventIngestRequest:
       oneOf:
@@ -483,10 +505,39 @@ components:
 
     EventIngestResponse:
       type: object
+      required: [ingested, dropped, errors]
       properties:
         ingested:
           type: integer
-          description: Number of object items accepted (non-object items are dropped).
+          description: >-
+            Items that passed per-item validation and were handed to the event
+            store. Non-object items and dropped items are not counted.
+        dropped:
+          type: integer
+          description: >-
+            Object items refused by per-item validation (see
+            `EventIngestItem`). Always present (0 when none).
+        errors:
+          type: array
+          maxItems: 20
+          description: >-
+            One entry per dropped item, at most 20 (`dropped` is the full
+            count). Always present (empty when none). Replayed unchanged
+            under the same `Idempotency-Key`.
+          items:
+            type: object
+            required: [index, field, reason]
+            properties:
+              index:
+                type: integer
+                description: Position of the item in the submitted array (non-object items counted).
+              field:
+                type: string
+                enum: [type, aidA, aidB, sessionId, runId, source, grants, payload]
+                description: The normalized field that failed.
+              reason:
+                type: string
+                description: Human prose; never echoes the submitted value. Do not parse.
 
     SessionDetail:
       type: object
@@ -1320,7 +1371,10 @@ paths:
               schema: { $ref: "#/components/schemas/EventIngestResponse" }
         "400":
           description: >-
-            `BODY_INVALID` when the body did not parse as JSON;
+            `BODY_INVALID` when the body did not parse as JSON, or when its
+            `events` member is present, not `null`, and not an array (a string,
+            number, boolean or object — checked before the 500-event cap, so a
+            long string or `{"length": 501}` is `400`, not `413`);
             `IDEMPOTENCY_KEY_INVALID` for a bad `Idempotency-Key`. A body that
             parses but is neither an array nor an object with an `events`
             member (or has `"events": null`) is **not** an error — it ingests
@@ -1342,16 +1396,17 @@ paths:
               schema: { $ref: "#/components/schemas/PayloadTooLargeError" }
         "500":
           description: >-
-            Currently returned for some malformed input instead of a `400`:
-            an `events` member that is present but not an array (string,
-            number, boolean, object), or an item whose values the database cannot store
-            (for example a `type` over 128 characters, an AID over 512, a
-            `sessionId`/`runId` over 255, or a NUL character). The whole batch
-            is rejected. Exception: the 500-event cap is checked against
-            `events.length` first, so a string `events` longer than 500
-            characters, or an object with a numeric `length` over 500, answers
-            `413` instead. The body is whatever the framework renders, not the
-            shared `Error` shape.
+            A genuine database fault. Three database calls can fail the
+            request: the multi-row INSERT that stores the batch, and — only
+            when an `Idempotency-Key` is sent — the key lookup that runs before
+            the handler and the re-read of the stored response after it (a
+            failure to *store* the response is logged and not fatal; the
+            projections, last-seen touch and webhook steps are best-effort and
+            never fail it). Malformed input does not reach a `500`: an item the
+            database cannot store is dropped and reported in the `200` instead.
+            A `500` is not stored against the key, so retry with the same one.
+            The body is whatever the framework renders, not the shared `Error`
+            shape.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 

@@ -31,6 +31,7 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
+import { isDeepStrictEqual } from 'node:util';
 import { db } from './db';
 import { idempotencyKeys } from './db/schema';
 import { logger } from './logger';
@@ -203,9 +204,13 @@ export async function withIdempotency(
     )
     .limit(1);
   if (winner[0]) {
+    // Compare structurally, NOT by JSON.stringify: jsonb does not keep object
+    // key order (it sorts keys by length, then bytes), so `{error, code}`
+    // reads back as `{code, error}` and a string compare would mark our own
+    // first response as `Idempotency-Replayed`.
     const wonByUs =
       winner[0].responseStatus === result.status &&
-      JSON.stringify(winner[0].responseBody) === JSON.stringify(normalizedBody);
+      isDeepStrictEqual(winner[0].responseBody, normalizedBody);
     return makeResponse(
       winner[0].responseStatus,
       winner[0].responseBody,

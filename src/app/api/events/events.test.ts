@@ -8,6 +8,11 @@
 //   • rejection paths: non-JSON body (400), >500-event batches (413),
 //     >64KB per-event payloads (413 naming the offending type), >256KB bodies
 //     (413), malformed Idempotency-Key (400)
+//   • per-item validation (#P4): `events` not an array -> 400; an item over a
+//     column limit, holding U+0000 (or a lone surrogate in payload/grants),
+//     or with a payload nested too deep is
+//     dropped and reported in `dropped` / `errors[]` while the rest ingest;
+//     out-of-range `ts` falls back to ingest time
 //   • fan-out: eventBus.publish + session/tct monitors per event, last-seen
 //     touch with the union of AIDs, webhook dispatch with the active list —
 //     and graceful degradation when listing webhooks fails.
@@ -164,7 +169,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
       ),
     );
     expect(res.status).toBe(200);
-    expect((await res.json()) as { ingested: number }).toEqual({ ingested: 1 });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
 
     expect(ingestEventsMock).toHaveBeenCalledTimes(1);
     const rec = ingestEventsMock.mock.calls[0][0][0];
@@ -183,7 +188,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
   it('accepts a bare top-level array body', async () => {
     const res = await POST(makeReq(JSON.stringify([{ type: 'x' }])));
     expect(res.status).toBe(200);
-    expect((await res.json()) as { ingested: number }).toEqual({ ingested: 1 });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
   });
 
   it('silently drops non-object entries', async () => {
@@ -191,7 +196,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
       makeReq(JSON.stringify({ events: [null, 'str', 42, { type: 'ok' }] })),
     );
     expect(res.status).toBe(200);
-    expect((await res.json()) as { ingested: number }).toEqual({ ingested: 1 });
+    expect(await res.json()).toEqual({ ingested: 1, dropped: 0, errors: [] });
     expect(ingestEventsMock.mock.calls[0][0]).toHaveLength(1);
   });
 
@@ -206,7 +211,7 @@ describe('POST /api/events — envelope shapes and normalization', () => {
   it('ingests an empty batch as {ingested: 0}', async () => {
     const res = await POST(makeReq(JSON.stringify({ events: [] })));
     expect(res.status).toBe(200);
-    expect((await res.json()) as { ingested: number }).toEqual({ ingested: 0 });
+    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [] });
     expect(touchLastSeenBatchMock).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
   });
@@ -243,5 +248,325 @@ describe('POST /api/events — fan-out', () => {
     expect(res.status).toBe(200);
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock.mock.calls[0][1]).toEqual([]);
+  });
+});
+
+type IngestBody = {
+  ingested: number;
+  dropped: number;
+  errors: Array<{ index: number; field: string; reason: string }>;
+};
+
+describe('POST /api/events — `events` must be an array', () => {
+  it.each([
+    ['a string', '"x"'],
+    ['a number', '5'],
+    ['an object', '{"a":1}'],
+    ['an array-like object', '{"length":501}'],
+    ['a string longer than 500 chars', JSON.stringify('x'.repeat(600))],
+    ['true', 'true'],
+  ])('answers 400 BODY_INVALID when events is %s (not 413, not 500)', async (_label, value) => {
+    const res = await POST(makeReq(`{"events":${value}}`));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('BODY_INVALID');
+    expect(body.error).toBe('events must be an array');
+    expect(ingestEventsMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['events: null', '{"events":null}'],
+    ['no events key', '{}'],
+    ['a top-level string', '"hello"'],
+    ['a top-level number', '42'],
+    ['top-level null', 'null'],
+  ])('keeps answering 200 {ingested: 0} for %s', async (_label, raw) => {
+    const res = await POST(makeReq(raw));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ingested: 0, dropped: 0, errors: [] });
+  });
+});
+
+describe('POST /api/events — per-item drop', () => {
+  const limits: Array<[string, string, number]> = [
+    ['type', 'type', 128],
+    ['aidA', 'aidA', 512],
+    ['aid_b', 'aidB', 512],
+    ['session_id', 'sessionId', 255],
+    ['runId', 'runId', 255],
+    ['source', 'source', 128],
+  ];
+
+  it.each(limits)(
+    'drops an item whose %s exceeds %s\'s %i-code-point limit; keeps the rest',
+    async (wireKey, field, max) => {
+      const events = [
+        { type: 'good.0' },
+        { type: 'bad', [wireKey]: 'x'.repeat(max + 1) },
+        { type: 'good.2' },
+      ];
+      const res = await POST(makeReq(JSON.stringify({ events })));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as IngestBody;
+      expect(body.ingested).toBe(2);
+      expect(body.dropped).toBe(1);
+      expect(body.errors).toEqual([
+        { index: 1, field, reason: `${field} exceeds ${max} character limit` },
+      ]);
+      const stored = ingestEventsMock.mock.calls[0][0].map((e) => e.type);
+      expect(stored).toEqual(['good.0', 'good.2']);
+    },
+  );
+
+  it.each(limits)('accepts %s at exactly the limit (counting code points)', async (wireKey, _f, max) => {
+    // Astral characters: 2 UTF-16 units each, 1 code point — must still fit.
+    const atLimit = wireKey === 'type' ? '\u{1F600}'.repeat(max) : 'y'.repeat(max);
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 't', [wireKey]: atLimit }] })),
+    );
+    expect(((await res.json()) as IngestBody).dropped).toBe(0);
+  });
+
+  it.each(limits)('drops an item with a NUL in %s', async (wireKey, field) => {
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 't', [wireKey]: 'a\u0000b' }] })),
+    );
+    const body = (await res.json()) as IngestBody;
+    expect(body).toEqual({
+      ingested: 0,
+      dropped: 1,
+      errors: [{ index: 0, field, reason: `${field} must not contain a NUL character` }],
+    });
+  });
+
+  it.each([
+    ['a payload string value', { payload: { a: { b: ['ok', 'bad\u0000'] } } }],
+    ['a payload key', { payload: { nested: { ['k\u0000']: 1 } } }],
+    ['a flat event (the event itself is the payload)', { error: 'trace\u0000' }],
+  ])('drops only the item with a NUL in %s', async (_label, bad) => {
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 'ok.0' }, { type: 'bad', ...bad }, { type: 'ok.2' }] })),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as IngestBody;
+    expect(body).toEqual({
+      ingested: 2,
+      dropped: 1,
+      errors: [{ index: 1, field: 'payload', reason: 'payload contains a NUL character' }],
+    });
+    // The reason never echoes caller content.
+    expect(JSON.stringify(body)).not.toContain('\\u0000');
+  });
+
+  it('drops an item with a NUL in a grant', async () => {
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 't', grants: ['ok', 'b\u0000'] }] })),
+    );
+    expect(((await res.json()) as IngestBody).errors).toEqual([
+      { index: 0, field: 'grants', reason: 'grants contains a NUL character' },
+    ]);
+  });
+
+  // A lone UTF-16 surrogate survives JSON.parse (the wire carries it as the
+  // escape `\ud800`), and JSON.stringify — how the jsonb parameter is sent —
+  // writes the same escape back, which Postgres jsonb rejects ("invalid input
+  // syntax for type json"). Unlike a text column, there is no U+FFFD
+  // substitution on that path, so the item must be dropped before the INSERT.
+  it.each([
+    ['a payload string value', { payload: { msg: 'x\ud800y' } }],
+    ['a payload key', { payload: { ['k\udfff']: 1 } }],
+    ['a deeply nested payload value', { payload: { a: [{ b: { c: ['ok', '\udc00'] } }] } }],
+    ['a trailing high surrogate', { payload: { msg: 'end\ud83d' } }],
+    ['a flat event (the event itself is the payload)', { error: 'trace\ud800' }],
+    ['a flat event text field (aidA is also stored in the payload)', { aidA: 'aid:\ud800' }],
+  ])('drops only the item with a lone surrogate in %s', async (_label, bad) => {
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 'ok.0' }, { type: 'bad', ...bad }, { type: 'ok.2' }] })),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as IngestBody;
+    expect(body).toEqual({
+      ingested: 2,
+      dropped: 1,
+      errors: [{ index: 1, field: 'payload', reason: 'payload contains a lone UTF-16 surrogate' }],
+    });
+    expect(ingestEventsMock.mock.calls[0][0].map((e) => e.type)).toEqual(['ok.0', 'ok.2']);
+  });
+
+  it('drops an item with a lone surrogate in a grant', async () => {
+    const res = await POST(
+      makeReq(
+        JSON.stringify({ events: [{ type: 't', grants: ['ok', 'b\ud800'], payload: {} }] }),
+      ),
+    );
+    expect(((await res.json()) as IngestBody).errors).toEqual([
+      { index: 0, field: 'grants', reason: 'grants contains a lone UTF-16 surrogate' },
+    ]);
+  });
+
+  it('reports NUL over a lone surrogate when a payload has both', async () => {
+    const res = await POST(
+      makeReq(JSON.stringify({ events: [{ type: 't', payload: { a: '\ud800', b: '\u0000' } }] })),
+    );
+    expect(((await res.json()) as IngestBody).errors).toEqual([
+      { index: 0, field: 'payload', reason: 'payload contains a NUL character' },
+    ]);
+  });
+
+  it('keeps well-formed astral characters (surrogate PAIRS) in keys, values and grants', async () => {
+    const res = await POST(
+      makeReq(
+        JSON.stringify({
+          events: [
+            {
+              type: 't',
+              grants: ['g.\u{1F600}'],
+              payload: { ['k\u{1F680}']: ['\u{10FFFF}', { s: '😀' }] },
+            },
+            { type: 'flat', note: '\u{1F4A9}' },
+          ],
+        }),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ingested: 2, dropped: 0, errors: [] });
+  });
+
+  it('reports indices into the ORIGINAL array (non-objects counted) and preserves order', async () => {
+    const events = [
+      null,
+      { type: 'keep.1' },
+      'str',
+      { type: 'x'.repeat(200) },
+      { type: 'keep.4' },
+      42,
+      { type: 'n', session_id: 's'.repeat(300) },
+      { type: 'keep.7' },
+    ];
+    const res = await POST(makeReq(JSON.stringify({ events })));
+    const body = (await res.json()) as IngestBody;
+    expect(body.ingested).toBe(3);
+    expect(body.dropped).toBe(2);
+    expect(body.errors.map((e) => [e.index, e.field])).toEqual([
+      [3, 'type'],
+      [6, 'sessionId'],
+    ]);
+    expect(ingestEventsMock.mock.calls[0][0].map((e) => e.type)).toEqual([
+      'keep.1',
+      'keep.4',
+      'keep.7',
+    ]);
+    // Only kept events reach the fan-out.
+    expect(publishMock).toHaveBeenCalledTimes(3);
+    expect(sessionOnEventMock).toHaveBeenCalledTimes(3);
+    expect(dispatchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('answers 200 with ingested 0 when every item is dropped, and touches nothing', async () => {
+    const events = Array.from({ length: 30 }, () => ({ type: 'z'.repeat(129) }));
+    const res = await POST(makeReq(JSON.stringify({ events })));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as IngestBody;
+    expect(body.ingested).toBe(0);
+    expect(body.dropped).toBe(30);
+    // errors[] is capped at 20; dropped is the full count.
+    expect(body.errors).toHaveLength(20);
+    expect(body.errors[19].index).toBe(19);
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(touchLastSeenBatchMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('logs counts only (no payload content) and counts drops in the metric', async () => {
+    const { logger } = jest.requireMock('@/lib/logger') as {
+      logger: { warn: jest.Mock };
+    };
+    logger.warn.mockClear();
+    const { getEventsDroppedTotal } = jest.requireActual(
+      '@/lib/audit/ingest-metrics',
+    ) as typeof import('@/lib/audit/ingest-metrics');
+    const before = getEventsDroppedTotal();
+    await POST(
+      makeReq(
+        JSON.stringify({ events: [{ type: 'ok' }, { type: 't', payload: { secret: 'SEKRIT\u0000' } }] }),
+      ),
+    );
+    expect(getEventsDroppedTotal()).toBe(before + 1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toEqual({ received: 2, ingested: 1, dropped: 1 });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('SEKRIT');
+  });
+
+  it('drops a ~120k-level nested payload as too deep without throwing', async () => {
+    const depth = 120_000;
+    const raw = `{"events":[{"type":"ok"},{"type":"deep","payload":${'['.repeat(depth)}${']'.repeat(depth)}}]}`;
+    expect(raw.length).toBeLessThan(256 * 1024); // under the request-body cap
+    const res = await POST(makeReq(raw));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as IngestBody;
+    expect(body.ingested).toBe(1);
+    expect(body.dropped).toBe(1);
+    expect(body.errors[0]).toMatchObject({ index: 1, field: 'payload' });
+    expect(body.errors[0].reason).toContain('too deep');
+  });
+
+  it('accepts a payload nested exactly 64 levels; drops 65', async () => {
+    const nest = (n: number) => `${'['.repeat(n)}${']'.repeat(n)}`;
+    const res = await POST(
+      makeReq(
+        `{"events":[{"type":"a","payload":${nest(64)}},{"type":"b","payload":${nest(65)}}]}`,
+      ),
+    );
+    const body = (await res.json()) as IngestBody;
+    expect(body.ingested).toBe(1);
+    expect(body.errors.map((e) => e.index)).toEqual([1]);
+  });
+
+  it('reports too deep even when the item also has a NUL (deep payload never reaches JSON.stringify)', async () => {
+    const depth = 100_000;
+    const raw = `{"events":[{"type":"t\\u0000","payload":${'['.repeat(depth)}"\\u0000"${']'.repeat(depth)}}]}`;
+    const res = await POST(makeReq(raw));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as IngestBody;
+    expect(body.dropped).toBe(1);
+    expect(body.errors[0].reason).toContain('too deep');
+  });
+
+  it('keeps the 64KB per-event 413 whole-batch even when that item would be dropped', async () => {
+    const res = await POST(
+      makeReq(
+        JSON.stringify({
+          events: [{ type: 'big', payload: { blob: 'x'.repeat(70_000), k: '\u0000' } }],
+        }),
+      ),
+    );
+    expect(res.status).toBe(413);
+    expect(ingestEventsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/events — out-of-range ts falls back to ingest time', () => {
+  it.each([
+    ['numeric ms beyond 8.64e15', 1e20],
+    ['negative seconds beyond the range', -1e13],
+    ['ISO year 10000', '+010000-01-01T00:00:00.000Z'],
+    ['ms rendering in year 10000', Date.UTC(10000, 0, 1)],
+    ['ISO year 0000', '0000-06-01T00:00:00.000Z'],
+  ])('%s -> kept, ts = ingest time', async (_label, ts) => {
+    const before = Date.now();
+    const res = await POST(makeReq(JSON.stringify({ events: [{ type: 't', ts }] })));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as IngestBody).ingested).toBe(1);
+    const rec = ingestEventsMock.mock.calls[0][0][0];
+    const got = new Date(rec.ts).getTime();
+    expect(got).toBeGreaterThanOrEqual(before);
+    expect(got).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('keeps an in-range boundary ts (year 9999)', async () => {
+    await POST(
+      makeReq(JSON.stringify({ events: [{ type: 't', ts: '9999-12-31T23:59:59.999Z' }] })),
+    );
+    expect(ingestEventsMock.mock.calls[0][0][0].ts).toBe('9999-12-31T23:59:59.999Z');
   });
 });

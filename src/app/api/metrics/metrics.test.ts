@@ -31,6 +31,7 @@ let dropTotals: Record<string, number> = {};
 let breakerSnaps: Record<string, { state: string }> = {};
 let insertFailures = 0;
 let droppedCount = 0;
+let eventsDropped = 0;
 let enrollFailures: Record<string, number> = {};
 let sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
 
@@ -77,6 +78,9 @@ jest.mock('@/lib/audit/stream', () => ({
 jest.mock('@/lib/registry/enroll-metrics', () => ({
   getEnrollFailureTotals: () => enrollFailures,
 }));
+jest.mock('@/lib/audit/ingest-metrics', () => ({
+  getEventsDroppedTotal: () => eventsDropped,
+}));
 jest.mock('@/lib/audit/sse-metrics', () => ({
   getSseMetrics: () => sseMetrics,
 }));
@@ -96,6 +100,7 @@ beforeEach(() => {
   breakerSnaps = {};
   insertFailures = 0;
   droppedCount = 0;
+  eventsDropped = 0;
   enrollFailures = {};
   sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
 });
@@ -135,6 +140,7 @@ describe('GET /api/metrics — healthy DB', () => {
     };
     insertFailures = 6;
     droppedCount = 9;
+    eventsDropped = 7;
     enrollFailures = { signature_invalid: 4, none: 2, other: 1, expired: 0 };
 
     const res = await GET();
@@ -178,6 +184,8 @@ describe('GET /api/metrics — healthy DB', () => {
       'aitp_control_plane_admin_audit_insert_failures 6',
     );
     expect(text).toContain('aitp_control_plane_event_backlog_dropped 9');
+    expect(text).toContain('# TYPE aitp_control_plane_events_dropped_total counter');
+    expect(text).toContain('aitp_control_plane_events_dropped_total 7');
 
     expect(text).toContain(
       '# TYPE aitp_control_plane_enroll_verification_failures counter',
@@ -353,6 +361,8 @@ describe('GET /api/metrics — DB unavailable', () => {
     );
     expect(text).toContain('aitp_control_plane_admin_audit_insert_failures 0');
     expect(text).toContain('aitp_control_plane_event_backlog_dropped 0');
+    // Process-local: survives a DB outage.
+    expect(text).toContain('aitp_control_plane_events_dropped_total 0');
     // SSE health is entirely independent of the database, and an SSE incident
     // can coincide with a DB outage — so the stream series must survive one.
     // Pins the "emit outside the try" requirement.

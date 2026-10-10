@@ -104,7 +104,15 @@ TCTs and delegations are not duplicated. See
 Batch limits still apply (see
 [`api.md`](api.md#post-apievents-body)): an over-cap batch gets
 `413 PAYLOAD_TOO_LARGE`, not a fire-and-forget 2xx, so a producer with more
-events than the per-batch cap must split them.
+events than the per-batch cap must split them. An individual event the CP
+cannot store — most likely in practice a NUL character or a lone UTF-16
+surrogate (e.g. model output truncated mid-emoji) in a flat event's exception
+text or model output (the whole flat event is the payload), or an
+over-long `session_id` — is **dropped on its own** and reported in the `200`
+response's `dropped` / `errors[]`; the rest of the run's events are stored (see
+[`events.md` § Per-item limits](events.md#per-item-limits)). The playground does
+not read the response, so such a drop is visible only there, in the CP's warn
+log, and in the `events_dropped_total` metric.
 
 ## Endpoints the playground depends on
 
