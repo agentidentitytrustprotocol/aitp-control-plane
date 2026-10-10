@@ -10,7 +10,18 @@ info:
     Rate limiting: every `/api/*` route except `/api/health`, `/api/readyz`,
     and `/api/metrics` may return `429 RATE_LIMITED` with `Retry-After` and
     `X-RateLimit-*` headers. The per-path `429` responses below are only
-    spelled out where limits are most likely to be hit (enrollment).
+    spelled out where limits are most likely to be hit (enrollment). The
+    `/.well-known/*` paths are rewrites that bypass the request gate: they are
+    never rate-limited and carry no `x-request-id` or CORS headers.
+
+    Authentication: routes without `security: []` (or the enrollment-token
+    scheme) require an API key. The gate answers `401 INVALID_API_KEY` for a
+    missing or unknown key, and in production `503 SERVER_MISCONFIGURED` when
+    `API_KEYS` is empty; in non-production an empty `API_KEYS` disables the
+    check.
+
+    Idempotency: a replayed `Idempotency-Key` response carries
+    `Idempotency-Replayed: true`. See docs/api.md#idempotency.
   license:
     name: See LICENSE
 
@@ -46,14 +57,17 @@ tags:
 
 security:
   - apiKey: []
-  - {}
 
 components:
   securitySchemes:
     apiKey:
       type: http
       scheme: bearer
-      description: API key from `API_KEYS` env allowlist. Required for gated routes; unset in dev disables auth.
+      description: >-
+        API key from the `API_KEYS` env allowlist. Required on every route that
+        does not override `security`. In non-production an empty `API_KEYS`
+        disables the check; in production it makes gated routes answer `503
+        SERVER_MISCONFIGURED`.
     enrollmentToken:
       type: http
       scheme: bearer
@@ -67,7 +81,13 @@ components:
       schema:
         type: string
         maxLength: 255
-      description: Opaque client-chosen key. Replaying the same key returns the cached response without re-running the handler.
+      description: >-
+        Opaque client-chosen key, scoped to the endpoint. Replaying the same key
+        returns the stored response (with `Idempotency-Replayed: true`) without
+        re-running the handler — even if the body differs. Only `200`, `201`,
+        `202`, `204`, `400`, `409` and `422` are stored. An empty key, one over
+        255 characters, or one containing control characters is `400
+        IDEMPOTENCY_KEY_INVALID`.
     namespace:
       name: namespace
       in: query
@@ -83,8 +103,33 @@ components:
         type: string
       description: Client-supplied request correlation ID. Echoed on the response.
 
+  responses:
+    Unauthorized:
+      description: >-
+        `code` is `INVALID_API_KEY` — the request gate found no API key, or one
+        not in `API_KEYS`. Returned before the handler runs. Not returned in
+        non-production when `API_KEYS` is empty.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    GateMisconfigured:
+      description: >-
+        `code` is `SERVER_MISCONFIGURED` — production server with an empty
+        `API_KEYS`; every gated route fails closed. Returned by the request gate
+        before the handler runs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
     Error:
+      description: >-
+        `code` is this service's own machine code; branch on it, not on
+        `error`. Some values share a name with the AITP error-code registry
+        (https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/registries/error-codes.md)
+        without being bound by it — e.g. the CP's `MANIFEST_INVALID` covers any
+        enrollment-time manifest rejection, broader than the registry's
+        schema-validation meaning.
       type: object
       required: [error, code]
       properties:
@@ -131,19 +176,12 @@ components:
                 `verifyCode` is what distinguishes them if you need to.
 
 
-                Values known at the time of writing, from the `aitp` SDK's
-                `verifyManifestJson` docstring: `signature_invalid`,
-                `pop_failed`, `aid_mismatch`, `expired`, `version_unknown`,
-                `identity_hint_malformed`, `incompatible_identity_type`,
-                `malformed`.
-
-
-                **This list is deliberately not an `enum`, and clients must not
-                treat it as exhaustive.** The vocabulary is owned by the `aitp`
-                SDK, not by this service, and it has already grown once (from
-                five values to these eight). A new SDK minor may add more
-                without a change to this service, and such a value will be
-                passed through verbatim. Treat any unrecognized value as a
+                The value set is owned by the `aitp` SDK's `verifyManifestJson`
+                (listed at
+                https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification;
+                verified against `aitp` `^0.13.1`). It is deliberately not an
+                `enum`: a new SDK release may add values, which this service
+                passes through verbatim. Treat any unrecognized value as a
                 generic "manifest verification failed".
 
     RateLimitError:
@@ -260,8 +298,10 @@ components:
         Exactly one condition produces it — the database ping failed — so a `503`
         here means "process up, database unreachable". It is *not* a drain signal:
         this route never consults the shutdown flag that flips `/api/readyz`, so
-        liveness keeps answering `200` for as long as the process is alive and the
-        database is reachable. Note that this repo points its platform healthcheck
+        it keeps answering `200` for as long as the process is alive and the
+        database is reachable. Because a database outage turns this probe `503`,
+        using it as a restart-triggering liveness probe restarts healthy
+        processes during an outage. This repo points its platform healthcheck
         at `/api/health` (`railway.json`), so a sustained `503` here is what fails
         a deploy's healthcheck; the drain case belongs to `/api/readyz` alone.
 
@@ -286,7 +326,7 @@ components:
             obvious which service answered.
         aid:
           type: string
-          example: "aid:pubkey:z:abc..."
+          example: "aid:pubkey:11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
           description: >-
             The control plane's own AID, read from its cached manifest. Present on
             the `503` too: it comes from process-local identity rather than from a
@@ -300,11 +340,32 @@ components:
             the only check this probe makes, which is why it is the only field that
             can disagree with `ok`.
 
+    AgentSummary:
+      description: >-
+        The body of `GET /api/registry/agents/{aid}` — a subset of `Agent`
+        (no `namespace`, `lastEnrolledAt`, `agentManifestHint` or
+        `manifestJson`). Use `GET /api/registry/agents?aid=` for the full record.
+      type: object
+      required: [aid, displayName, handshakeEndpoint, offeredCaps, status, manifestUrl]
+      properties:
+        aid: { type: string, example: "aid:pubkey:ed25519:11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" }
+        displayName: { type: string }
+        handshakeEndpoint: { type: string, format: uri }
+        offeredCaps:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [active, expired, deregistered]
+        registeredAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time, nullable: true }
+        manifestUrl: { type: string }
+
     Agent:
       type: object
       required: [aid, displayName, handshakeEndpoint, offeredCaps, status]
       properties:
-        aid: { type: string, example: "aid:pubkey:z:abc..." }
+        aid: { type: string, example: "aid:pubkey:ed25519:11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" }
         displayName: { type: string }
         handshakeEndpoint: { type: string, format: uri }
         offeredCaps:
@@ -314,8 +375,6 @@ components:
           type: string
           enum: [active, expired, deregistered]
         namespace: { type: string, default: default }
-        org: { type: string, nullable: true }
-        cloud: { type: string, nullable: true }
         registeredAt: { type: string, format: date-time }
         lastEnrolledAt: { type: string, format: date-time, nullable: true }
         lastSeenAt: { type: string, format: date-time, nullable: true }
@@ -332,6 +391,16 @@ components:
         token: { type: string }
         expiresIn: { type: integer, example: 300 }
         aid: { type: string }
+
+    RegisterResponse:
+      type: object
+      required: [aid, displayName, registeredAt]
+      properties:
+        aid: { type: string }
+        displayName:
+          type: string
+          description: "`manifest.display_name`, or the AID when absent."
+        registeredAt: { type: string, format: date-time }
 
     AuditEvent:
       type: object
@@ -353,20 +422,73 @@ components:
         payload: { type: object, additionalProperties: true }
         source: { type: string, nullable: true }
 
+    EventIngestItem:
+      description: >-
+        One event as submitted to `POST /api/events`. No field is required;
+        the server normalizes each item (full rules: docs/events.md#ingest-normalization).
+        A client-supplied `id` is ignored — the server assigns a fresh one, so
+        `id` is not a de-duplication key. Items that are not JSON objects are
+        dropped silently.
+      type: object
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          description: Defaults to `unknown` when absent or not a string.
+        ts:
+          description: >-
+            ISO-8601 string, or a number of epoch seconds (values below 1e12)
+            or milliseconds. Defaults to the time of ingest when absent or
+            unparseable.
+          oneOf:
+            - { type: string }
+            - { type: number }
+        aidA: { type: string, description: "Aliases: `aid_a`, `initiator`." }
+        aidB: { type: string, description: "Aliases: `aid_b`, `target`." }
+        sessionId: { type: string, description: "Alias: `session_id`." }
+        runId: { type: string, description: "Aliases: `run_id`, `playground.run_id`." }
+        grants:
+          type: array
+          items: { type: string }
+          description: Ignored unless an array of strings.
+        payload:
+          type: object
+          additionalProperties: true
+          description: >-
+            Stored verbatim. When absent (or not an object), the whole raw
+            event object is stored as the payload. Serialized size is capped
+            at 65,536 characters (UTF-16 code units of `JSON.stringify`, not
+            bytes).
+        source:
+          type: string
+          description: Defaults to `playground`.
+
     EventIngestRequest:
       oneOf:
         - type: array
-          items: { $ref: "#/components/schemas/AuditEvent" }
+          items: { $ref: "#/components/schemas/EventIngestItem" }
         - type: object
           properties:
             events:
               type: array
-              items: { $ref: "#/components/schemas/AuditEvent" }
+              items: { $ref: "#/components/schemas/EventIngestItem" }
 
     EventIngestResponse:
       type: object
       properties:
-        ingested: { type: integer }
+        ingested:
+          type: integer
+          description: Number of object items accepted (non-object items are dropped).
+
+    SessionDetail:
+      type: object
+      required: [session, events]
+      properties:
+        session: { $ref: "#/components/schemas/HandshakeSession" }
+        events:
+          type: array
+          description: The session's stored events, oldest first.
+          items: { $ref: "#/components/schemas/AuditEvent" }
 
     HandshakeSession:
       type: object
@@ -386,12 +508,17 @@ components:
         error: { type: string, nullable: true }
         startedAt: { type: string, format: date-time, nullable: true }
         completedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
     RevocationEntryRequest:
       type: object
       required: [jti]
       properties:
-        jti: { type: string, format: uuid }
+        jti:
+          type: string
+          format: uuid
+          description: RFC 4122 UUID, versions 1–5 only (v6/v7/v8 are `400 JTI_INVALID`).
         reason:
           type: string
           maxLength: 500
@@ -405,7 +532,8 @@ components:
           type: string
           format: date-time
           description: >-
-            Defaults to now. Must fall between `1970-01-01T00:00:00.000Z` and
+            Defaults to now; a non-string value is ignored (treated as
+            absent). Must fall between `1970-01-01T00:00:00.000Z` and
             `9999-12-31T23:59:59.999Z`, or `400 BODY_INVALID`. The two ends have
             different reasons: above the upper bound the value is not a writable
             `timestamp with time zone` at all, while below the epoch it is
@@ -417,7 +545,32 @@ components:
             (`+010000-…`), so a spec-validating client is constrained before it
             reaches the server.
 
+    RevocationEntryResponse:
+      description: >-
+        Echoes the values of this request. When the `jti` was already revoked,
+        the stored entry keeps its original `revoked_at` and `reason`; this
+        body still reports the values just sent.
+      type: object
+      required: [jti, revokedAt, reason]
+      properties:
+        jti: { type: string, format: uuid }
+        revokedAt: { type: string, format: date-time }
+        reason: { type: string, nullable: true }
+
+    AdminAuditEntry:
+      type: object
+      required: [id, action, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, example: revocation.add }
+        actorId: { type: string, nullable: true }
+        targetId: { type: string, nullable: true }
+        details: { type: object, additionalProperties: true, nullable: true }
+        requestId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
     Webhook:
+      description: A subscription as listed. The `secret` is never included.
       type: object
       required: [id, url, events, active]
       properties:
@@ -430,17 +583,61 @@ components:
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 
+    WebhookCreated:
+      description: >-
+        The `201` body of `POST /api/webhooks` — the only response that ever
+        returns the `secret` (server-generated when the request omitted it).
+      type: object
+      required: [id, url, events, secret, active, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+        secret: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
     WebhookCreateRequest:
       type: object
       required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: http(s); https only in production. Must pass the SSRF guard and `WEBHOOK_URL_ALLOWLIST`.
+        events:
+          type: array
+          items: { type: string }
+          description: Empty or omitted means "all deliverable event types". Non-string entries are dropped.
+        secret:
+          type: string
+          description: HMAC key for `X-Aitp-Signature`. Server-generated when omitted.
+        active: { type: boolean, default: true }
+
+    WebhookUpdateRequest:
+      description: Every field optional; only the fields present (with the right type) are applied.
+      type: object
       properties:
         url: { type: string, format: uri }
         events:
           type: array
           items: { type: string }
-          description: Empty array means "all event types"
         secret: { type: string }
-        active: { type: boolean, default: true }
+        active: { type: boolean }
+
+    WebhookUpdated:
+      type: object
+      required: [id, url, events, active, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { type: string }
+        active: { type: boolean }
+        updatedAt: { type: string, format: date-time }
 
     IssuedTct:
       type: object
@@ -475,10 +672,11 @@ components:
     Delegation:
       type: object
       description: >-
-        A parent → child delegation observed by the control plane. As of
-        aitp/0.2, `parentJti` is sourced from the grant voucher's `src_jti`
-        claim (replacing aitp/0.1's `parent_jti`); the response shape is
-        unchanged.
+        A parent → child delegation observed by the control plane.
+        `parentJti` is taken from an explicit event field, then the reported
+        claims, then the embedded grant voucher's `src_jti`; a single-hop
+        token without a `jti` gets a deterministic synthetic UUIDv5. Full
+        derivation: docs/events.md#tct--delegation-projection.
       required: [jti, parentJti, delegator, delegatee, scope, issuedAt, revoked]
       properties:
         jti: { type: string, format: uuid }
@@ -495,6 +693,9 @@ components:
         revokedReason: { type: string, nullable: true, enum: [explicit, parent_revoked, null] }
 
     TrustAnchor:
+      description: >-
+        `addedBy` is returned by the list and create routes only; the
+        single-anchor GET and PATCH omit it.
       type: object
       required: [id, namespace, issuerUrl]
       properties:
@@ -512,10 +713,13 @@ components:
       type: object
       required: [issuerUrl]
       properties:
-        namespace: { type: string }
-        issuerUrl: { type: string, format: uri }
+        namespace: { type: string, maxLength: 128, default: default }
+        issuerUrl:
+          type: string
+          format: uri
+          description: Must start with `http://` or `https://`, or `400 BODY_INVALID`.
         jwksUrl: { type: string, format: uri }
-        label: { type: string }
+        label: { type: string, maxLength: 128 }
 
     PinnedKey:
       type: object
@@ -563,12 +767,6 @@ paths:
             The body is **not** the shared `Error` shape and carries no `code` —
             see `HealthFailure` for why, and for the `200`'s shape, which is the
             same four fields.
-
-
-            Undeclared here until #107, which is a gap worth naming: an operator
-            configuring alerts from this file alone would have had no way to know
-            that a non-`200` from the liveness probe is a documented, classified
-            answer with a readable body rather than an unhandled fault.
 
 
             Unlike `/api/readyz`, this route does not consult the shutdown flag, so
@@ -631,7 +829,11 @@ paths:
       security: []
       responses:
         "200":
-          description: Signed ManifestEnvelope JSON
+          description: >-
+            Signed ManifestEnvelope JSON, with `Cache-Control: max-age=3600`.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: max-age=3600 }
 
   /.well-known/aitp-revocation-list:
     get:
@@ -644,7 +846,13 @@ paths:
             Signed RevocationListEnvelope JSON, always backed by a successful
             database read (or, only with `REVOCATION_FAIL_MODE=serve_stale`, the
             last such list re-served byte-for-byte while younger than
-            `REVOCATION_MAX_STALENESS_SECS`).
+            `REVOCATION_MAX_STALENESS_SECS`). Carries `Cache-Control:
+            max-age=60`. The list is re-read and re-signed at most every 60
+            seconds per process; `REVOCATION_LIST_TTL_SECS` sets the signed
+            list's `expires_at`, not the refresh rate.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: max-age=60 }
         "503":
           description: >-
             `code` is `REVOCATION_UNAVAILABLE`: the database read failed and
@@ -657,6 +865,8 @@ paths:
           headers:
             Retry-After:
               schema: { type: integer }
+            Cache-Control:
+              schema: { type: string, example: no-store }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -714,13 +924,9 @@ paths:
             shape, which is why no schema is declared here.
 
 
-            This is now the **only** `4xx`/`5xx` response in this file with no
-            `content`, and that is the point: every other one declares a schema,
-            so an absence here means the body genuinely cannot be described, not
-            that nobody has written it down yet. Keep it that way — a new error
-            response gets a schema, or a description saying why it cannot have
-            one. (The invariant is about error responses; several `2xx`
-            responses in this file still declare no `content`.)
+            Like every `500` declared in this file, it has no `content`
+            because the body cannot be described. Every other error response
+            declares a schema; a new one should too, or say why it cannot.
         "503":
           description: >-
             `code` is `SERVER_MISCONFIGURED`. The server cannot issue
@@ -747,10 +953,21 @@ paths:
         - name: displayName
           in: query
           schema: { type: string }
+        - name: display_name
+          in: query
+          schema: { type: string }
+          description: snake_case alias for displayName (wins when both are sent)
         - $ref: "#/components/parameters/namespace"
         - name: include_manifest
           in: query
           schema: { type: boolean, default: false }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200, minimum: 1, maximum: 1000 }
+          description: Non-numeric values fall back to the default; out-of-range values are clamped. An empty value reads as 0 and is clamped to 1, not defaulted.
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
       responses:
         "200":
           description: Matching agents
@@ -783,15 +1000,25 @@ paths:
                 manifest: { type: object }
       responses:
         "201":
-          description: Registered
+          description: Registered. Emits an `agent.registered` event.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegisterResponse" }
         "400":
           description: >-
-            Bad manifest. `code` is `MANIFEST_EXPIRED` when the manifest expires
-            inside the 5-minute registration window — the same code
-            `POST /api/registry/enroll` returns for that identical condition, so
-            a client may handle it once for both routes — or `BODY_INVALID` for a
-            malformed body (not JSON, no `manifest.aid`, or a non-string
-            `manifest.extensions.namespace`).
+            `BODY_INVALID` when the body is not JSON or has no `manifest.aid`
+            (checked first, before the token); `MANIFEST_EXPIRED` when
+            `manifest.expires_at` is inside the 5-minute registration window
+            (the same code `POST /api/registry/enroll` returns for that
+            condition); `BODY_INVALID` when `manifest.extensions.namespace` is
+            present but not a string; `IDEMPOTENCY_KEY_INVALID` for a bad
+            `Idempotency-Key`.
+
+
+            The `MANIFEST_EXPIRED` and namespace checks run **after** the
+            token's `jti` has been consumed, so the token cannot be reused: fix
+            the manifest and re-enroll (a retry with the same token gets `401
+            TOKEN_REPLAYED`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -852,10 +1079,17 @@ paths:
         schema: { type: string }
     get:
       tags: [registry]
-      summary: Fetch one agent
+      summary: Fetch one agent (summary fields)
       security: []
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "200":
+          description: "OK. Carries `Cache-Control: public, max-age=30`."
+          headers:
+            Cache-Control:
+              schema: { type: string, example: "public, max-age=30" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSummary" }
         "404":
           description: No agent with this AID. `code` is `NOT_FOUND`.
           content:
@@ -867,24 +1101,9 @@ paths:
       responses:
         "200":
           description: >-
-            Deregistered — a `200` **with a body**, not a `204`. This file said
-            `204` until #107; the route has always answered
-            `{"aid": "…", "status": "deregistered"}`, and a unit test pins both the
-            status and that body, so the spec was corrected to the route rather
-            than the reverse.
-
-
-            The body is not redundant here the way a deleted-resource confirmation
-            would be: deregistration is a status flip on the registry row, not a
-            row deletion, and `status` reports the state the row is now in.
-
-
-            Two of this API's four DELETEs are genuinely `204` with no body
-            (`/api/trust-anchors/{id}` and `/api/pinned-keys`) and two answer `200`
-            with a small confirmation body (this one and `/api/webhooks/{id}`).
-            The split is a real property of the routes, not a documentation
-            artefact — `docs/api.md` draws the same line — so a client cannot
-            assume one shape for "DELETE on this API".
+            Deregistered — a `200` **with a body**, not a `204`.
+            Deregistration is a status flip on the registry row, not a row
+            deletion, and `status` reports the state the row is now in.
           content:
             application/json:
               schema:
@@ -913,6 +1132,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/registry/agents/{aid}/manifest:
     parameters:
@@ -940,16 +1161,28 @@ paths:
     get:
       tags: [sessions]
       summary: List handshake sessions
+      description: >-
+        Returns at most the newest 200 sessions by creation time. There is no
+        pagination: `limit` and `offset` are not read.
       parameters:
         - name: status
           in: query
-          schema: { type: string, enum: [started, complete, failed] }
+          schema: { type: string }
+          description: >-
+            Exact match on the stored status (`started`, `complete`, `failed`).
+            Not validated — any other value matches nothing and returns an
+            empty list.
         - name: runId
           in: query
           schema: { type: string }
+        - name: run_id
+          in: query
+          schema: { type: string }
+          description: snake_case alias for runId (wins when both are sent)
         - name: aid
           in: query
           schema: { type: string }
+          description: Matches either side of the session.
       responses:
         "200":
           description: OK
@@ -961,6 +1194,8 @@ paths:
                   sessions:
                     type: array
                     items: { $ref: "#/components/schemas/HandshakeSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/sessions/{sessionId}:
     parameters:
@@ -972,12 +1207,18 @@ paths:
       tags: [sessions]
       summary: Fetch one handshake session
       responses:
-        "200": { description: OK }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionDetail" }
         "404":
           description: No handshake session with this id. `code` is `NOT_FOUND`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/events:
     post:
@@ -998,10 +1239,11 @@ paths:
               schema: { $ref: "#/components/schemas/EventIngestResponse" }
         "400":
           description: >-
-            The body did not parse as JSON. `code` is `BODY_INVALID`. Note that a
-            body which parses but is neither an array nor an object with an
-            `events` array is **not** an error — it ingests zero events and
-            answers `200`.
+            `BODY_INVALID` when the body did not parse as JSON;
+            `IDEMPOTENCY_KEY_INVALID` for a bad `Idempotency-Key`. A body that
+            parses but is neither an array nor an object with an `events`
+            member (or has `"events": null`) is **not** an error — it ingests
+            zero events and answers `200`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1012,10 +1254,25 @@ paths:
             streamed, since the header is spoofable and omittable), more than
             500 events in one batch, or a single event payload over 64 KiB. The
             batch is rejected whole in every case; only the last of those
-            carries `eventType`, naming the offending event.
+            carries `eventType`, naming the offending event. The per-event cap
+            counts UTF-16 code units of `JSON.stringify(payload)`, not bytes.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PayloadTooLargeError" }
+        "500":
+          description: >-
+            Currently returned for some malformed input instead of a `400`:
+            an `events` member that is present but not an array (string,
+            number, boolean, object), or an item whose values the database cannot store
+            (for example a `type` over 128 characters, an AID over 512, a
+            `sessionId`/`runId` over 255, or a NUL character). The whole batch
+            is rejected. Exception: the 500-event cap is checked against
+            `events.length` first, so a string `events` longer than 500
+            characters, or an object with a numeric `length` over 500, answers
+            `413` instead. The body is whatever the framework renders, not the
+            shared `Error` shape.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/events/history:
     get:
@@ -1030,8 +1287,8 @@ paths:
         - { name: run_id, in: query, schema: { type: string }, description: "snake_case alias for runId" }
         - { name: since, in: query, schema: { type: string, format: date-time } }
         - { name: until, in: query, schema: { type: string, format: date-time } }
-        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
-        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }, description: "Non-numeric values fall back to the default; out-of-range values are clamped. An empty value reads as 0 and is clamped to 1, not defaulted." }
+        - { name: offset, in: query, schema: { type: integer, default: 0, minimum: 0 }, description: "Malformed values fall back to 0." }
       responses:
         "200":
           description: OK
@@ -1055,13 +1312,25 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/events/stream:
     get:
       tags: [events]
       summary: Server-Sent Events live stream (with backlog replay)
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: runId, in: query, schema: { type: string } }
+        - { name: run_id, in: query, schema: { type: string }, description: "snake_case alias for runId (wins when both are sent)" }
+        - { name: aid, in: query, schema: { type: string }, description: "Matches either side of the event." }
       responses:
         "200":
+          headers:
+            Cache-Control:
+              schema: { type: string, example: "no-cache, no-transform" }
+            X-Accel-Buffering:
+              schema: { type: string, example: "no" }
           description: >-
             text/event-stream. The first chunk is a prelude, not an event: a
             `retry:` reconnect hint (tracking SSE_HEARTBEAT_MS, default 15000)
@@ -1071,7 +1340,12 @@ paths:
             interval. Clients must tolerate comment frames (lines beginning ":")
             and must not assume the first frame carries data; EventSource and
             every conformant SSE parser already discard them. Events themselves
-            arrive as `data: <json>` frames.
+            arrive as `data: <json>` frames, with no `id:` line, so
+            `Last-Event-ID` resume is not supported and a reconnect replays the
+            backlog. The backlog is the process's last 100 events, filtered
+            after selection (a filtered stream may replay fewer). The bus is
+            in-memory and per replica: a stream sees only events ingested by
+            the replica it is connected to.
           content:
             text/event-stream: { schema: { type: string } }
         "503":
@@ -1079,10 +1353,16 @@ paths:
             `code` is `SSE_CAPACITY` — `MAX_SSE_CONNECTIONS` streams are already
             open on this process; back off and retry. Carries a `Retry-After: 30`
             header. The capacity is per-process, so behind more than one replica
-            a retry may land on an instance with a free slot.
+            a retry may land on an instance with a free slot. (A production
+            server with an empty `API_KEYS` also answers `503`, with `code:
+            SERVER_MISCONFIGURED`, from the request gate.)
+          headers:
+            Retry-After:
+              schema: { type: integer }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/revocation/entries:
     post:
@@ -1096,11 +1376,18 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/RevocationEntryRequest" }
       responses:
-        "201": { description: Added }
+        "201":
+          description: >-
+            Added. Also returned when the `jti` was already revoked (the stored
+            entry is unchanged; see `RevocationEntryResponse`). Every `201`
+            emits a `tct.revoked` event and webhook delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevocationEntryResponse" }
         "400":
           description: >-
             `code` is one of three values. `JTI_INVALID` when `jti` is missing or
-            not a UUID. `IDEMPOTENCY_KEY_INVALID` when an `Idempotency-Key` header
+            not a version 1–5 UUID. `IDEMPOTENCY_KEY_INVALID` when an `Idempotency-Key` header
             is present but empty, over 255 characters, or contains control
             characters — this one comes from the idempotency layer and so is
             common to every endpoint accepting that header, not specific to this
@@ -1114,15 +1401,13 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: >-
-            An internal fault — in practice a database one, since the caller-caused
-            failures above are all decided before any SQL runs. Documented because
-            it is reachable **by design** rather than only by accident: this route
-            rethrows a database error instead of answering with it, so the message
-            (which names tables, columns and types) cannot reach the client. The
-            body is whatever the framework renders and is **not** the shared
-            `Error` shape, which is why no schema is declared here. This replaced
-            a `500` carrying `{"error": "<postgres message>", "code":
-            "INSERT_FAILED"}`; that code no longer exists.
+            An internal fault — in practice a database one. This route rethrows
+            a database error instead of answering with it, so the message (which
+            names tables, columns and types) cannot reach the client. The body
+            is whatever the framework renders and is **not** the shared `Error`
+            shape, which is why no schema is declared here.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks:
     get:
@@ -1139,6 +1424,8 @@ paths:
                   webhooks:
                     type: array
                     items: { $ref: "#/components/schemas/Webhook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
       tags: [webhooks]
       summary: Create a subscription
@@ -1151,61 +1438,67 @@ paths:
             schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
       responses:
         "201":
-          description: Created
+          description: Created. The only response that returns the `secret`.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Webhook" }
+              schema: { $ref: "#/components/schemas/WebhookCreated" }
+        "400":
+          description: >-
+            `BODY_INVALID` when the body is not JSON or `url` is not a string;
+            `URL_NOT_ALLOWED` when `url` is not a valid http(s) URL (https only
+            in production), resolves to a private/loopback/link-local address,
+            or is outside `WEBHOOK_URL_ALLOWLIST`; `IDEMPOTENCY_KEY_INVALID`
+            for a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-    # There is deliberately no `get` here. `src/app/api/webhooks/[id]/route.ts`
-    # exports only PATCH and DELETE, so a read-one answers 405. This file declared
-    # one anyway — a `200` with no schema at all, plus a `404` — until #107. No
-    # handler was ever removed: that route file has exported exactly PATCH and
-    # DELETE in every commit of its history, while `docs/api.md`'s webhook table
-    # listed only the routes that exist.
-    #
-    # Adding one is a feature, not a doc fix, so it does not belong here until the
-    # route exists: `GET /api/webhooks` is the read surface today, and the row
-    # carries a `secret` that the collection response deliberately does not
-    # project, so a single-row read has to decide what it exposes first.
+    # There is deliberately no `get` here: `src/app/api/webhooks/[id]/route.ts`
+    # exports only PATCH and DELETE, so a read-one answers 405. `GET
+    # /api/webhooks` is the read surface.
     patch:
       tags: [webhooks]
       summary: Update a subscription
+      description: >-
+        A non-UUID `id` currently answers `500` rather than `404` (also on
+        DELETE).
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/WebhookCreateRequest" }
+            schema: { $ref: "#/components/schemas/WebhookUpdateRequest" }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookUpdated" }
+        "400":
+          description: >-
+            `BODY_INVALID` when the body is not JSON; `URL_NOT_ALLOWED` when a
+            supplied `url` fails the same guard as on create.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: No webhook subscription with this id. `code` is `NOT_FOUND`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [webhooks]
       summary: Delete a subscription
       responses:
         "200":
           description: >-
-            Deleted — a `200` **with a body**, not a `204`. This file said `204`
-            until #107; the route has always answered
-            `{"id": "…", "deleted": true}`, and a unit test pins both the status
-            and that body. A `204` would be the more conventional answer for a
-            real row deletion, which this is — but the body is the shipped
-            contract and a client may be reading it, so the spec was corrected to
-            the route rather than the route changed to the spec.
-
-
-            Two of this API's four DELETEs are genuinely `204` with no body
-            (`/api/trust-anchors/{id}` and `/api/pinned-keys`) and two answer `200`
-            with a small confirmation body (this one and
-            `/api/registry/agents/{aid}`). The split is a real property of the
-            routes, not a documentation artefact — `docs/api.md` draws the same
-            line — so a client cannot assume one shape for "DELETE on this API".
+            Deleted — a `200` **with a body**, not a `204`.
           content:
             application/json:
               schema:
@@ -1229,25 +1522,44 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/audit:
     get:
       tags: [audit]
-      summary: Admin audit log (who did what when)
+      summary: Admin audit log (who did what when), newest first
       parameters:
-        - { name: limit, in: query, schema: { type: integer, default: 100 } }
-        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }, description: "Non-numeric values fall back to the default; out-of-range values are clamped. An empty value reads as 0 and is clamped to 1, not defaulted." }
+        - { name: offset, in: query, schema: { type: integer, default: 0, minimum: 0 } }
       responses:
-        "200": { description: OK }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, count]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AdminAuditEntry" }
+                  count:
+                    type: integer
+                    description: Number of entries in this page (not the total).
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/dashboard/overview:
     get:
       tags: [dashboard]
       summary: Aggregate counts + recent activity
       parameters:
-        - { name: window, in: query, schema: { type: string, enum: [1h, 24h, 7d, 30d], default: 24h } }
+        - { name: range, in: query, schema: { type: string, enum: [1h, 24h, 7d, 30d], default: 24h }, description: "Any other value falls back to 24h." }
       responses:
         "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/dashboard/agents:
     get:
@@ -1255,11 +1567,17 @@ paths:
       summary: Per-agent metrics
       responses:
         "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/tcts:
     get:
       tags: [tcts]
       summary: Query observed TCTs
+      description: >-
+        With `OBSERVED_ARTIFACT_VERIFICATION=strict`, reports whose signed
+        token did not verify were never projected and so never appear here
+        (docs/operations.md#observed-artifact-verification).
       parameters:
         - { name: issuer, in: query, schema: { type: string } }
         - { name: subject, in: query, schema: { type: string } }
@@ -1280,18 +1598,24 @@ paths:
                   tcts:
                     type: array
                     items: { $ref: "#/components/schemas/IssuedTct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/delegations:
     get:
       tags: [delegations]
       summary: Query observed delegation chains
       description: |
-        Without filters, returns recent delegations. With `?root_jti=`,
-        walks the descendant tree rooted at that JTI via a recursive
-        CTE.
+        Without filters, returns recent delegations, newest first. With
+        `?root_jti=`, returns the whole descendant tree rooted at that JTI
+        (oldest first) via a recursive CTE, and every other filter, `limit`
+        and `offset` are ignored. UUID parameters accept versions 1–5 only.
+        Subject to `OBSERVED_ARTIFACT_VERIFICATION` like `/api/tcts`.
       parameters:
         - { name: root_jti, in: query, schema: { type: string, format: uuid } }
+        - { name: rootJti, in: query, schema: { type: string, format: uuid }, description: "camelCase alias for root_jti (root_jti wins when both are sent)" }
         - { name: parent_jti, in: query, schema: { type: string, format: uuid } }
+        - { name: parentJti, in: query, schema: { type: string, format: uuid }, description: "camelCase alias for parent_jti (parent_jti wins when both are sent)" }
         - { name: delegator, in: query, schema: { type: string } }
         - { name: delegatee, in: query, schema: { type: string } }
         - { name: active, in: query, schema: { type: boolean } }
@@ -1308,6 +1632,13 @@ paths:
                   delegations:
                     type: array
                     items: { $ref: "#/components/schemas/Delegation" }
+        "400":
+          description: "`root_jti` or `parent_jti` is not a UUID. `code` is `BAD_REQUEST`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/trust-anchors:
     get:
@@ -1326,6 +1657,8 @@ paths:
                   trustAnchors:
                     type: array
                     items: { $ref: "#/components/schemas/TrustAnchor" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
       tags: [trust]
       summary: Create a trust anchor
@@ -1342,18 +1675,51 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TrustAnchor" }
-        "409":
-          description: Duplicate (namespace, issuerUrl)
+        "400":
+          description: >-
+            `BODY_INVALID` when the body is not JSON or `issuerUrl` is not a
+            string starting `http://` or `https://`; `IDEMPOTENCY_KEY_INVALID`
+            for a bad `Idempotency-Key`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            `code` is `ALREADY_EXISTS` — an anchor with this
+            `(namespace, issuerUrl)` exists. `existing.id` names it; PATCH that
+            id to update.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      existing:
+                        type: object
+                        properties:
+                          id: { type: string, format: uuid }
+        "500":
+          description: >-
+            Currently returned when `namespace` or `label` exceeds 128
+            characters (the column width) instead of a `400`. The body is
+            whatever the framework renders, not the shared `Error` shape.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/trust-anchors/{id}:
     parameters:
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: >-
+          Not validated on these three operations: a non-UUID value currently
+          answers `500` rather than `404` (only the `/jwks` route returns `400
+          ID_INVALID`).
     get:
       tags: [trust]
-      summary: Fetch one trust anchor
+      summary: Fetch one trust anchor (without `addedBy`)
       responses:
         "200":
           description: OK
@@ -1365,9 +1731,17 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     patch:
       tags: [trust]
       summary: Update a trust anchor
+      description: >-
+        Applies only the fields present. `issuerUrl` is not checked for an
+        http(s) scheme; changing it to a value another anchor in the same
+        namespace already has currently answers `500`, as does a `label`
+        longer than 128 characters (the column width). Changing `issuerUrl` or
+        `jwksUrl` does not clear the cached JWKS. The response omits `addedBy`.
       requestBody:
         required: true
         content:
@@ -1379,12 +1753,23 @@ paths:
                 jwksUrl: { type: string, format: uri, nullable: true }
                 label: { type: string, nullable: true }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrustAnchor" }
+        "400":
+          description: The body is not JSON. `code` is `BODY_INVALID`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: No trust anchor with this id. `code` is `NOT_FOUND`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [trust]
       summary: Delete a trust anchor
@@ -1397,6 +1782,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/trust-anchors/{id}/jwks:
     parameters:
@@ -1405,13 +1792,20 @@ paths:
       tags: [trust]
       summary: CP-cached JWKS for a trust anchor
       description: >-
-        For agents in OIDC mode that cannot reach the issuer. Populated by a
-        background refresher; `X-JWKS-Cached-At` carries the cache time.
+        For agents in OIDC mode that cannot reach the issuer. Populated only
+        by the background refresher, never by this request. Once a keyset has
+        been cached, later refresh failures keep the old copy in place and it
+        keeps being served with `200`; a PATCH of `issuerUrl`/`jwksUrl` does
+        not clear it either.
       responses:
         "200":
           description: The cached JWKS document.
           headers:
-            X-JWKS-Cached-At: { schema: { type: string, format: date-time } }
+            X-JWKS-Cached-At:
+              schema: { type: string }
+              description: Time the keyset was cached (ISO-8601); empty string if unknown.
+            Cache-Control:
+              schema: { type: string, example: max-age=300 }
           content:
             application/json:
               schema:
@@ -1432,12 +1826,23 @@ paths:
         "503":
           description: >-
             Nothing cached yet (`code` is `JWKS_NOT_CACHED`; body includes
-            `issuerUrl`). Retry after `Retry-After` seconds.
+            `issuerUrl`). Retry after `Retry-After` (60) seconds. Persists
+            indefinitely if the refresher never succeeds — issuer unreachable,
+            `JWKS_REFRESH_ENABLED=false`, or an `http://` URL in production. (A
+            production server with an empty `API_KEYS` also answers `503`,
+            with `code: SERVER_MISCONFIGURED`, from the request gate.)
           headers:
             Retry-After: { schema: { type: integer } }
+            Cache-Control: { schema: { type: string, example: no-store } }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      issuerUrl: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/pinned-keys:
     get:
@@ -1470,6 +1875,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
       tags: [trust]
       summary: Upsert a pinned key
@@ -1483,8 +1890,8 @@ paths:
               type: object
               required: [aid, pubkey]
               properties:
-                namespace: { type: string }
-                aid: { type: string }
+                namespace: { type: string, maxLength: 128, default: default }
+                aid: { type: string, maxLength: 512 }
                 pubkey:
                   type: string
                   description: Ed25519 public key, 43-character base64url
@@ -1504,7 +1911,10 @@ paths:
                   type: string
                   format: date-time
                   description: >-
-                    Optional. Omitted or `null` means the pin never expires.
+                    Optional. Omitted, `null` or a non-string value means the
+                    pin never expires — and on an existing row, clears any
+                    previous expiry (the upsert replaces `pubkey`, `label` and
+                    `expiresAt` together).
                     Advisory: the control plane never sweeps `pinned_keys`, so
                     honouring this is the reading agent's job. Must fall between
                     `0001-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`, or
@@ -1520,7 +1930,10 @@ paths:
                     is constrained before it reaches the server.
       responses:
         "201":
-          description: Upserted
+          description: >-
+            Upserted — `201` whether the row was created or replaced. A
+            non-string `label` is stored as `null`, and omitting `label` on an
+            existing row clears it.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PinnedKey" }
@@ -1540,13 +1953,14 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: >-
-            An internal fault — in practice a database one, since the
-            caller-caused failures above are all decided before any SQL runs. The
-            body is whatever the framework renders and is **not** the shared
-            `Error` shape, which is why no schema is declared here: this route has
-            no catch around its insert, so a database error propagates rather than
-            being answered with, and its message (which names tables, columns and
-            types) never reaches the client.
+            An internal fault, including some caller input the route does not
+            validate: an `aid` over 512 characters or containing a NUL, or a
+            `namespace` over 128 characters, currently answers `500` rather
+            than `400`. The body is whatever the framework renders and is
+            **not** the shared `Error` shape, which is why no schema is
+            declared here; the database message never reaches the client.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [trust]
       summary: Delete a pinned key
@@ -1555,14 +1969,20 @@ paths:
         - { name: aid, in: query, required: true, schema: { type: string } }
       responses:
         "204": { description: Deleted }
-        "404":
-          description: >-
-            No pinned key for this `(namespace, aid)`, so nothing was deleted.
-            `code` is `NOT_FOUND`. A missing `?aid=` is a `400 BAD_REQUEST`
-            instead, not a `404`.
+        "400":
+          description: "`?aid=` is missing. `code` is `BAD_REQUEST`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: >-
+            No pinned key for this `(namespace, aid)`, so nothing was deleted.
+            `code` is `NOT_FOUND`. `namespace` defaults to `default`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/sessions/{sessionId}/export:
     parameters:
@@ -1585,6 +2005,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/sessions/{sessionId}/replay:
     parameters:
@@ -1595,6 +2017,9 @@ paths:
     get:
       tags: [sessions]
       summary: Ordered event stream for one session (offline replay)
+      description: >-
+        An unknown `sessionId` returns `200` with no events, not `404`.
+        A malformed `limit` falls back to the default.
       responses:
         "200":
           description: OK
@@ -1608,6 +2033,13 @@ paths:
                   events:
                     type: array
                     items: { $ref: "#/components/schemas/AuditEvent" }
+        "400":
+          description: "`since` or `until` is not a parseable date. `code` is `BAD_REQUEST`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/registry/agents/{aid}/export:
     parameters:
@@ -1635,29 +2067,43 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}/circuit-breaker:
     parameters:
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: id, in: path, required: true, schema: { type: string }, description: "Webhook id. Not validated or looked up." }
     get:
       tags: [webhooks]
       summary: Get circuit-breaker snapshot for a webhook
+      description: >-
+        Breaker state is in-memory and per process: the snapshot reflects only
+        the replica that served the request. Any `id` is accepted — an unknown
+        id returns a fresh `closed` snapshot, never `404`.
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}/circuit-breaker/reset:
     parameters:
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: id, in: path, required: true, schema: { type: string }, description: "Webhook id. Not validated or looked up." }
     post:
       tags: [webhooks]
       summary: Manually reset a webhook's circuit breaker to closed
+      description: >-
+        Resets only the breaker held by the replica that served the request.
+        Any `id` is accepted (no `404`), and every call writes an admin audit
+        entry.
       responses:
         "200":
           description: Reset; returns the post-reset snapshot
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
