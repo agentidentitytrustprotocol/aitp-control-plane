@@ -50,6 +50,8 @@ describe('nodeEnvBootWarning', () => {
     expect(w).toContain('API_KEYS');
     expect(w).toContain('ENROLLMENT_SECRET');
     expect(w).toContain('CP_AID_SEED_HEX');
+    // What a non-production boot actually does with a bad seed (cp-seed-config.ts).
+    expect(w).toContain('malformed CP_AID_SEED_HEX no longer stops the boot');
   });
 
   it('warns when unset and says so', () => {

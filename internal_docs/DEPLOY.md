@@ -103,7 +103,11 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 
 4. **Networking** — Railway sets `PORT`; the server reads it (defaults to
    4000). Generate a public domain under the service's **Settings →
-   Networking**. The healthcheck path is `/api/health`.
+   Networking**. The healthcheck path is `/api/health`. Railway calls it only
+   while a new deployment starts (any `2xx` within 300 s; otherwise the deploy
+   fails and the previous one keeps serving) and never afterwards, so a `503`
+   from a running service (database down) does not restart it; restarts come
+   only from `ON_FAILURE`, i.e. a process exiting non-zero.
 
 5. **Run database migrations** (one-time per schema change). The runtime
    image does not bundle `drizzle-kit`, so run migrations from a checkout
@@ -127,11 +131,11 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | ------------------ | ------------------- | ------------------------------------------------------------------ |
 | `DATABASE_URL`     | yes                 | Postgres connection string (from the Railway Postgres plugin).     |
 | `NODE_ENV`         | set by the image    | The image sets `production`; every production safeguard keys on that exact value (after trimming). Do not override it — use `production` for staging too. |
-| `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. Not checked at boot: if missing in production, `/api/health`, the manifest and the revocation list answer `500`, so the `/api/health` healthcheck fails the deploy. |
+| `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. **Validated at boot: missing, or not decoding to 32 bytes (`0x` prefix, leading whitespace, wrong length), prints one `[aitp-cp] FATAL:` line and exits 1** — the healthcheck never passes, the Railway deploy fails, and the previous deployment keeps serving. Trailing non-hex characters (or a 65th hex digit) after the 64 hex digits are accepted with the same AID and only warn. |
 | `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. **Validated at boot: the image runs with `NODE_ENV=production`, so an unset/short value prints one `[aitp-cp] FATAL:` line and exits 1** — the healthcheck never passes, the Railway deploy fails, and the previous deployment keeps serving. (A bad value no longer deploys green; before this it 503'd `/api/registry/enroll` **and** `/api/registry/agents` on every request for as long as the release ran.) Still smoke-test an enrollment *and* a registration after changing it: boot proves the secret is usable, not that it matches the one existing tokens were minted under. |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
 | `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
-| `CP_BASE_URL`      | recommended         | Public base URL, embedded in the CP's manifest as `<CP_BASE_URL>/api/aitp/handshake/hello` — a route the CP does not serve (it is not a handshake peer). |
+| `CP_BASE_URL`      | recommended         | Public `https://` base URL, embedded in the CP's manifest as `<CP_BASE_URL>/api/aitp/handshake/hello` — a spec-required field for a route the CP does not serve (it is not a handshake peer). Unset (defaults to `http://localhost:4000`), loopback or non-https logs a boot warning; not fatal. |
 | `PORT`             | auto                | Set by Railway; server defaults to 4000.                           |
 | `DB_POOL_MAX`      | no                  | Connection pool size (default 20).                                 |
 | `OTEL_ENABLED`     | no                  | Enable OpenTelemetry export (default off).                         |

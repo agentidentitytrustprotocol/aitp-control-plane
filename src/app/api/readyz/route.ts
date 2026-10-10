@@ -6,9 +6,10 @@ import { isShuttingDown } from '@/lib/shutdown';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-/** Kubernetes-style readiness probe. Distinct from /api/health (liveness)
- * in that it requires the database to be reachable. K8s should remove the
- * pod from service when this returns 503 but keep it running.
+/** Kubernetes-style readiness probe: requires the database to be reachable
+ * (as /api/health does) and, unlike /api/health, also honours the drain flag.
+ * K8s should remove the pod from service when this returns 503 but keep it
+ * running.
  *
  * Also flips to 503 once a SIGTERM has been received — the LB drains us
  * out of rotation before the process actually exits. */

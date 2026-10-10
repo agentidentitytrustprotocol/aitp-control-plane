@@ -94,8 +94,8 @@ Stored responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7).
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | public | Liveness + DB ping. `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. |
-| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity, which is `/api/health`'s business. |
+| GET | `/api/health` | public | Process up + DB ping + the CP's AID: `200 {ok, service, aid, db: "ok"}`, or `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. Railway's deploy-time healthcheck (gates deploys only; never restarts a running service); not a safe restart-triggering liveness probe — see [`operations.md`](operations.md#health-readiness--graceful-shutdown). |
+| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity (enforced at boot in production; `/api/health` reports the AID). |
 | GET | `/api/metrics` | public | Prometheus text format |
 
 ### Discovery

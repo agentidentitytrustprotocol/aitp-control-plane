@@ -40,6 +40,13 @@ jest.mock('./lib/registry/enrollment-config', () => ({
     enforceEnrollmentSecretAtBootMock();
   },
 }));
+const enforceCpSeedAtBootMock = jest.fn(() => {});
+jest.mock('./lib/identity/cp-seed-config', () => ({
+  enforceCpSeedAtBoot: () => {
+    calls.push('enforceCpSeedAtBoot');
+    enforceCpSeedAtBootMock();
+  },
+}));
 jest.mock('./lib/shutdown', () => ({
   registerShutdownHooks: (hooks?: unknown) => {
     calls.push('registerShutdownHooks');
@@ -95,6 +102,7 @@ const mutableEnv = process.env as Record<string, string | undefined>;
 beforeEach(() => {
   calls.length = 0;
   enforceEnrollmentSecretAtBootMock.mockClear();
+  enforceCpSeedAtBootMock.mockClear();
   registerShutdownHooksMock.mockClear();
   reportRequestErrorMock.mockReset();
   reportRequestErrorMock.mockImplementation(() => undefined);
@@ -138,6 +146,16 @@ describe('register', () => {
     expect(enforceEnrollmentSecretAtBootMock).toHaveBeenCalledTimes(1);
   });
 
+  it('validates CP_AID_SEED_HEX at boot, right after ENROLLMENT_SECRET', async () => {
+    // Without this call a production deploy with no (or a malformed) seed boots
+    // green and fails the manifest, revocation list and /api/health on first
+    // use — every CI path supplies a valid seed, so nothing else would notice.
+    await register();
+    expect(enforceCpSeedAtBootMock).toHaveBeenCalledTimes(1);
+    const i = calls.indexOf('enforceEnrollmentSecretAtBoot');
+    expect(calls[i + 1]).toBe('enforceCpSeedAtBoot');
+  });
+
   it('validates the config BEFORE registering shutdown hooks', async () => {
     // A process that is about to exit should not first install signal handlers,
     // and the operator should read the fatal line first rather than third.
@@ -145,6 +163,7 @@ describe('register', () => {
     expect(calls).toEqual([
       'warnOnUnrecognisedNodeEnv',
       'enforceEnrollmentSecretAtBoot',
+      'enforceCpSeedAtBoot',
       'registerShutdownHooks',
       'startJwksRefresher',
     ]);
@@ -161,6 +180,7 @@ describe('register', () => {
     expect(calls).toEqual([
       'warnOnUnrecognisedNodeEnv',
       'enforceEnrollmentSecretAtBoot',
+      'enforceCpSeedAtBoot',
       'sdk.start',
       'registerShutdownHooks',
       'startJwksRefresher',

@@ -307,11 +307,14 @@ components:
         here means "process up, database unreachable". It is *not* a drain signal:
         this route never consults the shutdown flag that flips `/api/readyz`, so
         it keeps answering `200` for as long as the process is alive and the
-        database is reachable. Because a database outage turns this probe `503`,
-        using it as a restart-triggering liveness probe restarts healthy
-        processes during an outage. This repo points its platform healthcheck
-        at `/api/health` (`railway.json`), so a sustained `503` here is what fails
-        a deploy's healthcheck; the drain case belongs to `/api/readyz` alone.
+        database is reachable. This repo points its platform healthcheck at
+        `/api/health` (`railway.json`); Railway calls it only while a new
+        deployment starts, so a `503` here fails that deploy (the previous one
+        keeps serving) and never restarts a service that is already running.
+        On an orchestrator that restarts on failed liveness (e.g. a Kubernetes
+        `livenessProbe`), however, a database outage turns this probe `503` on
+        every replica and restarts healthy processes — prefer a TCP check there.
+        The drain case belongs to `/api/readyz` alone.
 
 
         The `200` body is these same four fields with `ok: true` and `db: ok` — one
@@ -336,10 +339,12 @@ components:
           type: string
           example: "aid:pubkey:11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
           description: >-
-            The control plane's own AID, read from its cached manifest. Present on
-            the `503` too: it comes from process-local identity rather than from a
-            query, so a database outage does not remove it. (This is also the one
-            probe that touches CP identity at all — `/api/readyz` does not.)
+            The control plane's own AID, read from its in-process identity (the
+            manifest is not built or signed for a probe). Present on the `503`
+            too: it comes from process-local identity rather than from a query, so
+            a database outage does not remove it. (This is also the one probe that
+            touches CP identity at all — `/api/readyz` does not; a usable
+            `CP_AID_SEED_HEX` is enforced at boot in production.)
         db:
           type: string
           const: error
@@ -876,7 +881,14 @@ paths:
   /api/health:
     get:
       tags: [discovery]
-      summary: Liveness probe
+      summary: Health probe (process up + DB ping + CP AID)
+      description: >-
+        `200 {ok: true, service, aid, db: "ok"}` while the database answers
+        `SELECT 1`, `503` (`HealthFailure`) when it does not. Used as Railway's
+        deploy-time healthcheck (`railway.json`), which gates a new deployment
+        and is never polled afterwards, so it never restarts a running service.
+        Not suitable as a restart-triggering liveness probe (e.g. Kubernetes
+        `livenessProbe`): a database outage would restart every replica.
       security: []
       responses:
         "200": { description: OK }
@@ -919,7 +931,7 @@ paths:
             see `ReadinessFailure` for why.
 
 
-            Distinct from `/api/health`, which is liveness: it keeps answering
+            Distinct from `/api/health`, which ignores the drain flag: it keeps answering
             `200` right through a drain. An orchestrator should therefore take
             this pod out of service on a `503` here and leave the process
             running.

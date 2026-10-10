@@ -2,6 +2,7 @@ import { AitpAgent } from 'aitp';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config';
 import { logger } from '../logger';
+import { cpSeedProblem, decodeCpSeedHex } from './cp-seed-config';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -23,6 +24,16 @@ const MANIFEST_REBUILD_MARGIN_SECS = 3_600;
 function buildManifestJson(agent: AitpAgent): string {
   return agent.buildManifest({
     displayName: 'aitp-control-plane',
+    // REQUIRED by RFC-AITP-0003 §3.1 and aitp-manifest.schema.json (pattern
+    // ^https://), and the aitp builder refuses a manifest without it — so it
+    // cannot be dropped, even though this service serves no such route: the CP
+    // is not a handshake peer (its manifest exists to identify the key that
+    // signs the revocation list). A peer that POSTs here gets 404. Pointing it
+    // at some other route would be worse (a wrong contract rather than an
+    // absent one). It is built from CP_BASE_URL, which the boot check in
+    // cp-seed-config.ts warns about in production when it is not a public
+    // https origin. (The playground's discovery reads a differently-cased
+    // field from the registry API — a separate issue in that repo.)
     handshakeEndpoint: `${config.cpBaseUrl}/api/aitp/handshake/hello`,
     offeredCaps: [],
     requiredCaps: [],
@@ -53,7 +64,13 @@ export function initCpIdentity(): void {
       'CP_AID_SEED_HEX not set — using ephemeral key (regenerated each restart)',
     );
   } else {
-    agent = AitpAgent.fromSeed(Buffer.from(seedHex, 'hex'));
+    // Same rule and same decode as the production boot check
+    // (cp-seed-config.ts), so boot cannot pass a seed this refuses. The decode
+    // is deliberately untrimmed: see that module for why changing it could
+    // rotate a deployed identity.
+    const problem = cpSeedProblem(seedHex);
+    if (problem !== null) throw new Error(problem);
+    agent = AitpAgent.fromSeed(decodeCpSeedHex(seedHex));
   }
 
   globalThis.__cpAgent = agent;

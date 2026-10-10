@@ -14,21 +14,32 @@ The CP has its own AITP identity (Ed25519), served at
 - **`CP_AID_SEED_HEX`** — 32-byte hex seed. **Required in production.** Outside
   production a missing seed is replaced by a random one on every boot (logged
   as a warning), so the CP's AID changes on restart and any peer that pinned
-  the old key breaks. Under `NODE_ENV=production` a missing seed is **not** a
-  boot check: the process starts, and the identity is built lazily on first use,
-  which throws — so `/api/health`, `/.well-known/aitp-manifest` and the
-  revocation list answer `500` until the seed is set. (A platform healthcheck
-  on `/api/health`, such as the one in `railway.json`, therefore fails the
-  deploy; a check on `/api/readyz` would not.) Generate once and store it as a
-  secret:
+  the old key breaks. **Validated at boot:** under `NODE_ENV=production` a
+  missing seed, or one that does not decode to 32 bytes, prints one
+  `[aitp-cp] FATAL: CP_AID_SEED_HEX …` line and exits `1` before serving
+  anything — the deploy fails and the previous one keeps serving. Outside
+  production the same check only warns (a malformed seed then fails on first
+  use of the identity: the manifest, the revocation list and `/api/health`
+  answer `500`). Generate once and store it as a secret:
   ```bash
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   ```
+  The value is decoded as hex up to the first non-hex character, exactly as it
+  always has been — so a value with trailing whitespace, a trailing newline or
+  other trailing non-hex characters (or a 65th hex digit) is **accepted with the same
+  AID** and only logs a boot warning; store exactly 64 hex digits to silence it.
+  A `0x` prefix, leading whitespace, or anything that decodes to fewer or more
+  than 32 bytes is fatal in production. The decode is deliberately not trimmed
+  or normalised: changing which bytes are read would rotate the identity.
 - **`CP_BASE_URL`** — public URL embedded in the CP's own manifest. Set it to
-  the externally reachable origin. The manifest advertises
-  `<CP_BASE_URL>/api/aitp/handshake/hello` as its handshake endpoint, but the CP
-  serves no handshake route: that URL returns `404`. The CP is an observer and
-  signer, not a handshake peer.
+  the externally reachable `https://` origin; under `NODE_ENV=production` an
+  unset value (default `http://localhost:4000`), a loopback host or a non-https
+  URL logs one boot warning (not fatal — nothing else depends on it), because
+  the AITP manifest schema requires an `https://` handshake endpoint. The
+  manifest advertises `<CP_BASE_URL>/api/aitp/handshake/hello` as its handshake
+  endpoint — the field is required by RFC-AITP-0003 §3.1 and the manifest
+  schema, so it cannot be omitted — but the CP serves no handshake route: that
+  URL returns `404`. The CP is an observer and signer, not a handshake peer.
 - The CP's own manifest has a **86400s (24h) TTL** (`MANIFEST_TTL_SECS`) and
   is rebuilt in place once it comes within **3600s** of expiry
   (`MANIFEST_REBUILD_MARGIN_SECS`), on the next call to `getCpManifestJson()`
@@ -746,14 +757,16 @@ from a scrape — that guarantee is specific to `enroll_verification_failures`;
 
 ## Health, readiness & graceful shutdown
 
-- **`GET /api/health`** — DB ping plus the CP's identity. Answers `503` with
-  `db: "error"` whenever the database ping fails, and builds the CP manifest on
-  every call, so it is also where identity setup is first reached (a production
-  process without `CP_AID_SEED_HEX` answers `500` here). It ignores the drain
-  flag, so it stays `200` while draining.
+- **`GET /api/health`** — DB ping plus the CP's AID:
+  `200 {ok, service, aid, db: "ok"}`, or `503` with `db: "error"` whenever the
+  database ping fails. It reads the AID from the identity and does not build or
+  sign the manifest. A production process without a usable `CP_AID_SEED_HEX`
+  never gets here — the boot check exits first (outside production a malformed
+  seed makes this answer `500`). It ignores the drain flag, so it stays `200`
+  while draining.
 - **`GET /api/readyz`** — readiness: not draining, and the database answers
-  `SELECT 1`. It does **not** check identity (that is `/api/health`'s and the
-  manifest handler's business). See the section below for what else it
+  `SELECT 1`. It does **not** check identity (in production a usable
+  `CP_AID_SEED_HEX` is enforced at boot, like `ENROLLMENT_SECRET`). See the section below for what else it
   deliberately leaves out.
 
 On SIGTERM the process enters a drain window: `/api/readyz` flips to
@@ -762,15 +775,23 @@ pod out of rotation, while `/api/health` stays `200` (database permitting) so th
 orchestrator doesn't hard-kill it mid-drain. Point your LB/orchestrator readiness
 probe at `/api/readyz`.
 
-> **Liveness hazard: do not use `/api/health` as a restart-triggering liveness
-> probe unless you accept restarts on a database outage.** Because it answers
-> `503` whenever the database is unreachable, an orchestrator that restarts on
-> failed liveness will restart every replica during a DB outage — a restart loop
-> that cannot fix the cause and drops in-memory state (SSE streams, rate-limit
-> buckets, breaker state) on the way. It is fine as a **deploy** healthcheck
-> (`railway.json` uses it, and a seed or database fault should fail a deploy).
-> For a liveness probe, prefer a TCP/port check or a long failure threshold, and
-> use `/api/readyz` for readiness.
+> **On Railway, `/api/health` gates deploys only.** `railway.json` sets it as
+> the healthcheck, which Railway calls only while a new deployment starts (any
+> `2xx` within `healthcheckTimeout`, 300 s); a deployment that never passes is
+> failed and the previous one keeps serving. Railway does not poll it afterwards,
+> so a `503` from a running service — a database outage, say — never restarts
+> it. `restartPolicyType: ON_FAILURE` restarts only a process that *exits*
+> non-zero (such as a fatal boot check). A database that is unreachable while a
+> deploy starts therefore fails that deploy, which is intended.
+>
+> **Liveness hazard elsewhere: do not use `/api/health` as a restart-triggering
+> liveness probe (e.g. a Kubernetes `livenessProbe`) unless you accept restarts
+> on a database outage.** Because it answers `503` whenever the database is
+> unreachable, an orchestrator that restarts on failed liveness will restart
+> every replica during a DB outage — a restart loop that cannot fix the cause and
+> drops in-memory state (SSE streams, rate-limit buckets, breaker state) on the
+> way. For a liveness probe, prefer a TCP/port check or a long failure threshold,
+> and use `/api/readyz` for readiness.
 
 ### What `/api/readyz` deliberately does not check
 

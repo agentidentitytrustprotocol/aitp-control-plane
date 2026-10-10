@@ -12,8 +12,8 @@
  * not be discovered one request at a time, and to register
  * process-level shutdown hooks.
  *
- * "Exactly once per server boot" is why the ENROLLMENT_SECRET check
- * below lives here rather than at `src/lib/config.ts` module scope:
+ * "Exactly once per server boot" is why the ENROLLMENT_SECRET and
+ * CP_AID_SEED_HEX checks below live here rather than at `src/lib/config.ts` module scope:
  * this hook means BOOT, and Next deliberately does not run it during
  * the production build. `registerInstrumentation()` in
  * `next/dist/server/lib/router-utils/instrumentation-globals.external.js`
@@ -81,6 +81,17 @@ export async function register(): Promise<void> {
     './lib/registry/enrollment-config'
   );
   enforceEnrollmentSecretAtBoot();
+
+  // Same shape, same reasons, for the CP's own identity seed: in production a
+  // missing CP_AID_SEED_HEX, or one that does not decode to 32 bytes, used to
+  // boot green and then fail the manifest, the revocation list and /api/health
+  // on first use. Now it is one FATAL line and exit 1. The acceptance rule is
+  // exactly the identity's own decode (shared in cp-seed-config.ts), so no seed
+  // that works today is refused; values that work but are not clean, and a
+  // production CP_BASE_URL that is not a public https origin, only warn.
+  // Position and call are pinned by src/instrumentation.test.ts.
+  const { enforceCpSeedAtBoot } = await import('./lib/identity/cp-seed-config');
+  enforceCpSeedAtBoot();
 
   // Shutdown hooks must always be wired — even with OTel off — so
   // readiness drains correctly on SIGTERM.

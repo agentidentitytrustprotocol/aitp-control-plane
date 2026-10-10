@@ -4,9 +4,11 @@
  * Every production safeguard in this service is keyed on ONE exact match,
  * `config.isProduction`. Anything other than the string `production` —
  * `staging`, `prod`, unset — silently turns ALL of them off: empty `API_KEYS`
- * stops failing closed (auth is DISABLED on gated routes), `ENROLLMENT_SECRET`
- * is no longer fatal at boot, `CP_AID_SEED_HEX` stops being required, webhook
- * URLs may be plain http, and the logger switches to `pino-pretty`.
+ * stops failing closed (auth is DISABLED on gated routes), a bad
+ * `ENROLLMENT_SECRET` or a missing/malformed `CP_AID_SEED_HEX` is no longer
+ * fatal at boot (a missing seed becomes a random key that changes on every
+ * restart), webhook URLs may be plain http, and the logger switches to
+ * `pino-pretty`.
  *
  * Two things fix that without making any single gate stricter than the others
  * (which would be inconsistent and falsely reassuring):
@@ -49,8 +51,9 @@ export function nodeEnvBootWarning(): string | null {
     `[aitp-cp] NODE_ENV is ${seen}, which is neither "production" nor a recognised ` +
     `development value (${RECOGNISED_DEVELOPMENT_NODE_ENVS.join(', ')}), so this process runs as NOT production ` +
     'and every production safeguard is INACTIVE: an empty API_KEYS leaves gated routes ' +
-    'unauthenticated instead of answering 503, a bad ENROLLMENT_SECRET and a missing ' +
-    'CP_AID_SEED_HEX no longer stop the boot, webhook URLs may be plain http, and logs ' +
+    'unauthenticated instead of answering 503, a bad ENROLLMENT_SECRET or a missing or ' +
+    'malformed CP_AID_SEED_HEX no longer stops the boot (a missing seed becomes a random ' +
+    'key, so the CP AID changes on every restart), webhook URLs may be plain http, and logs ' +
     'use the dev pretty-printer. Set NODE_ENV=production for any deployed instance ' +
     '(a staging environment included).'
   );

@@ -130,7 +130,8 @@ export function assertEnrollmentSecretUsable(raw: string | undefined): void {
  *
  * FATAL ONLY IN PRODUCTION, which is this repo's settled convention for a
  * required variable rather than a hedge: `API_KEYS` fails closed in prod and
- * only warns in dev (`config.ts`), and `CP_AID_SEED_HEX` throws only in prod.
+ * only warns in dev (`config.ts`), and `CP_AID_SEED_HEX` is fatal at boot only
+ * in prod (`identity/cp-seed-config.ts`, the same split as here).
  * It costs real deployments nothing — the `Dockerfile`'s runner stage hardcodes
  * `NODE_ENV=production`, so every container deploy is covered, as is a local
  * `next start` (which defaults `NODE_ENV` to production) — while leaving
