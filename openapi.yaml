@@ -945,7 +945,15 @@ paths:
             manifest is already past `expires_at`, or expires inside the
             5-minute registration window — the same code
             `POST /api/registry/agents` returns for that identical condition),
-            or `BODY_INVALID` when the body is not JSON. `verifyCode` is
+            or `BODY_INVALID` when the body is not JSON. `MANIFEST_INVALID`
+            (with no `verifyCode`) also covers a manifest the SDK accepted but
+            the registry cannot store, so no token is minted for it:
+            `display_name` over 256 characters (Unicode code points) or not a
+            string, `aid` over 512 (or over 256 when there is no
+            `display_name`, since the AID is then the stored display name), a
+            NUL in `aid`, `display_name` or `handshake_endpoint`, a non-string
+            `handshake_endpoint`, or `offered_capabilities` that is not an
+            array of NUL-free, well-formed strings. `verifyCode` is
             present when the `aitp` SDK was the thing that rejected the
             manifest — branch on it, not on `error`.
           content:
@@ -1022,6 +1030,13 @@ paths:
                   agents:
                     type: array
                     items: { $ref: "#/components/schemas/Agent" }
+        "400":
+          description: >-
+            `capability`, `aid`, `displayName`/`display_name` or `namespace`
+            contains a NUL (U+0000). `code` is `BAD_REQUEST`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       tags: [registry]
       summary: Register an agent with a previously-issued enrollment token
@@ -1031,7 +1046,11 @@ paths:
         - $ref: "#/components/parameters/idempotencyKey"
         - name: X-Aitp-Namespace
           in: header
-          schema: { type: string }
+          schema: { type: string, maxLength: 128 }
+          description: >-
+            Namespace to register into; wins over
+            `manifest.extensions.namespace`. At most 128 characters (Unicode
+            code points), no NUL (U+0000), else `400 BAD_REQUEST`.
       requestBody:
         required: true
         content:
@@ -1049,19 +1068,35 @@ paths:
               schema: { $ref: "#/components/schemas/RegisterResponse" }
         "400":
           description: >-
-            `BODY_INVALID` when the body is not JSON or has no `manifest.aid`
-            (checked first, before the token); `MANIFEST_EXPIRED` when
-            `manifest.expires_at` is inside the 5-minute registration window
-            (the same code `POST /api/registry/enroll` returns for that
+            `BODY_INVALID` when the body is not JSON, is JSON but not an object
+            (`null`, an array, a string, a number), or has no `manifest.aid`
+            (checked first, before the token); `BAD_REQUEST` when the
+            `X-Aitp-Namespace` header is over 128 characters or contains a NUL
+            (checked after the token is validated but before its `jti` is
+            consumed, so the same token can be retried); `MANIFEST_EXPIRED`
+            when `manifest.expires_at` is inside the 5-minute registration
+            window (the same code `POST /api/registry/enroll` returns for that
             condition); `BODY_INVALID` when `manifest.extensions.namespace` is
-            present but not a string; `IDEMPOTENCY_KEY_INVALID` for a bad
-            `Idempotency-Key`.
+            present but not a string, or — when no `X-Aitp-Namespace` header is
+            sent — is over 128 characters or contains a NUL;
+            `BODY_INVALID` when a manifest value cannot be stored —
+            `display_name` (or, when absent, `aid`) over 256 characters, `aid`
+            over 512, a NUL in `aid`, `display_name` or `handshake_endpoint`, a
+            non-string `handshake_endpoint`, or `offered_capabilities` that is
+            not an array of NUL-free, well-formed strings (the rules `/enroll`
+            applies before minting a token; checked after the token is
+            validated but before its `jti` is consumed);
+            `IDEMPOTENCY_KEY_INVALID` for a bad `Idempotency-Key`.
 
 
-            The `MANIFEST_EXPIRED` and namespace checks run **after** the
-            token's `jti` has been consumed, so the token cannot be reused: fix
-            the manifest and re-enroll (a retry with the same token gets `401
-            TOKEN_REPLAYED`).
+            Only the `MANIFEST_EXPIRED` check and the
+            `manifest.extensions.namespace` check run **after** the token's
+            `jti` has been consumed, so for those the token cannot be reused:
+            fix the manifest and re-enroll (a retry with the same token gets
+            `401 TOKEN_REPLAYED`). The `X-Aitp-Namespace` header check and the
+            storable-values check run before consumption, so the token is not
+            burned. A `400` is stored against an `Idempotency-Key`, so a retry
+            with the same key replays it; retry with a new key or none.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1347,11 +1382,13 @@ paths:
                     type: integer
         "400":
           description: >-
-            `code` is `FILTER_INVALID` — a filter value could not be parsed.
-            Today that means `since` or `until`: they are the only two filters
-            validated rather than passed through, so every other filter either
-            matches or returns an empty result. `error` names the offending
-            filter and echoes the value; branch on `code`.
+            `code` is `FILTER_INVALID` — a filter value is unusable: `since` or
+            `until` could not be parsed as a date (`error` names the filter and
+            echoes the value), or `type`, `aid`, `sessionId`/`session_id` or
+            `runId`/`run_id` contains a NUL (U+0000), which no stored value can
+            match and the database cannot compare. Any other value of those
+            text filters either matches or returns an empty result. Branch on
+            `code`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1435,7 +1472,8 @@ paths:
             characters — this one comes from the idempotency layer and so is
             common to every endpoint accepting that header, not specific to this
             route. `BODY_INVALID` for every rejection of the body itself: not
-            JSON; `reason` not a string, over 500 characters, or containing a NUL
+            JSON, or JSON but not an object (`null`, an array, a string, a
+            number); `reason` not a string, over 500 characters, or containing a NUL
             (U+0000); `revokedAt` unparseable or outside
             `1970-01-01T00:00:00.000Z` .. `9999-12-31T23:59:59.999Z`. See
             `RevocationEntryRequest` for the last two.
@@ -1649,6 +1687,13 @@ paths:
                   tcts:
                     type: array
                     items: { $ref: "#/components/schemas/IssuedTct" }
+        "400":
+          description: >-
+            `issuer`, `subject`, `audience`, `capability` or `sessionId`
+            contains a NUL (U+0000). `code` is `BAD_REQUEST`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
@@ -1684,7 +1729,7 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Delegation" }
         "400":
-          description: "`root_jti` or `parent_jti` is not a UUID. `code` is `BAD_REQUEST`."
+          description: "`root_jti` or `parent_jti` is not a UUID, or `delegator`/`delegatee` contains a NUL (U+0000). `code` is `BAD_REQUEST`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1946,6 +1991,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "400":
+          description: "`aid` or `namespace` contains a NUL (U+0000). `code` is `BAD_REQUEST`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
@@ -1961,17 +2011,34 @@ paths:
               type: object
               required: [aid, pubkey]
               properties:
-                namespace: { type: string, maxLength: 128, default: default }
-                aid: { type: string, maxLength: 512 }
+                namespace:
+                  type: string
+                  maxLength: 128
+                  default: default
+                  description: >-
+                    At most 128 characters (Unicode code points), no NUL
+                    (U+0000), else `400 BODY_INVALID`. A non-string or empty
+                    value means `default`.
+                aid:
+                  type: string
+                  minLength: 1
+                  maxLength: 512
+                  description: >-
+                    At most 512 characters (Unicode code points), no NUL
+                    (U+0000), else `400 BODY_INVALID`.
                 pubkey:
                   type: string
                   description: Ed25519 public key, 43-character base64url
                   pattern: ^[A-Za-z0-9_-]{43}$
                 label:
                   type: string
+                  nullable: true
                   maxLength: 128
                   description: >-
-                    Free-form operator note. `maxLength` counts **characters**, as
+                    Free-form operator note. `null` or omitted stores no label —
+                    on an existing row, clearing the previous one (the upsert
+                    replaces the row). Any other non-string type is `400
+                    BODY_INVALID`. `maxLength` counts **characters**, as
                     the `varchar(128)` column does — 65 astral characters are 130
                     UTF-16 units but still 65 characters and are accepted. Must not
                     contain a NUL (U+0000), the one code point the column cannot
@@ -1980,10 +2047,11 @@ paths:
                     (newline, tab) are fine.
                 expiresAt:
                   type: string
+                  nullable: true
                   format: date-time
                   description: >-
-                    Optional. Omitted, `null` or a non-string value means the
-                    pin never expires — and on an existing row, clears any
+                    Optional. Omitted or `null` means the pin never expires
+                    (any other non-string type is `400 BODY_INVALID`) — and on an existing row, clears any
                     previous expiry (the upsert replaces `pubkey`, `label` and
                     `expiresAt` together).
                     Advisory: the control plane never sweeps `pinned_keys`, so
@@ -2002,9 +2070,9 @@ paths:
       responses:
         "201":
           description: >-
-            Upserted — `201` whether the row was created or replaced. A
-            non-string `label` is stored as `null`, and omitting `label` on an
-            existing row clears it.
+            Upserted — `201` whether the row was created or replaced. Sending
+            `null` for, or omitting, `label` or `expiresAt` on an existing row
+            clears it.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PinnedKey" }
@@ -2014,20 +2082,22 @@ paths:
             an `Idempotency-Key` header is present but empty, over 255 characters,
             or contains control characters — that one comes from the idempotency
             layer and is common to every endpoint accepting the header, not
-            specific to this route. `BODY_INVALID` covers: body not JSON; `aid`
-            missing or empty; `pubkey` not 43-character base64url; `label` over 128
-            characters or containing a NUL (U+0000); `expiresAt` unparseable or
-            outside `0001-01-01T00:00:00.000Z` .. `9999-12-31T23:59:59.999Z`. See
+            specific to this route. `BODY_INVALID` covers: body not JSON, or JSON
+            but not an object (`null`, an array, a string, a number); `aid`
+            missing, empty, over 512 characters or containing a NUL (U+0000);
+            `namespace` over 128 characters or containing a NUL; `pubkey` not
+            43-character base64url; `label` neither a string nor `null`, over 128
+            characters, or containing a NUL; `expiresAt` neither a string nor
+            `null`, unparseable, or outside `0001-01-01T00:00:00.000Z` ..
+            `9999-12-31T23:59:59.999Z`. Lengths count Unicode code points. See
             the request body for the last two.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: >-
-            An internal fault, including some caller input the route does not
-            validate: an `aid` over 512 characters or containing a NUL, or a
-            `namespace` over 128 characters, currently answers `500` rather
-            than `400`. The body is whatever the framework renders and is
+            An internal fault — in practice a database one; no caller input
+            reaches it. The body is whatever the framework renders and is
             **not** the shared `Error` shape, which is why no schema is
             declared here; the database message never reaches the client.
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -2041,7 +2111,7 @@ paths:
       responses:
         "204": { description: Deleted }
         "400":
-          description: "`?aid=` is missing. `code` is `BAD_REQUEST`."
+          description: "`?aid=` is missing, or `aid`/`namespace` contains a NUL (U+0000). `code` is `BAD_REQUEST`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

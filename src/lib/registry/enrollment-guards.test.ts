@@ -46,8 +46,13 @@ const AID_MESSAGE = 'manifest.aid missing or not an AID string';
 const EXPIRY_MESSAGE =
   'manifest expires_at is in the past or within 5 minutes — re-issue with a longer TTL';
 
+// A real manifest always carries a handshake_endpoint (the SDK requires it),
+// and the column guard rejects one without; defaulted here so the aid and
+// expiry guards are what these fixtures exercise.
 function envelope(manifest: Record<string, unknown>): string {
-  return JSON.stringify({ manifest });
+  return JSON.stringify({
+    manifest: { handshake_endpoint: 'https://agent.example.com/hs', ...manifest },
+  });
 }
 
 /** Returns what `fn` threw, or throws if it did not throw at all. */
@@ -179,5 +184,51 @@ describe('EnrollmentService guards (SDK verification stubbed to a no-op)', () =>
     );
     expect((err as ManifestRejectedError).message).toBe(AID_MESSAGE);
     expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
+  });
+});
+
+describe('the column guard (values the agents row cannot hold)', () => {
+  const far = () => Math.floor(Date.now() / 1000) + 3600;
+
+  it.each([
+    ['a 257-character display_name', { display_name: 'd'.repeat(257) }, /manifest\.display_name exceeds 256/],
+    ['a NUL in display_name', { display_name: 'a\u0000b' }, /must not contain a NUL/],
+    ['an expires_at beyond year 9999', { expires_at: 1e13 }, /expires_at must be a Unix timestamp/],
+    ['a string expires_at', { expires_at: '1700000000' }, /expires_at must be a Unix timestamp/],
+    ['a NUL in handshake_endpoint', { handshake_endpoint: 'https://x/\u0000' }, /handshake_endpoint must not contain a NUL/],
+    ['no handshake_endpoint', { handshake_endpoint: null }, /handshake_endpoint must be a string/],
+    ['a NUL in an offered capability', { offered_capabilities: ['a\u0000b'] }, /must not contain a NUL/],
+    ['a non-string offered capability', { offered_capabilities: [1] }, /array of strings/],
+  ])('rejects %s with MANIFEST_INVALID before a token is minted', (_label, over, msg) => {
+    const err = captureThrow(() =>
+      service.verifyAndIssueToken(
+        envelope({ aid: 'aid:pubkey:z:ok', expires_at: far(), ...over }),
+      ),
+    );
+    expect(err).toBeInstanceOf(ManifestRejectedError);
+    expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
+    expect((err as ManifestRejectedError).message).toMatch(msg);
+    expect(sdkVerifyCode(err)).toBeUndefined();
+  });
+
+  it('accepts a 256-character display_name', () => {
+    expect(() =>
+      service.verifyAndIssueToken(
+        envelope({ aid: 'aid:pubkey:z:ok', expires_at: far(), display_name: 'd'.repeat(256) }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('runs after the expiry guard, so an expiring AND unstorable manifest reports MANIFEST_EXPIRED', () => {
+    const err = captureThrow(() =>
+      service.verifyAndIssueToken(
+        envelope({
+          aid: 'aid:pubkey:z:ok',
+          expires_at: Math.floor(Date.now() / 1000) + 60,
+          display_name: 'd'.repeat(257),
+        }),
+      ),
+    );
+    expect((err as ManifestRejectedError).cpCode).toBe('MANIFEST_EXPIRED');
   });
 });

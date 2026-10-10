@@ -10,7 +10,7 @@ import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { tctMonitor } from '@/lib/tcts/monitor';
-import { JTI_UUID_RE } from '@/lib/http/validate';
+import { JTI_UUID_RE, readJsonObject } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -65,15 +65,11 @@ interface RequestBody {
 }
 
 export async function POST(req: NextRequest) {
-  let body: RequestBody;
-  try {
-    body = (await req.json()) as RequestBody;
-  } catch {
-    return Response.json(
-      { error: 'body must be JSON', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
+  // Non-JSON and non-object bodies (incl. `null`, which used to throw on
+  // `body.jti` and answer 500) are rejected before the idempotency layer.
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body as RequestBody;
 
   return withIdempotency(req, 'revocation.entries', async () => {
     if (typeof body.jti !== 'string' || !JTI_UUID_RE.test(body.jti)) {

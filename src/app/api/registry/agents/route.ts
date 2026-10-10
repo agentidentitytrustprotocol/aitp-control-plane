@@ -3,6 +3,7 @@ import { getEnrollmentService } from '@/lib/registry/enrollment';
 import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { consumeEnrollmentJti } from '@/lib/registry/jti-store';
 import { listAgents, upsertAgent } from '@/lib/registry/store';
+import { checkManifestColumns } from '@/lib/registry/manifest-columns';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { writeAdminAudit } from '@/lib/audit-log/service';
@@ -10,6 +11,7 @@ import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { parsePagination } from '@/lib/pagination';
+import { badRequest, checkColumnString, checkQueryParam } from '@/lib/http/validate';
 import { randomUUID } from 'node:crypto';
 
 export const runtime = 'nodejs';
@@ -27,6 +29,9 @@ interface ManifestEnvelope {
 }
 
 const REGISTRATION_EXPIRY_GUARD_MS = 5 * 60 * 1000;
+
+/** `agents.namespace` is varchar(128) (drizzle/0001_plan_v0_2.sql). */
+const NAMESPACE_MAX = 128;
 
 /** Best-effort derivation of the agent's own `.well-known` manifest URL.
  *
@@ -53,6 +58,18 @@ export async function GET(req: NextRequest) {
   const displayName =
     searchParams.get('display_name') ?? searchParams.get('displayName') ?? undefined;
   const namespace = searchParams.get('namespace') ?? undefined;
+  // A NUL in any text filter would reach a varchar comparison (22021) or the
+  // jsonb containment literal (22P05) and answer 500. Checked on the value
+  // actually used; everything else about this public route is unchanged.
+  for (const [name, value] of [
+    ['capability', capability],
+    ['aid', aid],
+    ['display_name', displayName],
+    ['namespace', namespace],
+  ] as const) {
+    const problem = checkQueryParam(value ?? null, name);
+    if (problem) return badRequest(problem, 'BAD_REQUEST');
+  }
   const includeManifest = searchParams.get('include_manifest') === 'true';
   const { limit, offset } = parsePagination(searchParams, {
     defaultLimit: 200,
@@ -102,6 +119,16 @@ export async function POST(req: NextRequest) {
       return {
         status: 400,
         body: { error: 'request body must be JSON ManifestEnvelope', code: 'BODY_INVALID' },
+      };
+    }
+    // `null` (valid JSON) used to throw on `.manifest` and answer 500.
+    if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope)) {
+      return {
+        status: 400,
+        body: {
+          error: 'request body must be a JSON object (ManifestEnvelope)',
+          code: 'BODY_INVALID',
+        },
       };
     }
     const manifest = envelope.manifest;
@@ -208,6 +235,33 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    // X-Aitp-Namespace lands in `agents.namespace`, varchar(128): a longer
+    // value (22001) or a NUL (22021) would fail the upsert with a 500. Checked
+    // BEFORE the jti is consumed so a bad header does not burn the one-time
+    // token, and after the service guard and token check like the other
+    // namespace check.
+    const headerNamespace = req.headers.get('x-aitp-namespace');
+    if (headerNamespace !== null) {
+      const problem = checkColumnString(headerNamespace, {
+        field: 'X-Aitp-Namespace',
+        max: NAMESPACE_MAX,
+      });
+      if (problem) {
+        return { status: 400, body: { error: problem, code: 'BAD_REQUEST' } };
+      }
+    }
+
+    // The manifest values `upsertAgent` stores (aid, display_name,
+    // handshake_endpoint, offered_capabilities) must fit their columns, or the
+    // upsert fails with a 500 AFTER the jti below has been burned. `/enroll`
+    // refuses to mint a token for such a manifest, so this is defence in
+    // depth — for tokens minted before that check existed. Before the jti is
+    // consumed, like the header check above.
+    const columnProblem = checkManifestColumns(manifest);
+    if (columnProblem) {
+      return { status: 400, body: { error: columnProblem, code: 'BODY_INVALID' } };
+    }
+
     // One-time-token enforcement: atomically consume the jti. A second
     // presentation of the same (still-valid) token is a replay — reject
     // it so a captured token can't resurrect a deregistered agent or
@@ -237,7 +291,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const headerNamespace = req.headers.get('x-aitp-namespace');
     const extNamespace = manifest.extensions?.namespace;
     if (extNamespace !== undefined && typeof extNamespace !== 'string') {
       return {
@@ -247,6 +300,14 @@ export async function POST(req: NextRequest) {
           code: 'BODY_INVALID',
         },
       };
+    }
+    if (headerNamespace === null && typeof extNamespace === 'string') {
+      // Same varchar(128) column as the header above (which wins when set).
+      const problem = checkColumnString(extNamespace, {
+        field: 'manifest.extensions.namespace',
+        max: NAMESPACE_MAX,
+      });
+      if (problem) return { status: 400, body: { error: problem, code: 'BODY_INVALID' } };
     }
     const namespace =
       headerNamespace ?? (typeof extNamespace === 'string' ? extNamespace : undefined);

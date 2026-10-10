@@ -82,7 +82,7 @@ These mutating endpoints honor an optional `Idempotency-Key` request header:
 - A key is scoped to its endpoint. Replaying the same `(endpoint, key)` returns the stored status and body without re-running the handler, and adds the response header `Idempotency-Replayed: true`.
 - The key is **not** bound to the request body: a replay with the same key and a *different* body still returns the first response.
 - Only stable outcomes are stored: `200`, `201`, `202`, `204`, `400`, `409`, `422`. A `401`, `429` or `5xx` is not stored, so a retry with the same key runs the handler again.
-- Some `400 BODY_INVALID`s (a body that is not JSON — and, on `POST /api/trust-anchors` and `POST /api/webhooks`, a JSON body that is not an object) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
+- Some `400 BODY_INVALID`s (a body that is not JSON — and, on the JSON-object-body POSTs `/api/trust-anchors`, `/api/webhooks`, `/api/pinned-keys` and `/api/revocation/entries`, a JSON body that is not an object) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
 - Two concurrent requests with the same key may both run; the first one stored wins and the other caller receives the winner's response.
 - A key that is empty, longer than 255 characters, or contains control characters is rejected `400 IDEMPOTENCY_KEY_INVALID`.
 
@@ -148,7 +148,7 @@ other top-level keys are fixture metadata):
 
 The CP verifies the manifest with the `aitp` SDK and returns `200 { token, expiresIn, aid }` — a single-use enrollment token valid for 5 minutes. Errors:
 
-- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, or `manifest.aid` is missing or does not start with `aid:`.
+- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, `manifest.aid` is missing or does not start with `aid:`, or the manifest verified but holds a value the registry cannot store: `display_name` over 256 characters (Unicode code points) or not a string, `aid` over 512 characters — or, with no `display_name`, over 256, since the AID is then stored as the display name — a NUL (U+0000) in `aid`, `display_name` or `handshake_endpoint`, a `handshake_endpoint` that is not a string, or `offered_capabilities` that is not an array of NUL-free, well-formed strings. Rejected here so no token is minted for a manifest `POST /api/registry/agents` could never store. Checked after the expiry guard, so a manifest that fails both reports `MANIFEST_EXPIRED`.
 - `400 MANIFEST_EXPIRED` — the manifest is already past `expires_at`, or expires inside the 5-minute registration window. `POST /api/registry/agents` returns the same code for the same condition; both mean "re-issue with a longer TTL".
 - `400 BODY_INVALID` — the body is not JSON.
 - `503 SERVER_MISCONFIGURED` — the server has no usable `ENROLLMENT_SECRET` and cannot issue tokens to anyone. The body carries no configuration detail.
@@ -164,7 +164,7 @@ A `400` may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable r
 
 Branch on `verifyCode` (or `code`), never on `error`. The value set is owned by the SDK's `verifyManifestJson` — see [aitp-rs Node SDK: Manifest verification](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification) (verified against `aitp` `^0.13.1`). It is a different set from `verifyRevocationList`'s, even where spellings overlap. How the CP maps it:
 
-- `verifyCode` is present **if and only if** the SDK rejected the manifest. It is absent when one of the CP's own guards rejected it (the `aid:` prefix check, the 5-minute window) or when the body never reached the SDK.
+- `verifyCode` is present **if and only if** the SDK rejected the manifest. It is absent when one of the CP's own guards rejected it (the `aid:` prefix check, the 5-minute window, the storable-values check) or when the body never reached the SDK.
 - SDK code `expired` maps to `code: MANIFEST_EXPIRED`; every other SDK code maps to `MANIFEST_INVALID`. So `MANIFEST_EXPIRED` arrives with `verifyCode: "expired"` (already past `expires_at`) or with no `verifyCode` (expires inside the registration window).
 - An SDK code the CP does not recognise is passed through verbatim — treat anything unknown as a generic "manifest verification failed". (The CP's `/api/metrics` counter folds unknown codes into an `other` label; see `src/lib/registry/enroll-metrics.ts`.)
 
@@ -176,14 +176,16 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 
 Checks run in this order:
 
-1. Body not JSON, or no `manifest.aid` → `400 BODY_INVALID`. These are answered even on a misconfigured server.
+1. Body not JSON, JSON but not an object (`null`, an array, a string, a number), or no `manifest.aid` → `400 BODY_INVALID`. These are answered even on a misconfigured server.
 2. No usable `ENROLLMENT_SECRET` → `503 SERVER_MISCONFIGURED`. Your token is not the problem and is not consumed.
 3. Token invalid → `401 TOKEN_INVALID`: wrong scope, expired, `sub` not equal to `manifest.aid`, missing `jti`, malformed or badly signed, or not bound to this body. The token carries an `msh` claim, the SHA-256 (hex) of the exact `/enroll` request-body bytes, and this route recomputes it over *its* body — re-serialising the JSON (key order, whitespace) or sending a different manifest for the same AID changes the digest. This check runs before the `jti` is consumed, so a mismatch does not burn the token.
-4. The token's `jti` is consumed atomically. A second presentation returns `401 TOKEN_REPLAYED`.
-5. `manifest.expires_at` (Unix seconds) less than 5 minutes in the future → `400 MANIFEST_EXPIRED`.
-6. `manifest.extensions.namespace` present but not a string → `400 BODY_INVALID`.
+4. `X-Aitp-Namespace` header longer than 128 characters (Unicode code points) or containing a NUL (U+0000) → `400 BAD_REQUEST`. Runs before the `jti` is consumed, so fixing the header and retrying with the same token works — but send the retry with a **new** `Idempotency-Key` (or none): a `400` is stored against the key, so a retry with the same key replays the stored `400` without re-running the handler (see [Idempotency](#idempotency)).
+5. A manifest value the `agents` row cannot store → `400 BODY_INVALID`: the same rules `/enroll` applies before minting a token (`display_name` — or, when absent, `aid` — over 256 characters, `aid` over 512, a NUL in `aid`/`display_name`/`handshake_endpoint`, a non-string `handshake_endpoint`, or `offered_capabilities` that is not an array of NUL-free, well-formed strings). Since the token is bound to the exact `/enroll` body, only a token minted before `/enroll` applied these rules can reach this; it runs before the `jti` is consumed, so it does not burn the token — but the manifest is signed and token-bound, so the fix is a corrected manifest and a fresh enrollment.
+6. The token's `jti` is consumed atomically. A second presentation returns `401 TOKEN_REPLAYED`.
+7. `manifest.expires_at` (Unix seconds) less than 5 minutes in the future → `400 MANIFEST_EXPIRED`.
+8. `manifest.extensions.namespace` present but not a string, or (when no `X-Aitp-Namespace` header is sent) longer than 128 characters or containing a NUL → `400 BODY_INVALID`.
 
-Steps 5 and 6 run **after** the token has been consumed, so a client that hits either must fix the manifest and **re-enroll** — retrying with the same token returns `401 TOKEN_REPLAYED`. `/enroll` applies the same 5-minute guard first to spare you this, but the two routes read their own clocks, so a manifest near the boundary can pass enroll and fail here; and they disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
+Steps 7 and 8 run **after** the token has been consumed, so a client that hits either must fix the manifest and **re-enroll** — retrying with the same token returns `401 TOKEN_REPLAYED`. `/enroll` applies the same 5-minute guard first to spare you this, but the two routes read their own clocks, so a manifest near the boundary can pass enroll and fail here; and they disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
 
 **Namespace** is taken from the `X-Aitp-Namespace` header (wins) or `manifest.extensions.namespace`, defaulting to `default`.
 
@@ -193,7 +195,7 @@ Response `201`: `{ "aid": "...", "displayName": "...", "registeredAt": "..." }`.
 
 #### `GET /api/registry/agents`
 
-Filters: `?capability=`, `?aid=`, `?displayName=` (or `display_name`), `?namespace=`, `?include_manifest=true`, `?limit=` (default 200, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`.
+Filters: `?capability=`, `?aid=`, `?displayName=` (or `display_name`), `?namespace=`, `?include_manifest=true`, `?limit=` (default 200, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. A NUL (U+0000) in any of the text filters returns `400 BAD_REQUEST`.
 
 > Without `?namespace=`, results span **all** namespaces by design. Namespaces are a control-plane scoping convention, not a protocol boundary — initial peer discovery is [operational and non-normative](https://agentidentitytrustprotocol.io/docs/discovery) in AITP. The CP enforces no implicit tenant isolation, so scope your queries with `?namespace=` if you need it.
 
@@ -236,7 +238,7 @@ Sessions are **projected from events** — the CP does not see handshake traffic
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | POST | `/api/events` | API key (open in dev) | Ingest a batch of audit events |
-| GET | `/api/events/history` | API key | Query persisted events. Filters: `?type=`, `?aid=`, `?sessionId=` (or `session_id`), `?runId=` (or `run_id`), `?since=`, `?until=`, `?limit=` (default 100, max 1000), `?offset=` |
+| GET | `/api/events/history` | API key | Query persisted events. Filters: `?type=`, `?aid=`, `?sessionId=` (or `session_id`), `?runId=` (or `run_id`), `?since=`, `?until=`, `?limit=` (default 100, max 1000), `?offset=`. A NUL in a text filter → `400 FILTER_INVALID` |
 | GET | `/api/events/stream` | API key | Server-Sent Events (live + backlog). Filters: `?type=`, `?runId=` (or `run_id`), `?aid=` |
 
 #### `POST /api/events` body
@@ -269,7 +271,7 @@ A body that is not JSON is `400 BODY_INVALID`. A JSON body that is neither an ar
 
 #### `GET /api/events/history` response
 
-`{ "events": [...], "count": <n> }`. Only `since` and `until` are validated: an unparseable value returns `400 FILTER_INVALID`. A non-numeric `limit` or `offset` falls back to the default rather than erroring, and `limit` is clamped to 1–1000. An empty `?limit=` is not "malformed": it reads as `0` and is clamped to `1`.
+`{ "events": [...], "count": <n> }`. An unparseable `since` or `until`, or a NUL (U+0000) in `type`, `aid`, `sessionId` or `runId`, returns `400 FILTER_INVALID`. A non-numeric `limit` or `offset` falls back to the default rather than erroring, and `limit` is clamped to 1–1000. An empty `?limit=` is not "malformed": it reads as `0` and is clamped to `1`.
 
 #### `GET /api/events/stream`
 
@@ -309,7 +311,7 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 { "jti": "uuid", "reason": "operator action", "revokedAt": "2026-06-01T00:00:00Z" }
 ```
 
-`jti` must be a UUID (v1–5) or `400 JTI_INVALID`. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason }`.
+`jti` must be a UUID (v1–5) or `400 JTI_INVALID`. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input — including a body that is not JSON or is JSON but not an object (`null`, an array, a string, a number) — → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason }`.
 
 Recording a revocation also flips the matching `issued_tcts.revoked` flag, cascades to descendant delegations, and emits a `tct.revoked` event (and webhook).
 
@@ -317,7 +319,7 @@ Recording a revocation also flips the matching `issued_tcts.revoked` flag, casca
 
 Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits: **`revokedAt` must fall inside a bounded date range** (as a UTC instant — the epoch is the lower bound, because the signed list carries `revoked_at` as seconds since it), and **`reason` must not contain a NUL (U+0000)** (other control characters are fine). The exact bounds and their reasons are in [`openapi.yaml`](../openapi.yaml), `RevocationEntryRequest`.
 
-A genuine database fault is a framework `500` with no `{error, code}` body, per [Conventions](#conventions). If you use `Idempotency-Key` here, note that the `BODY_INVALID` for a non-JSON body is never stored, while the field-level `400`s are.
+A genuine database fault is a framework `500` with no `{error, code}` body, per [Conventions](#conventions). If you use `Idempotency-Key` here, note that the `BODY_INVALID` for a non-JSON or non-object body is never stored, while the field-level `400`s are.
 
 **List freshness.** `GET /.well-known/aitp-revocation-list` is served from a per-process cache that re-reads the database and re-signs at most every **60 seconds**. A `POST` here invalidates that cache only on the replica that handled it, so other replicas can serve a list without the new entry for up to 60 seconds. `REVOCATION_LIST_TTL_SECS` is something else: the validity window of each signed list (its `expires_at`). The HTTP response carries `Cache-Control: max-age=60`.
 
@@ -365,7 +367,7 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/tcts` | API key | Query observed TCTs. Filters: `?issuer=`, `?subject=`, `?audience=`, `?capability=`, `?sessionId=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=` |
+| GET | `/api/tcts` | API key | Query observed TCTs. Filters: `?issuer=`, `?subject=`, `?audience=`, `?capability=`, `?sessionId=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`. A NUL in a text filter → `400 BAD_REQUEST` |
 
 By default the projection records reported claims without checking any signature. With `OBSERVED_ARTIFACT_VERIFICATION=strict`, reports whose signed token does not verify (including claims-only reports) are not projected, so they never appear in `/api/tcts` or `/api/delegations`; `warn` projects every report and logs a warning only for one that carries a signed token which fails to verify — a claims-only report is projected without a log line. See [`operations.md`](operations.md#observed-artifact-verification).
 
@@ -375,7 +377,7 @@ By default the projection records reported claims without checking any signature
 |---|---|---|---|
 | GET | `/api/delegations` | API key | Query delegations |
 
-`?root_jti=<uuid>` (or `rootJti`) returns the whole descendant tree rooted at that JTI via a recursive CTE, oldest first; when it is present **every other filter, `limit` and `offset` are ignored**. Otherwise: `?parent_jti=` (or `parentJti`), `?delegator=`, `?delegatee=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`, newest first. A malformed `root_jti`/`parent_jti` (not a UUID) returns `400 BAD_REQUEST`.
+`?root_jti=<uuid>` (or `rootJti`) returns the whole descendant tree rooted at that JTI via a recursive CTE, oldest first; when it is present **every other filter, `limit` and `offset` are ignored**. Otherwise: `?parent_jti=` (or `parentJti`), `?delegator=`, `?delegatee=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`, newest first. A malformed `root_jti`/`parent_jti` (not a UUID), or a NUL (U+0000) in `delegator`/`delegatee`, returns `400 BAD_REQUEST`.
 
 ### Trust anchors (OIDC)
 
@@ -404,15 +406,14 @@ On every `/api/trust-anchors/:id` route (including `/jwks`), an `:id` that is no
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup (`namespace` defaults to `default`) |
+| GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup (`namespace` defaults to `default`). A NUL in either → `400 BAD_REQUEST`. |
 | POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }`. `201` whether the row was created or replaced. |
-| DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid` → `400 BAD_REQUEST`. |
+| DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid`, or a NUL in `aid`/`namespace` → `400 BAD_REQUEST`. |
 
-`POST` returns `400 BODY_INVALID` when `aid` is missing or empty, `pubkey` is not a 43-character base64url Ed25519 key, `label` is over 128 characters or contains a NUL, or `expiresAt` is unparseable or outside the writable `timestamptz` window (exact bounds in [`openapi.yaml`](../openapi.yaml); a past instant is allowed and retires the pin). Behaviour to be aware of:
+`POST` returns `400 BODY_INVALID` when the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `aid` is missing, empty, longer than 512 characters or contains a NUL; `namespace` is longer than 128 characters or contains a NUL; `pubkey` is not a 43-character base64url Ed25519 key; `label` is neither a string nor `null`, or is over 128 characters or contains a NUL; or `expiresAt` is neither a string nor `null`, or is unparseable or outside the writable `timestamptz` window (exact bounds in [`openapi.yaml`](../openapi.yaml); a past instant is allowed and retires the pin). Lengths count Unicode code points; other control characters (newline, tab) are allowed. Behaviour to be aware of:
 
-- The upsert **replaces** `pubkey`, `label` and `expiresAt` on an existing `(namespace, aid)`: omitting `label` or `expiresAt` clears them.
-- A `label` or `expiresAt` that is not a string is treated as absent (stored as `null`), not rejected.
-- An `aid` longer than 512 characters, an `aid` containing a NUL, or a `namespace` longer than 128 characters currently answers `500`.
+- The upsert **replaces** `pubkey`, `label` and `expiresAt` on an existing `(namespace, aid)`: sending `null` for `label` or `expiresAt` clears it, and so does omitting it (full-replace semantics, intended).
+- A `namespace` that is not a string, or is empty, means `default`.
 
 ## Headers
 

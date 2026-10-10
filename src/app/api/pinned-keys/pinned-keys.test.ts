@@ -323,3 +323,124 @@ describe('DELETE /api/pinned-keys', () => {
     expect(writeAdminAuditMock).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── P1b / P3: inputs that used to reach Postgres (500) or were silently nulled ──
+describe('POST /api/pinned-keys — body and field validation (P1b/P3)', () => {
+  function post(body: unknown) {
+    return POST(
+      makeReq('/api/pinned-keys', {
+        method: 'POST',
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      }),
+    );
+  }
+  async function expect400(res: Response, error: string | RegExp) {
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('BODY_INVALID');
+    if (typeof error === 'string') expect(body.error).toBe(error);
+    else expect(body.error).toMatch(error);
+    expect(insertedValues).toHaveLength(0);
+  }
+
+  it.each([
+    ['null', 'null'],
+    ['an array', '[]'],
+    ['a number', '5'],
+  ])('answers 400 BODY_INVALID for a JSON %s body', async (_w, raw) => {
+    await expect400(await post(raw), 'body must be a JSON object');
+  });
+
+  it('accepts a 512-code-point aid (astral characters count once)', async () => {
+    selectResults = [[keyRow()]];
+    const res = await post({ aid: '\u{1F600}'.repeat(512), pubkey: GOOD_PUBKEY });
+    expect(res.status).toBe(201);
+    expect(insertedValues).toHaveLength(1);
+  });
+
+  it('rejects a 513-character aid', async () => {
+    await expect400(
+      await post({ aid: 'a'.repeat(513), pubkey: GOOD_PUBKEY }),
+      'aid exceeds 512 character limit',
+    );
+  });
+
+  it('rejects a NUL in aid', async () => {
+    await expect400(
+      await post({ aid: 'aid\u0000x', pubkey: GOOD_PUBKEY }),
+      'aid must not contain a NUL character',
+    );
+  });
+
+  it('accepts a 128-character namespace and rejects 129', async () => {
+    selectResults = [[keyRow()]];
+    const ok = await post({ aid: 'a', pubkey: GOOD_PUBKEY, namespace: 'n'.repeat(128) });
+    expect(ok.status).toBe(201);
+    insertedValues.length = 0;
+    await expect400(
+      await post({ aid: 'a', pubkey: GOOD_PUBKEY, namespace: 'n'.repeat(129) }),
+      'namespace exceeds 128 character limit',
+    );
+  });
+
+  it('rejects a NUL in namespace', async () => {
+    await expect400(
+      await post({ aid: 'a', pubkey: GOOD_PUBKEY, namespace: 'ns\u0000' }),
+      'namespace must not contain a NUL character',
+    );
+  });
+
+  it.each([5, true, {}, []])('rejects a non-string label (%j) instead of silently nulling it', async (label) => {
+    await expect400(
+      await post({ aid: 'a', pubkey: GOOD_PUBKEY, label }),
+      'label must be a string or null',
+    );
+  });
+
+  it.each([123, false, {}])('rejects a non-string expiresAt (%j) instead of silently nulling it', async (expiresAt) => {
+    await expect400(
+      await post({ aid: 'a', pubkey: GOOD_PUBKEY, expiresAt }),
+      'expiresAt must be a string or null',
+    );
+  });
+
+  it('label: null and expiresAt: null clear the stored values', async () => {
+    selectResults = [[keyRow()]];
+    const res = await post({ aid: 'a', pubkey: GOOD_PUBKEY, label: null, expiresAt: null });
+    expect(res.status).toBe(201);
+    expect(conflictSets[0]).toMatchObject({ label: null, expiresAt: null });
+  });
+
+  it('omitting label and expiresAt still clears them (full-replace upsert)', async () => {
+    selectResults = [[keyRow()]];
+    const res = await post({ aid: 'a', pubkey: GOOD_PUBKEY });
+    expect(res.status).toBe(201);
+    expect(conflictSets[0]).toMatchObject({ label: null, expiresAt: null });
+  });
+});
+
+describe('GET / DELETE /api/pinned-keys — NUL in query params (P3)', () => {
+  it.each(['?aid=a%00b', '?namespace=n%00', '?aid=a&namespace=n%00'])(
+    'GET %s answers 400 BAD_REQUEST without querying',
+    async (qs) => {
+      selectResults = [[keyRow()]];
+      const res = await GET(makeReq(`/api/pinned-keys${qs}`));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('BAD_REQUEST');
+      expect(body.error).toMatch(/must not contain a NUL character/);
+      expect(selectResults).toHaveLength(1); // never consumed
+    },
+  );
+
+  it.each(['?aid=a%00b', '?aid=a&namespace=n%00'])(
+    'DELETE %s answers 400 BAD_REQUEST without deleting',
+    async (qs) => {
+      deleteReturning = [{ aid: 'a' }];
+      const res = await DELETE(makeReq(`/api/pinned-keys${qs}`, { method: 'DELETE' }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('BAD_REQUEST');
+      expect(writeAdminAuditMock).not.toHaveBeenCalled();
+    },
+  );
+});

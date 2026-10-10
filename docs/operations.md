@@ -710,8 +710,9 @@ Its `code` label is a bounded set of **ten** values — the eight codes the `ait
 SDK documents for manifest verification, plus:
 
 - `none` — the manifest was rejected by *this service* rather than by the SDK
-  (a `manifest.aid` that is not an AID, or an `expires_at` inside the 5-minute
-  registration window). The SDK accepted it; we did not.
+  (a `manifest.aid` that is not an AID, an `expires_at` inside the 5-minute
+  registration window, or a value the `agents` row cannot store, such as a
+  `display_name` over 256 characters). The SDK accepted it; we did not.
 - `other` — the SDK returned a code this build does not recognize. **`other`
   becoming non-zero is itself a signal**: the SDK's code set has grown and this
   service's label allowlist needs updating. Nothing breaks in the meantime —

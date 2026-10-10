@@ -15,7 +15,7 @@ import { NextRequest } from 'next/server';
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { delegations } from '@/lib/db/schema';
-import { JTI_UUID_RE } from '@/lib/http/validate';
+import { JTI_UUID_RE, badRequest, checkQueryParam } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -74,6 +74,12 @@ export async function GET(req: NextRequest) {
     return Response.json({ delegations: rows.map(rowOut) });
   }
 
+  // A NUL in a text filter would reach a varchar comparison (22021) or a
+  // jsonb literal (22P05) and answer 500.
+  for (const name of ['delegator', 'delegatee']) {
+    const problem = checkQueryParam(sp.get(name), name);
+    if (problem) return badRequest(problem, 'BAD_REQUEST');
+  }
   const wheres: SQL[] = [];
   const parentJti = sp.get('parent_jti') ?? sp.get('parentJti');
   if (parentJti) {

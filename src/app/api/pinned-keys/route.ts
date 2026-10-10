@@ -17,11 +17,40 @@ import { pinnedKeys } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
+import {
+  badRequest,
+  checkColumnString,
+  checkQueryParam,
+  readJsonObject,
+} from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const ED25519_PUBKEY_B64URL = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Column limits (src/lib/db/schema.ts `pinnedKeys`, drizzle/0005_aitp_depth.sql):
+ * `namespace` varchar(128), `aid` varchar(512), `label` varchar(128). Counted in
+ * code points, the unit varchar(n) counts. The composite primary key
+ * (namespace, aid) is a btree whose row limit is in bytes; the worst case these
+ * caps allow (512 + 128 astral characters, 2560 bytes) was measured to insert.
+ */
+const NAMESPACE_MAX = 128;
+const AID_MAX = 512;
+const LABEL_MAX = 128;
+
+/**
+ * NUL in a query param would reach a varchar comparison and fail with 22021
+ * (a 500). Returns the 400 to answer, or null.
+ */
+function badQuery(sp: URLSearchParams): Response | null {
+  for (const name of ['namespace', 'aid']) {
+    const problem = checkQueryParam(sp.get(name), name);
+    if (problem) return badRequest(problem, 'BAD_REQUEST');
+  }
+  return null;
+}
 
 /**
  * The instants `expiresAt` may name, as millisecond bounds.
@@ -87,6 +116,8 @@ function rowOut(r: typeof pinnedKeys.$inferSelect) {
 
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
+  const bad = badQuery(sp);
+  if (bad) return bad;
   const namespace = sp.get('namespace');
   const aid = sp.get('aid');
 
@@ -111,22 +142,22 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  let body: CreateBody;
-  try {
-    body = (await req.json()) as CreateBody;
-  } catch {
-    return Response.json(
-      { error: 'body must be JSON', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
+  // Non-JSON and non-object bodies (incl. `null`) are answered before the
+  // idempotency layer and never stored; field 400s below are inside it.
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body as CreateBody;
   return withIdempotency(req, 'pinned-keys.upsert', async () => {
+    const invalid = (error: string) => ({
+      status: 400,
+      body: { error, code: 'BODY_INVALID' },
+    });
     if (typeof body.aid !== 'string' || body.aid.length === 0) {
-      return {
-        status: 400,
-        body: { error: 'aid is required', code: 'BODY_INVALID' },
-      };
+      return invalid('aid is required');
     }
+    const aid = body.aid;
+    const aidProblem = checkColumnString(aid, { field: 'aid', max: AID_MAX });
+    if (aidProblem) return invalid(aidProblem);
     if (typeof body.pubkey !== 'string' || !ED25519_PUBKEY_B64URL.test(body.pubkey)) {
       return {
         status: 400,
@@ -140,53 +171,32 @@ export async function POST(req: NextRequest) {
       typeof body.namespace === 'string' && body.namespace.length > 0
         ? body.namespace
         : 'default';
+    const nsProblem = checkColumnString(namespace, {
+      field: 'namespace',
+      max: NAMESPACE_MAX,
+    });
+    if (nsProblem) return invalid(nsProblem);
+    // `label` and `expiresAt` are string | null | absent. The upsert REPLACES
+    // the row, so null and absent both store NULL (clearing a previous value) —
+    // intended full-replace semantics. Any other type used to be silently
+    // coerced to NULL, wiping the stored value; it is now a 400.
+    if (body.label !== undefined && body.label !== null && typeof body.label !== 'string') {
+      return invalid('label must be a string or null');
+    }
+    if (
+      body.expiresAt !== undefined &&
+      body.expiresAt !== null &&
+      typeof body.expiresAt !== 'string'
+    ) {
+      return invalid('expiresAt must be a string or null');
+    }
     const label = typeof body.label === 'string' ? body.label : null;
     if (label !== null) {
-      // `label` is `varchar(128)` (drizzle/0005_aitp_depth.sql:34) — NOT the
-      // unbounded `text` it looks like from the route. Two things it cannot
-      // hold, both measured against a live server, both reaching the
-      // unguarded insert below and surfacing as the same misclassified 500:
-      //
-      //   1. A 129th character: `22001 value too long for type character
-      //      varying(128)`. In practice the likelier of the two — it is one
-      //      pasted description away.
-      //   2. U+0000: `22021 invalid byte sequence for encoding "UTF8": 0x00`.
-      //      Postgres cannot store that byte in any character type.
-      //
-      // Counted in CODE POINTS, because that is the unit `varchar(n)` counts:
-      // 65 astral characters (130 UTF-16 units) store fine and `length()`
-      // reports 65, and 128 `é` (256 bytes) store fine too. A `.length` test
-      // would reject both — inventing a 400 for input the column accepts,
-      // which is this same bug pointed the other way.
-      if ([...label].length > 128) {
-        return {
-          status: 400,
-          body: {
-            error: 'label exceeds 128 character limit',
-            code: 'BODY_INVALID',
-          },
-        };
-      }
-      // A caller really can get a NUL this far: `JSON.parse` preserves the
-      // `\u0000` ESCAPE. (A raw NUL byte is invalid JSON per RFC 8259 and is
-      // already rejected by the parse at the top of this handler, so the
-      // escape is the only reachable form.)
-      //
-      // Deliberately narrower than the `[\x00-\x1f]` check
-      // src/lib/idempotency.ts applies to keys: `label` is operator prose,
-      // where a newline or tab is legitimate and stores fine. U+0000 is the
-      // only code point the column cannot store. A lone surrogate is also
-      // fine — Node's UTF-8 encoder substitutes U+FFFD before Postgres ever
-      // sees it.
-      if (label.includes('\u0000')) {
-        return {
-          status: 400,
-          body: {
-            error: 'label must not contain a NUL character',
-            code: 'BODY_INVALID',
-          },
-        };
-      }
+      // varchar(128): a 129th code point is 22001 and U+0000 (reachable via the
+      // `\u0000` JSON escape) is 22021 — both a 500 if they reached the insert.
+      // Only NUL is refused; a newline or tab in operator prose stores fine.
+      const labelProblem = checkColumnString(label, { field: 'label', max: LABEL_MAX });
+      if (labelProblem) return invalid(labelProblem);
     }
     let expiresAt: string | null = null;
     if (typeof body.expiresAt === 'string') {
@@ -221,7 +231,7 @@ export async function POST(req: NextRequest) {
       .insert(pinnedKeys)
       .values({
         namespace,
-        aid: body.aid,
+        aid,
         pubkey: body.pubkey,
         label,
         expiresAt,
@@ -238,14 +248,14 @@ export async function POST(req: NextRequest) {
       });
     await writeAdminAudit({
       action: 'pinned-key.upsert',
-      targetId: body.aid,
+      targetId: aid,
       details: { namespace },
       requestId: req.headers.get('x-request-id') ?? undefined,
     });
     const rows = await db
       .select()
       .from(pinnedKeys)
-      .where(and(eq(pinnedKeys.namespace, namespace), eq(pinnedKeys.aid, body.aid)))
+      .where(and(eq(pinnedKeys.namespace, namespace), eq(pinnedKeys.aid, aid)))
       .limit(1);
     return { status: 201, body: rowOut(rows[0]!) };
   });
@@ -253,6 +263,8 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
+  const bad = badQuery(sp);
+  if (bad) return bad;
   const namespace = sp.get('namespace') ?? 'default';
   const aid = sp.get('aid');
   if (!aid) {
