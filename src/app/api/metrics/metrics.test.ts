@@ -334,7 +334,7 @@ describe('GET /api/metrics — DB unavailable', () => {
     expect(res.status).toBe(200);
     const text = await res.text();
 
-    // The comment survives (docs/operations.md promises it next to db_up 0) but
+    // The comment survives (docs/operations.md#metrics promises it next to db_up 0) but
     // carries no detail, and the exception message is nowhere in the body.
     expect(text).toContain(
       '# DB unavailable: cause logged server-side, deliberately not published here',

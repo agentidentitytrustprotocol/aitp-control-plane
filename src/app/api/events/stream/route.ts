@@ -201,7 +201,8 @@ export function GET(req: NextRequest) {
       // rather than hammering at the browser default. Note the coupling cuts
       // both ways: below ~3 s this makes clients reconnect FASTER than their
       // default, so a sub-3s heartbeat trades keepalive headroom for reconnect
-      // pressure on the capacity gate (documented in docs/operations.md).
+      // pressure on the capacity gate (documented in
+      // docs/operations.md#keepalive-sse_heartbeat_ms).
       // config.sseHeartbeatMs is clamped to 1000-2147483647 in @/lib/config, so
       // this always renders as ASCII digits — a `retry:` value that is not all
       // digits (e.g. String(1e21) === "1e+21") must be ignored by the client.

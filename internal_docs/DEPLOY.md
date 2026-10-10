@@ -16,26 +16,49 @@ cancelled when a new commit lands):
 1. **build-and-test** (20 min timeout) — `npm ci`, typecheck, lint, Drizzle
    migrations against an ephemeral Postgres 16, unit tests **with coverage**
    (thresholds enforced by `jest.config.js`; `coverage/lcov.info` uploaded
-   as a `coverage` artifact, 14-day retention), integration tests, and a
-   production `next build` smoke test.
+   as a `coverage` artifact, 14-day retention), integration tests, a
+   production `next build` smoke test, and **request-gate conformance**
+   (`npm run verify:gate`: the gate in `src/proxy.ts` is attached and behaves,
+   under `next start`).
 2. **audit** — `npx audit-ci --config ./audit-ci.jsonc`: fails only on
    high+ advisories in production dependencies, so dev-tooling advisories
-   don't block merges. Reviewed exceptions (currently an unreachable OTel
-   Prometheus-exporter advisory) are allowlisted with a rationale in
-   `audit-ci.jsonc`; a genuinely new high-sev prod advisory still fails.
+   don't block merges. The allowlist in `audit-ci.jsonc` is currently empty
+   (the steady state; fixable advisories are fixed via `overrides` in
+   `package.json` instead).
 3. **docker-build-check** (PRs only) — builds the image single-arch
    (`linux/amd64`, no push) with the shared GHA layer cache, so Dockerfile
    or standalone-output breakage is caught before merge.
-4. **docker-publish** (`main` only, gated on build-and-test) — builds a
-   multi-arch (`linux/amd64` + `linux/arm64`) image and pushes it to:
+   **docker-build-check-arm64** does the same for `linux/arm64` under QEMU,
+   only on PRs carrying the `arch:arm64` label (informational).
+4. **verify-image** (every run, no `if:`) — `npm run verify:image` against
+   the amd64 image, then `npm run verify:sse` against the same image.
+   **verify-image-arm64** repeats both under QEMU, only on a manual dispatch
+   with the `verify_image_arm64` input (informational, not in
+   `docker-publish`'s `needs`). What each check proves, the baseline, and how
+   to unblock a release if the harness itself breaks:
+   [`IMAGE-HARNESS.md`](IMAGE-HARNESS.md#ci).
+5. **docker-publish** (`main` only, not on PRs; `needs: [build-and-test,
+   verify-image]`) — builds a multi-arch (`linux/amd64` + `linux/arm64`)
+   image and pushes it to:
 
    ```
    ghcr.io/agentidentitytrustprotocol/aitp-control-plane:latest
-   ghcr.io/agentidentitytrustprotocol/aitp-control-plane:sha-<commit>
+   ghcr.io/agentidentitytrustprotocol/aitp-control-plane:sha-<full 40-char commit sha>
    ```
 
    Auth uses the built-in `GITHUB_TOKEN` (the job grants `packages:
    write`). No extra secrets required.
+
+Other workflows in `.github/workflows/`:
+
+- **`auto-merge.yml`** — on every PR, calls the shared
+  `aitp-ci/.github/workflows/auto-merge.yml@v1`.
+- **`bump-aitp.yml`** — adopts a new `aitp` SDK release: triggered by an
+  `aitp-released` repository dispatch from aitp-rs (or manually with a
+  version), via the shared `bump-consume.yml@v1`.
+- **`notify-website.yml`** — on pushes to `main` touching `docs/**` or
+  `README.md` (or manually), tells `aitp-website` to re-sync. Files under
+  `internal_docs/` are not synced.
 
 ### Make the GHCR package pullable by Railway
 
@@ -103,11 +126,12 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | Variable           | Required            | Notes                                                              |
 | ------------------ | ------------------- | ------------------------------------------------------------------ |
 | `DATABASE_URL`     | yes                 | Postgres connection string (from the Railway Postgres plugin).     |
-| `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. |
+| `NODE_ENV`         | set by the image    | The image sets `production`; every production safeguard keys on that exact value (after trimming). Do not override it — use `production` for staging too. |
+| `CP_AID_SEED_HEX`  | yes (prod)          | 32-byte (64 hex char) Ed25519 seed. **Persistent** — changing it rotates the control-plane identity. Not checked at boot: if missing in production, `/api/health`, the manifest and the revocation list answer `500`, so the `/api/health` healthcheck fails the deploy. |
 | `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. **Validated at boot: the image runs with `NODE_ENV=production`, so an unset/short value prints one `[aitp-cp] FATAL:` line and exits 1** — the healthcheck never passes, the Railway deploy fails, and the previous deployment keeps serving. (A bad value no longer deploys green; before this it 503'd `/api/registry/enroll` **and** `/api/registry/agents` on every request for as long as the release ran.) Still smoke-test an enrollment *and* a registration after changing it: boot proves the secret is usable, not that it matches the one existing tokens were minted under. |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
 | `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
-| `CP_BASE_URL`      | recommended         | Public base URL; used in the manifest's handshake endpoint.        |
+| `CP_BASE_URL`      | recommended         | Public base URL, embedded in the CP's manifest as `<CP_BASE_URL>/api/aitp/handshake/hello` — a route the CP does not serve (it is not a handshake peer). |
 | `PORT`             | auto                | Set by Railway; server defaults to 4000.                           |
 | `DB_POOL_MAX`      | no                  | Connection pool size (default 20).                                 |
 | `OTEL_ENABLED`     | no                  | Enable OpenTelemetry export (default off).                         |
