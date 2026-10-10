@@ -118,3 +118,18 @@ describe('GET /api/events/history', () => {
     await expect(GET(makeReq(''))).rejects.toThrow('connection reset');
   });
 });
+
+// A NUL in a text filter would reach a varchar comparison (22021 -> 500).
+describe('GET /api/events/history — NUL in text filters (P1b)', () => {
+  it.each(['type', 'aid', 'session_id', 'sessionId', 'run_id', 'runId'])(
+    'answers 400 FILTER_INVALID for NUL in ?%s and never queries',
+    async (name) => {
+      const res = await GET(makeReq(`?${name}=a%00b`));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('FILTER_INVALID');
+      expect(body.error).toMatch(/NUL/);
+      expect(queryHistoryMock).not.toHaveBeenCalled();
+    },
+  );
+});

@@ -92,19 +92,29 @@ runner events put scenario agent ids (e.g. `researcher`) there, so those rows
 carry agent ids, not AIDs. The agent-reported `handshake.complete` /
 `handshake.started` events carry no `initiator`/`target`.
 
-**Duplicates.** The playground sends no `Idempotency-Key`, and the CP gives
-every ingested event a fresh `id` (client ids are discarded). When a run uses
-the mid-run flush (the `cp_delegation_tree` step) and then the post-run batch
-re-sends the run's full event log, those events are stored **twice** in
-`audit_events` (and appear twice in `/api/events/history` and session replay).
-The projections themselves are insert-if-absent or update-only, so sessions,
-TCTs and delegations are not duplicated. See
-[`events.md` § How an ingested event is handled](events.md#how-an-ingested-event-is-handled).
+**Duplicates.** The playground sends no `Idempotency-Key`. When a run uses the
+mid-run flush (the `cp_delegation_tree` step) and then the post-run batch
+re-sends the run's full event log, the re-sent events are recognised as
+duplicates and stored, streamed and delivered to webhooks **once**: every
+playground event (RunEvent or agent telemetry dict) carries a `ts`, both the mid-run flush and the end-of-run post send the same stored record, and the CP derives an event's id from
+its content and the API key that sent it, so the same event re-sent with the
+same key gets the same id (the second response reports them in `duplicates`).
+This holds as long as the playground re-serializes an event identically and
+uses the same `CP_API_KEY` for both posts. See
+[`events.md` § Event ids and de-duplication](events.md#event-ids-and-de-duplication).
 
 Batch limits still apply (see
 [`api.md`](api.md#post-apievents-body)): an over-cap batch gets
 `413 PAYLOAD_TOO_LARGE`, not a fire-and-forget 2xx, so a producer with more
-events than the per-batch cap must split them.
+events than the per-batch cap must split them. An individual event the CP
+cannot store — most likely in practice a NUL character or a lone UTF-16
+surrogate (e.g. model output truncated mid-emoji) in a flat event's exception
+text or model output (the whole flat event is the payload), or an
+over-long `session_id` — is **dropped on its own** and reported in the `200`
+response's `dropped` / `errors[]`; the rest of the run's events are stored (see
+[`events.md` § Per-item limits](events.md#per-item-limits)). The playground does
+not read the response, so such a drop is visible only there, in the CP's warn
+log, and in the `events_dropped_total` metric.
 
 ## Endpoints the playground depends on
 
@@ -122,7 +132,7 @@ record of what those calls depend on.
 | `POST /api/revocation/entries` | no | body `{jti, reason?}`; `jti` must be a UUID. Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
 | `GET /.well-known/aitp-revocation-list` | no | fetched by the playground's **agents**, not its service; see [Revocation list](#revocation-list) |
 | `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit`; reads `events` |
-| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. The playground also sends `limit`, which this route ignores: it always returns up to 200 newest sessions |
+| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. Honours `limit` (default 200, max 1000) and `offset`; the playground sends `limit` |
 | `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
 | `POST /api/webhooks` | no | body `{url, events, secret?, active}`; `events: []` ⇒ all deliverable types |
 | `DELETE /api/webhooks/{id}` | no | the playground treats `404` as success |
@@ -169,7 +179,7 @@ owns the field:
   from each record. The key is therefore never found, and the playground falls
   back to its local handshake address even when the CP returns a match. Fix on
   either side: read `handshakeEndpoint` in the playground, or have the CP also
-  emit the snake_case key.
+  emit the snake_case key. Tracked in aitp-playground.
 - **Dashboard window is ignored.** The playground sends `?window=<window>` to
   `GET /api/dashboard/overview`, but the CP route reads **`?range=`**. The CP
   therefore always returns the default `24h` window regardless of what the

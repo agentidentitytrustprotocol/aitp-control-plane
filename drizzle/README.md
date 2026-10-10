@@ -24,6 +24,12 @@ in `meta/NNNN_snapshot.json`.
   `trust_anchors (namespace, issuer_url)`.
 - `0007_enrollment_jtis.sql` — `enrollment_jtis` table + `expires_at`
   index.
+- `0008_scrub_webhook_secret_audit.sql` — DATA-ONLY (no schema change;
+  its snapshot equals 0007's): rewrites `admin_audit_log` rows where
+  `action = 'webhook.update'` and `details` has a `secret` key,
+  replacing the secret with `secretRotated: true`. Idempotent (a re-run
+  matches nothing) and irreversible by design. Operators should still
+  rotate any webhook secret that was ever set via PATCH.
 
 Column-level reference: [`docs/data-model.md`](../docs/data-model.md).
 
@@ -62,3 +68,9 @@ npx drizzle-kit generate --name=<short_name>
 Drizzle-kit diffs your `src/lib/db/schema.ts` against the latest
 snapshot in `meta/` and emits a new numbered SQL file + snapshot.
 Always commit BOTH the SQL file and the snapshot.
+
+For a data-only migration (no schema change), use
+`npx drizzle-kit generate --custom --name=<short_name>`: it emits an
+empty numbered SQL file, a snapshot identical to the previous one and
+the `meta/_journal.json` entry; write the SQL by hand and make it
+idempotent. Example: `0008_scrub_webhook_secret_audit.sql`.

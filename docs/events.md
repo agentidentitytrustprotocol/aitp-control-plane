@@ -34,9 +34,9 @@ Each ingested event is normalized before it is stored:
 
 | Field | Taken from (first non-empty wins) | Default |
 |---|---|---|
-| `id` | always a fresh server-generated UUID — a client-supplied `id` is **discarded** | — |
+| `id` | always server-assigned: derived from the event's content when it has a valid `ts`, random otherwise (see [Event ids and de-duplication](#event-ids-and-de-duplication)); a client-supplied `id` is not used as the id (it is part of the hashed content) | — |
 | `type` | `type` (string) | `"unknown"` |
-| `ts` | `ts` — an ISO-8601 string, or a numeric Unix epoch (values below 10¹² are read as seconds, otherwise milliseconds); stored as ISO-8601 UTC | ingest time (also used when `ts` is unparseable) |
+| `ts` | `ts` — an ISO-8601 string, or a numeric Unix epoch (values below 10¹² are read as seconds, otherwise milliseconds); stored as ISO-8601 UTC | ingest time (also used when `ts` is unparseable or out of range: beyond ±8.64×10¹⁵ ms, or outside years 0001–9999) |
 | `aidA` | `aidA`, `aid_a`, `initiator` | none |
 | `aidB` | `aidB`, `aid_b`, `target` | none |
 | `sessionId` | `sessionId`, `session_id` | none |
@@ -48,21 +48,113 @@ Each ingested event is normalized before it is stored:
 Non-object entries in the batch are skipped. `source` is `cp` for CP-emitted
 events.
 
+### Per-item limits
+
+After normalization, each item is checked against what `audit_events` can
+store. An item that fails is **dropped** — not stored, streamed, projected or
+dispatched — and reported in the response's `dropped` count and `errors[]`
+(`{index, field, reason}`, at most 20; `index` is the item's position in the
+array sent). The rest of the batch is ingested normally.
+
+| Field | Limit (Unicode code points) |
+|---|---|
+| `type`, `source` | 128 |
+| `aidA`, `aidB` | 512 |
+| `sessionId`, `runId` | 255 |
+| any of the above, every `grants` entry, every key and string value in `payload` | no NUL (U+0000) |
+| every `grants` entry, every key and string value in `payload` | no lone (unpaired) UTF-16 surrogate — `jsonb` rejects it; surrogate pairs (emoji) are fine |
+| `payload` | at most 64 levels of nesting |
+
+The limits apply to the normalized field, whichever alias carried it
+(`session_id` over 255 is reported as `sessionId`). The batch-level caps — 256
+KiB body, 500 items, 65,536 characters per serialized payload — still reject the
+**whole** batch with `413` (see [`api.md`](api.md#post-apievents-body)).
+
 ## How an ingested event is handled
 
 For each `POST /api/events` batch, in order:
 
-1. **Persisted** to `audit_events`. Because every event gets a fresh server-side
-   `id`, re-sending the same batch creates **new rows** — there is no per-event
-   de-duplication. Only an `Idempotency-Key` header makes a retried batch a
-   no-op (see [`api.md`](api.md#idempotency)).
-2. **Last-seen touched:** every distinct AID appearing as `aidA` or `aidB` in the
+1. **Validated** per item ([Per-item limits](#per-item-limits)); dropped items
+   take no further part in the steps below.
+2. **Assigned an id and persisted** to `audit_events`. An event with a valid
+   `ts` gets a content-derived id, so an event the same producer already sent
+   is recognised as a **duplicate** and not stored again; duplicates inside one
+   batch are collapsed first (see
+   [Event ids and de-duplication](#event-ids-and-de-duplication)). The response
+   reports `inserted` (new rows) and `duplicates`.
+3. **Last-seen touched:** every distinct AID appearing as `aidA` or `aidB` in the
    batch has `agents.last_seen_at` set to the ingest time (best-effort; AIDs not
    in the registry are ignored).
-3. Per event: **published** to the in-memory bus (→ live `GET /api/events/stream`
-   subscribers), then **projected** if its `type` is recognized by a monitor
-   (below). Unknown types are stored and streamed but project nothing — never a `4xx`.
-4. **Dispatched** to webhooks if its `type` is in the deliverable set (below).
+4. Per event: **published** to the in-memory bus (→ live `GET /api/events/stream`
+   subscribers) **if it was newly inserted**, then **projected** if its `type`
+   is recognized by a monitor (below) — duplicates are projected too (the
+   projections are idempotent, and re-running them repairs one that failed the
+   first time). Unknown types are stored and streamed but project nothing —
+   never a `4xx`.
+5. **Dispatched** to webhooks if its `type` is in the deliverable set (below)
+   **and it was newly inserted** — a re-sent event is never delivered twice.
+
+## Event ids and de-duplication
+
+Producers re-send events: the playground flushes a run's log mid-run and posts
+the whole log again when the run ends (a prefix, then a superset), and any
+client may retry a timed-out request. The CP recognises a re-sent event by its
+id, which it derives from what was sent (**recipe v1**):
+
+- **When the event has a valid `ts`** (parseable and in range — the cases where
+  the stored `ts` is the client's, not the ingest time), its id is a
+  deterministic UUID (RFC 9562 version 8) computed from SHA-256 over a
+  version tag (`aitp-event:v1`), a fingerprint of the caller's API key (the
+  bearer token), and the event object **exactly as received** in canonical form
+  (object keys sorted, so key order on the wire does not matter; every other
+  difference — another field, a different sub-millisecond `ts` digit, a
+  different array order — makes a different event).
+- **When it has no valid `ts`**, its id is random, as before: two identical
+  ts-less events are most likely two real occurrences, and both are kept.
+
+Consequences for producers and consumers:
+
+- **Re-sending is safe.** The same producer sending the same event again —
+  same API key, same content, a valid `ts` — gets the same id; the CP stores it
+  once, streams it once and delivers it to webhooks once. The response's
+  `duplicates` counts what was already there (`inserted` + `duplicates` =
+  `ingested`), and `aitp_control_plane_events_duplicate_total` counts it in
+  [`/api/metrics`](operations.md#metrics).
+- **Producers are kept apart.** The key fingerprint is part of the id, so two
+  API-key holders sending identical bytes get different ids: one producer can
+  never suppress another's events. Callers that send **no** API key (a
+  development deployment with empty `API_KEYS`) all share one empty
+  fingerprint, so identical events with the same `ts` from different
+  anonymous callers are merged. Rotating a key changes the ids of events sent
+  after the rotation, so a re-send across a rotation is stored again.
+- **Identical content means the same event.** Two genuinely distinct events
+  from one key with identical content *and* identical `ts` are merged into one
+  row, with no SSE frame or webhook for the second. A producer with
+  second-resolution `ts` that can emit repeated identical events should add a
+  distinguishing field (a sequence number or its own `id`; it is hashed as
+  content).
+- **Ids are deterministic.** An event's id — also the `id` in its SSE frame and
+  in a webhook body's `payload` — is reproducible from its content and the
+  producer's key. Do not treat it as a secret or as unguessable. A client
+  `id` field is hashed as content, never used as the id.
+- **At-most-once fan-out in one window.** The SSE publish and webhook enqueue
+  happen after the INSERT commits. If the CP process dies between the two, the
+  event is stored but never streamed or delivered — and a re-send is then a
+  duplicate, so it is not fanned out either. The projections, by contrast, do
+  re-run on a re-send.
+- **Retention.** De-duplication works against rows that still exist. An event
+  re-sent after the retention sweep deleted its row (`AUDIT_EVENTS_TTL_DAYS`,
+  [operations.md](operations.md#data-retention)) is stored, streamed and
+  delivered again.
+- **Several replicas.** The `audit_events` primary key decides: exactly one
+  concurrent INSERT of an id wins, and only that replica fans the event out.
+- **`Idempotency-Key` still works as before** and complements this: a keyed
+  retry replays the first response (with its original `inserted` /
+  `duplicates`) without running the handler at all. Content-derived ids cover
+  what a key cannot — a re-send whose batch differs (a superset), or a producer
+  that sends no key.
+- Rows written before recipe v1 keep their random ids; a future recipe would
+  carry a new tag and yield ids disjoint from v1's.
 
 ## Recognized event types
 
@@ -155,8 +247,10 @@ delivery is byte-identical. See [`api.md`](api.md#webhooks).
 ## Notes for event producers
 
 - **Fire-and-forget is fine.** Unknown types are tolerated and never rejected.
-- **Retries duplicate unless keyed.** Send an `Idempotency-Key` header if you may
-  re-send a batch; client-supplied event `id`s are ignored.
+- **Send a `ts` and re-send freely** (give genuinely repeated, otherwise identical events a distinguishing field). An event with a valid `ts` is
+  de-duplicated per API key ([Event ids and de-duplication](#event-ids-and-de-duplication));
+  one without `ts` is stored again on every send. An `Idempotency-Key` header
+  additionally replays the exact first response for a retried request.
 - **Match type names exactly** (`handshake.complete`, not a variant) for the
   session/TCT/webhook path.
 - **Batch within limits:** see [`api.md`](api.md#post-apievents-body) for the

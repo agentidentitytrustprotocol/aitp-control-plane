@@ -96,8 +96,9 @@ Historical counts in the script and its comments ("12/12", "13/13", "all 25
 checks") are measurements against the harness **as it stood then** and are kept
 verbatim as evidence. The behavioural probe that check 13 replaced sent 360
 requests: six verbs over the then-thirty pinned routes, with each of the ten
-dynamic routes in four id shapes. Today the build has 31 `/api` routes, 11 of
-them dynamic (`apiRouteCount` / `apiRoutes` in the baseline).
+dynamic routes in four id shapes. The current route surface is not restated here:
+`apiRouteCount` and `apiRoutes` in `scripts/image-artifact-baseline.json` are the
+source of truth for how many `/api` routes the build has and which they are.
 
 ## The baseline
 

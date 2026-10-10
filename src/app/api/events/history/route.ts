@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { InvalidFilterError, queryHistory } from '@/lib/audit/event-store';
 import { parsePagination } from '@/lib/pagination';
+import { checkQueryParam } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,13 +12,30 @@ export async function GET(req: NextRequest) {
     defaultLimit: 100,
     maxLimit: 1000,
   });
+  const type = searchParams.get('type');
+  const aid = searchParams.get('aid');
+  const sessionId = searchParams.get('session_id') ?? searchParams.get('sessionId');
+  const runId = searchParams.get('run_id') ?? searchParams.get('runId');
+  // A NUL in a text filter would reach a varchar comparison (22021 -> 500).
+  // Answered with this route's filter-error code. (`since`/`until` are parsed
+  // as dates by the store and already answer FILTER_INVALID.)
+  for (const [name, value] of [
+    ['type', type],
+    ['aid', aid],
+    ['session_id', sessionId],
+    ['run_id', runId],
+  ] as const) {
+    const problem = checkQueryParam(value, name);
+    if (problem) {
+      return Response.json({ error: problem, code: 'FILTER_INVALID' }, { status: 400 });
+    }
+  }
   try {
     const rows = await queryHistory({
-      type: searchParams.get('type') ?? undefined,
-      aid: searchParams.get('aid') ?? undefined,
-      sessionId:
-        searchParams.get('session_id') ?? searchParams.get('sessionId') ?? undefined,
-      runId: searchParams.get('run_id') ?? searchParams.get('runId') ?? undefined,
+      type: type ?? undefined,
+      aid: aid ?? undefined,
+      sessionId: sessionId ?? undefined,
+      runId: runId ?? undefined,
       since: searchParams.get('since') ?? undefined,
       until: searchParams.get('until') ?? undefined,
       limit,

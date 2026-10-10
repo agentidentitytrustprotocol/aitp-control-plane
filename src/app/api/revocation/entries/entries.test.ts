@@ -431,3 +431,21 @@ describe('POST /api/revocation/entries — no internal detail in any body (#98)'
     }
   });
 });
+
+// JSON `null` is valid JSON; it used to throw on `body.jti` and answer 500.
+describe('POST /api/revocation/entries — non-object JSON body (P1b)', () => {
+  it.each([
+    ['null', 'null'],
+    ['an array', '[]'],
+    ['a number', '5'],
+    ['a string', '"x"'],
+  ])('answers 400 BODY_INVALID for %s and writes nothing', async (_w, raw) => {
+    const res = await post(raw);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('BODY_INVALID');
+    expect(body.error).toBe('body must be a JSON object');
+    expect(insertedValues).toHaveLength(0);
+    expect(ingestOneEventMock).not.toHaveBeenCalled();
+  });
+});

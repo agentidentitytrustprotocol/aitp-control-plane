@@ -9,6 +9,8 @@ import {
 } from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 import { withIdempotency } from '@/lib/idempotency';
+import { readJsonObject } from '@/lib/http/validate';
+import { checkWebhookFields } from '@/lib/webhooks/validate-body';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,23 +29,12 @@ export async function GET() {
   });
 }
 
-interface CreateBody {
-  url?: unknown;
-  events?: unknown;
-  secret?: unknown;
-  active?: unknown;
-}
-
 export async function POST(req: NextRequest) {
-  let body: CreateBody;
-  try {
-    body = (await req.json()) as CreateBody;
-  } catch {
-    return Response.json(
-      { error: 'body must be JSON', code: 'BODY_INVALID' },
-      { status: 400 },
-    );
-  }
+  // Non-JSON and non-object bodies (incl. `null`) are answered before the
+  // idempotency layer and never stored; field 400s below are inside it.
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
 
   return withIdempotency(req, 'webhooks.create', async () => {
     if (typeof body.url !== 'string') {
@@ -51,6 +42,10 @@ export async function POST(req: NextRequest) {
         status: 400,
         body: { error: 'url must be an http(s) URL', code: 'BODY_INVALID' },
       };
+    }
+    const fieldProblem = checkWebhookFields(body);
+    if (fieldProblem) {
+      return { status: 400, body: { error: fieldProblem, code: 'BODY_INVALID' } };
     }
     try {
       await assertSafeWebhookUrl(body.url);

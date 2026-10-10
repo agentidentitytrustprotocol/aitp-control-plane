@@ -171,3 +171,19 @@ describe('GET /api/tcts — response shape', () => {
     ]);
   });
 });
+
+// A NUL in a text filter would reach a varchar comparison (22021) or the jsonb
+// containment literal (22P05) — both a 500 before.
+describe('GET /api/tcts — NUL in text filters (P1b)', () => {
+  it.each(['issuer', 'subject', 'audience', 'capability', 'sessionId'])(
+    'answers 400 BAD_REQUEST for NUL in ?%s and never queries',
+    async (name) => {
+      const res = await GET(makeReq(`?${name}=a%00b`));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('BAD_REQUEST');
+      expect(body.error).toBe(`${name} must not contain a NUL character`);
+      expect(limitArgs).toHaveLength(0);
+    },
+  );
+});

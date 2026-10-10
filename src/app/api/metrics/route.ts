@@ -13,6 +13,10 @@ import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
 import { getEnrollFailureTotals } from '@/lib/registry/enroll-metrics';
 import { eventBus } from '@/lib/audit/stream';
 import { getSseMetrics } from '@/lib/audit/sse-metrics';
+import {
+  getEventsDroppedTotal,
+  getEventsDuplicateTotal,
+} from '@/lib/audit/ingest-metrics';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -206,6 +210,30 @@ export async function GET() {
   lines.push('# TYPE aitp_control_plane_event_backlog_dropped counter');
   lines.push(
     `aitp_control_plane_event_backlog_dropped ${eventBus.getDroppedCount()}`,
+  );
+
+  // Items POST /api/events refused by per-item validation (over a column
+  // limit, a NUL character, a payload nested too deep). The rest of each such
+  // batch was ingested; a rising count is a producer sending unstorable data.
+  lines.push(
+    '# HELP aitp_control_plane_events_dropped_total Ingest items dropped by POST /api/events per-item validation since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_events_dropped_total counter');
+  lines.push(
+    `aitp_control_plane_events_dropped_total ${getEventsDroppedTotal()}`,
+  );
+
+  // Items POST /api/events accepted but did not store because the same event
+  // (same content-derived id: same producer key, same raw content, valid ts)
+  // was already stored or appeared earlier in the batch. A producer re-sending
+  // its log (the playground's end-of-run flush) shows up here, not as
+  // duplicate history rows or webhook deliveries.
+  lines.push(
+    '# HELP aitp_control_plane_events_duplicate_total Ingest items POST /api/events recognised as already-stored duplicates since process start',
+  );
+  lines.push('# TYPE aitp_control_plane_events_duplicate_total counter');
+  lines.push(
+    `aitp_control_plane_events_duplicate_total ${getEventsDuplicateTotal()}`,
   );
 
   // SSE stream lifecycle. These exist because issue #89 — the stream endpoint

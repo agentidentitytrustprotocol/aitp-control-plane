@@ -1,8 +1,14 @@
 // Unit tests for /api/trust-anchors/[id].
+//   • all    — 400 ID_INVALID for a non-UUID :id, before any db access
 //   • GET    — 404 when the id is unknown, 200 + rowOut projection otherwise
-//   • PATCH  — 400 on non-JSON body, 404 when update matches no row,
-//              200 with only whitelisted fields applied (issuerUrl must be a
-//              string; jwksUrl/label accept string or null)
+//   • PATCH  — 400 on non-JSON / non-object body, 400 on unstorable fields
+//              (label > 128 code points or NUL, issuerUrl/jwksUrl > 2048 or
+//              NUL), 404 when update matches no row, 200 with only
+//              whitelisted fields applied (issuerUrl must be a string;
+//              jwksUrl/label accept string or null; '' jwksUrl clears),
+//              400 on a non-http(s) issuerUrl/jwksUrl, 409 ALREADY_EXISTS on a
+//              duplicate (namespace, issuerUrl), JWKS-cache clear expressions
+//              in SET only when a URL is sent
 //   • DELETE — 404 when nothing was deleted, 204 (empty body) on success
 //
 // @/lib/db is mocked with chained stubs; params arrive as a Promise per the
@@ -11,29 +17,43 @@
 import { jest } from '@jest/globals';
 
 let selectResult: unknown[] = [];
+// Per-call select results (consumed first); falls back to selectResult.
+const selectQueue: unknown[][] = [];
+let updateError: unknown = null;
 let updateReturning: unknown[] = [];
 let deleteReturning: unknown[] = [];
 const setCalls: unknown[] = [];
+let dbCalls = 0;
 
 jest.mock('@/lib/db', () => {
   const selectChain: Record<string, unknown> = {};
   selectChain.from = () => selectChain;
   selectChain.where = () => selectChain;
-  selectChain.limit = () => Promise.resolve(selectResult);
+  selectChain.limit = () => Promise.resolve(selectQueue.shift() ?? selectResult);
   return {
     db: {
-      select: () => selectChain,
+      select: () => {
+        dbCalls++;
+        return selectChain;
+      },
       update: () => ({
         set: (patch: unknown) => {
+          dbCalls++;
           setCalls.push(patch);
           return {
-            where: () => ({ returning: () => Promise.resolve(updateReturning) }),
+            where: () => ({
+              returning: () =>
+                updateError ? Promise.reject(updateError) : Promise.resolve(updateReturning),
+            }),
           };
         },
       }),
-      delete: () => ({
-        where: () => ({ returning: () => Promise.resolve(deleteReturning) }),
-      }),
+      delete: () => {
+        dbCalls++;
+        return {
+          where: () => ({ returning: () => Promise.resolve(deleteReturning) }),
+        };
+      },
     },
   };
 });
@@ -43,6 +63,8 @@ jest.mock('@/lib/audit-log/service', () => ({
   writeAdminAudit: (e: unknown) => writeAdminAuditMock(e),
 }));
 
+import { SQL, is } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { GET, PATCH, DELETE } from './route';
 import { NextRequest } from 'next/server';
 
@@ -54,9 +76,13 @@ function ctx(id: string) {
   return { params: Promise.resolve({ id }) };
 }
 
+// Path ids are validated as UUIDs, so fixtures use real (v4) ones.
+const ID = '3f2b8c1e-9a4d-4e5f-8a6b-7c8d9e0f1a2b';
+const UNKNOWN_ID = '9b1d6a2c-5e4f-4a3b-9c8d-0e1f2a3b4c5d';
+
 function anchorRow(over: Record<string, unknown> = {}) {
   return {
-    id: 'ta-1',
+    id: ID,
     namespace: 'default',
     issuerUrl: 'https://issuer.example.com',
     jwksUrl: null,
@@ -71,26 +97,29 @@ function anchorRow(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   selectResult = [];
+  selectQueue.length = 0;
+  updateError = null;
   updateReturning = [];
   deleteReturning = [];
   setCalls.length = 0;
+  dbCalls = 0;
   writeAdminAuditMock.mockReset();
   writeAdminAuditMock.mockResolvedValue(undefined);
 });
 
 describe('GET /api/trust-anchors/[id]', () => {
   it('returns 404 NOT_FOUND for an unknown id', async () => {
-    const res = await GET(makeReq('/api/trust-anchors/nope'), ctx('nope'));
+    const res = await GET(makeReq(`/api/trust-anchors/${UNKNOWN_ID}`), ctx(UNKNOWN_ID));
     expect(res.status).toBe(404);
     expect(((await res.json()) as { code: string }).code).toBe('NOT_FOUND');
   });
 
   it('returns the projected row (no addedBy field on this route)', async () => {
     selectResult = [anchorRow()];
-    const res = await GET(makeReq('/api/trust-anchors/ta-1'), ctx('ta-1'));
+    const res = await GET(makeReq(`/api/trust-anchors/${ID}`), ctx(ID));
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.id).toBe('ta-1');
+    expect(body.id).toBe(ID);
     expect(body.issuerUrl).toBe('https://issuer.example.com');
     // rowOut on the [id] route intentionally omits addedBy.
     expect('addedBy' in body).toBe(false);
@@ -100,8 +129,8 @@ describe('GET /api/trust-anchors/[id]', () => {
 describe('PATCH /api/trust-anchors/[id]', () => {
   it('returns 400 BODY_INVALID for a non-JSON body', async () => {
     const res = await PATCH(
-      makeReq('/api/trust-anchors/ta-1', { method: 'PATCH', body: '{{' }),
-      ctx('ta-1'),
+      makeReq(`/api/trust-anchors/${ID}`, { method: 'PATCH', body: '{{' }),
+      ctx(ID),
     );
     expect(res.status).toBe(400);
     expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
@@ -110,11 +139,11 @@ describe('PATCH /api/trust-anchors/[id]', () => {
   it('returns 404 when the update matches no row', async () => {
     updateReturning = [];
     const res = await PATCH(
-      makeReq('/api/trust-anchors/gone', {
+      makeReq(`/api/trust-anchors/${UNKNOWN_ID}`, {
         method: 'PATCH',
         body: JSON.stringify({ label: 'x' }),
       }),
-      ctx('gone'),
+      ctx(UNKNOWN_ID),
     );
     expect(res.status).toBe(404);
     expect(writeAdminAuditMock).not.toHaveBeenCalled();
@@ -123,7 +152,7 @@ describe('PATCH /api/trust-anchors/[id]', () => {
   it('applies only whitelisted, correctly-typed fields', async () => {
     updateReturning = [anchorRow({ label: 'renamed' })];
     const res = await PATCH(
-      makeReq('/api/trust-anchors/ta-1', {
+      makeReq(`/api/trust-anchors/${ID}`, {
         method: 'PATCH',
         body: JSON.stringify({
           issuerUrl: 12345, // wrong type — must be ignored
@@ -132,7 +161,7 @@ describe('PATCH /api/trust-anchors/[id]', () => {
           namespace: 'evil', // not a patchable field
         }),
       }),
-      ctx('ta-1'),
+      ctx(ID),
     );
     expect(res.status).toBe(200);
     const patch = setCalls[0] as Record<string, unknown>;
@@ -149,16 +178,191 @@ describe('PATCH /api/trust-anchors/[id]', () => {
 
 describe('DELETE /api/trust-anchors/[id]', () => {
   it('returns 404 when nothing was deleted', async () => {
-    const res = await DELETE(makeReq('/api/trust-anchors/gone'), ctx('gone'));
+    const res = await DELETE(makeReq(`/api/trust-anchors/${UNKNOWN_ID}`), ctx(UNKNOWN_ID));
     expect(res.status).toBe(404);
     expect(writeAdminAuditMock).not.toHaveBeenCalled();
   });
 
   it('returns 204 with an empty body on success', async () => {
-    deleteReturning = [{ id: 'ta-1' }];
-    const res = await DELETE(makeReq('/api/trust-anchors/ta-1'), ctx('ta-1'));
+    deleteReturning = [{ id: ID }];
+    const res = await DELETE(makeReq(`/api/trust-anchors/${ID}`), ctx(ID));
     expect(res.status).toBe(204);
     expect(await res.text()).toBe('');
     expect(writeAdminAuditMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('/api/trust-anchors/[id] path-id validation', () => {
+  const BAD = 'not-a-uuid';
+
+  async function expectIdInvalid(res: Response) {
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'id must be a UUID', code: 'ID_INVALID' });
+    expect(dbCalls).toBe(0);
+    expect(writeAdminAuditMock).not.toHaveBeenCalled();
+  }
+
+  it('GET with a non-UUID id is 400 ID_INVALID and never queries', async () => {
+    await expectIdInvalid(await GET(makeReq(`/api/trust-anchors/${BAD}`), ctx(BAD)));
+  });
+
+  it('PATCH with a non-UUID id is 400 ID_INVALID, even with a bad body', async () => {
+    await expectIdInvalid(
+      await PATCH(makeReq(`/api/trust-anchors/${BAD}`, { method: 'PATCH', body: '{{' }), ctx(BAD)),
+    );
+  });
+
+  it('DELETE with a non-UUID id is 400 ID_INVALID and never queries', async () => {
+    await expectIdInvalid(
+      await DELETE(makeReq(`/api/trust-anchors/${BAD}`, { method: 'DELETE' }), ctx(BAD)),
+    );
+  });
+
+  it('accepts a UUID of any version (syntax-only check)', async () => {
+    const v7 = '0190a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b';
+    const res = await GET(makeReq(`/api/trust-anchors/${v7}`), ctx(v7));
+    expect(res.status).toBe(404);
+    expect(dbCalls).toBe(1);
+  });
+});
+
+describe('PATCH /api/trust-anchors/[id] body validation', () => {
+  function patch(body: unknown) {
+    return PATCH(
+      makeReq(`/api/trust-anchors/${ID}`, {
+        method: 'PATCH',
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      }),
+      ctx(ID),
+    );
+  }
+
+  async function expectBodyInvalid(res: Response, error?: string) {
+    expect(res.status).toBe(400);
+    const b = (await res.json()) as { code: string; error: string };
+    expect(b.code).toBe('BODY_INVALID');
+    if (error) expect(b.error).toBe(error);
+    expect(setCalls).toHaveLength(0);
+  }
+
+  it('rejects a JSON body that is not an object (null, array, primitive)', async () => {
+    for (const b of ['null', '[]', '5', '"x"']) {
+      await expectBodyInvalid(await patch(b), 'body must be a JSON object');
+    }
+  });
+
+  it('label: 128 code points accepted, 129 rejected, NUL rejected', async () => {
+    updateReturning = [anchorRow()];
+    expect((await patch({ label: 'a'.repeat(128) })).status).toBe(200);
+    expect((await patch({ label: '\u{1F600}'.repeat(128) })).status).toBe(200);
+    setCalls.length = 0;
+    await expectBodyInvalid(await patch({ label: 'a'.repeat(129) }), 'label exceeds 128 character limit');
+    await expectBodyInvalid(await patch({ label: 'a\u0000b' }), 'label must not contain a NUL character');
+  });
+
+  it('issuerUrl / jwksUrl: over 2048 or NUL rejected', async () => {
+    const long = 'https://x.example.com/' + 'a'.repeat(2048);
+    await expectBodyInvalid(await patch({ issuerUrl: long }), 'issuerUrl exceeds 2048 character limit');
+    await expectBodyInvalid(await patch({ issuerUrl: 'https://x\u0000' }), 'issuerUrl must not contain a NUL character');
+    await expectBodyInvalid(await patch({ jwksUrl: long }), 'jwksUrl exceeds 2048 character limit');
+    await expectBodyInvalid(await patch({ jwksUrl: 'https://x\u0000' }), 'jwksUrl must not contain a NUL character');
+  });
+
+  it('an empty-string jwksUrl clears it (stored as null); label null clears', async () => {
+    updateReturning = [anchorRow()];
+    const res = await patch({ jwksUrl: '', label: null });
+    expect(res.status).toBe(200);
+    const p = setCalls[0] as Record<string, unknown>;
+    expect(p.jwksUrl).toBeNull();
+    expect(p.label).toBeNull();
+  });
+});
+
+describe('PATCH /api/trust-anchors/[id] URL rules and JWKS cache invalidation', () => {
+  const dialect = new PgDialect();
+  const render = (v: unknown) => dialect.sqlToQuery(v as SQL);
+
+  function patch(body: unknown) {
+    return PATCH(
+      makeReq(`/api/trust-anchors/${ID}`, { method: 'PATCH', body: JSON.stringify(body) }),
+      ctx(ID),
+    );
+  }
+
+  it('rejects a non-http(s) issuerUrl or jwksUrl with 400 BODY_INVALID', async () => {
+    for (const [body, error] of [
+      [{ issuerUrl: 'ftp://x' }, 'issuerUrl must be an http(s) URL'],
+      [{ issuerUrl: '' }, 'issuerUrl must be an http(s) URL'],
+      [{ jwksUrl: 'file:///etc/passwd' }, 'jwksUrl must be an http(s) URL'],
+    ] as const) {
+      const res = await patch(body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: 'BODY_INVALID' });
+    }
+    expect(setCalls).toHaveLength(0);
+  });
+
+  it('a label-only edit leaves jwks_cache / jwks_cached_at out of SET', async () => {
+    updateReturning = [anchorRow()];
+    expect((await patch({ label: 'x' })).status).toBe(200);
+    const p = setCalls[0] as Record<string, unknown>;
+    expect('jwksCache' in p).toBe(false);
+    expect('jwksCachedAt' in p).toBe(false);
+  });
+
+  it('sending URLs sets the cache columns to a CASE that clears only on an actual change', async () => {
+    updateReturning = [anchorRow()];
+    expect(
+      (await patch({ issuerUrl: 'https://new.example.com', jwksUrl: null })).status,
+    ).toBe(200);
+    const p = setCalls[0] as Record<string, unknown>;
+    expect(is(p.jwksCache, SQL)).toBe(true);
+    expect(is(p.jwksCachedAt, SQL)).toBe(true);
+    const cache = render(p.jwksCache);
+    expect(cache.sql).toMatch(
+      /^CASE WHEN \("trust_anchors"\."issuer_url" IS DISTINCT FROM \$1::text or "trust_anchors"\."jwks_url" IS DISTINCT FROM \$2::text\) THEN NULL ELSE "trust_anchors"\."jwks_cache" END$/,
+    );
+    expect(cache.params).toEqual(['https://new.example.com', null]);
+    expect(render(p.jwksCachedAt).sql).toContain('ELSE "trust_anchors"."jwks_cached_at" END');
+    // The URL values themselves are still plain SET values.
+    expect(p.issuerUrl).toBe('https://new.example.com');
+    expect(p.jwksUrl).toBeNull();
+  });
+
+  it('only the URL that was sent is compared', async () => {
+    updateReturning = [anchorRow()];
+    await patch({ jwksUrl: 'https://issuer.example.com/keys' });
+    const q = render((setCalls[0] as Record<string, unknown>).jwksCache);
+    expect(q.sql).toBe(
+      'CASE WHEN "trust_anchors"."jwks_url" IS DISTINCT FROM $1::text THEN NULL ELSE "trust_anchors"."jwks_cache" END',
+    );
+    expect(q.params).toEqual(['https://issuer.example.com/keys']);
+  });
+
+  it('audit details carry the requested changes, not the SQL expressions', async () => {
+    updateReturning = [anchorRow()];
+    await patch({ issuerUrl: 'https://new.example.com', label: 'l' });
+    const details = (writeAdminAuditMock.mock.calls[0]![0] as { details: Record<string, unknown> })
+      .details;
+    expect(details.issuerUrl).toBe('https://new.example.com');
+    expect(details.label).toBe('l');
+    expect('jwksCache' in details).toBe(false);
+  });
+
+  it('maps a duplicate (namespace, issuerUrl) 23505 to 409 ALREADY_EXISTS with existing.id', async () => {
+    updateError = Object.assign(new Error('duplicate key'), { code: '23505' });
+    const OTHER = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+    selectQueue.push([{ namespace: 'ns-a' }], [{ id: OTHER }]);
+    const res = await patch({ issuerUrl: 'https://taken.example.com' });
+    expect(res.status).toBe(409);
+    const b = (await res.json()) as { code: string; existing: { id: string } };
+    expect(b.code).toBe('ALREADY_EXISTS');
+    expect(b.existing).toEqual({ id: OTHER });
+    expect(writeAdminAuditMock).not.toHaveBeenCalled();
+  });
+
+  it('rethrows any other database error', async () => {
+    updateError = Object.assign(new Error('boom'), { code: '57014' });
+    await expect(patch({ issuerUrl: 'https://x.example.com' })).rejects.toThrow('boom');
   });
 });

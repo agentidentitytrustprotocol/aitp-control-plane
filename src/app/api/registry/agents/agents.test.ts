@@ -515,3 +515,175 @@ describe('GET /api/registry/agents (Plan 2.2 / 2.3 / 2.4)', () => {
     expect(passedFilters.namespace).toBe('production');
   });
 });
+
+// ── P1b: inputs that used to reach Postgres and answer 500 ─────────
+describe('POST /api/registry/agents — envelope and namespace validation (P1b)', () => {
+  function manifestBody(extensions?: Record<string, unknown>): string {
+    return JSON.stringify({
+      manifest: {
+        aid: 'aid:pubkey:fake',
+        display_name: 'fake',
+        handshake_endpoint: 'https://fake.example.com/handshake',
+        offered_capabilities: ['demo.echo'],
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        ...(extensions ? { extensions } : {}),
+      },
+    });
+  }
+
+  it.each([
+    ['null', 'null'],
+    ['an array', '[]'],
+  ])('answers 400 BODY_INVALID for a JSON %s body, before the token', async (_w, raw) => {
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok' },
+        body: raw,
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
+    expect(validateTokenMock).not.toHaveBeenCalled();
+    expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts a 128-character X-Aitp-Namespace', async () => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok', 'x-aitp-namespace': 'n'.repeat(128) },
+        body: manifestBody(),
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect((upsertAgentMock.mock.calls[0][0] as { namespace: string }).namespace).toBe(
+      'n'.repeat(128),
+    );
+  });
+
+  it('answers 400 BAD_REQUEST for a 129-character X-Aitp-Namespace without burning the token', async () => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok', 'x-aitp-namespace': 'n'.repeat(129) },
+        body: manifestBody(),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('BAD_REQUEST');
+    expect(body.error).toBe('X-Aitp-Namespace exceeds 128 character limit');
+    expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
+    expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 BODY_INVALID for a 129-character manifest.extensions.namespace', async () => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok' },
+        body: manifestBody({ namespace: 'n'.repeat(129) }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
+    expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/registry/agents — NUL in text filters (P1b)', () => {
+  it.each(['capability', 'aid', 'display_name', 'displayName', 'namespace'])(
+    'answers 400 BAD_REQUEST for NUL in ?%s and never queries',
+    async (name) => {
+      const res = await GET(makeReq(`/api/registry/agents?${name}=a%00b`));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('BAD_REQUEST');
+      expect(body.error).toMatch(/must not contain a NUL character/);
+      expect(listAgentsMock).not.toHaveBeenCalled();
+    },
+  );
+});
+
+// ── P1b: manifest values the agents row cannot hold ────────────────
+// A signed manifest with these verifies under the SDK; /enroll now refuses to
+// mint a token for one, and this route refuses it too (for tokens minted
+// before that) — BEFORE the jti is consumed, so the token is not burned.
+describe('POST /api/registry/agents — unstorable manifest values (P1b)', () => {
+  function body(over: Record<string, unknown>): string {
+    return JSON.stringify({
+      manifest: {
+        aid: 'aid:pubkey:fake',
+        display_name: 'fake',
+        handshake_endpoint: 'https://fake.example.com/handshake',
+        offered_capabilities: ['demo.echo'],
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        ...over,
+      },
+    });
+  }
+
+  it.each([
+    ['a 257-character display_name', { display_name: 'd'.repeat(257) }, /manifest\.display_name exceeds 256/],
+    ['a NUL in display_name', { display_name: 'a\u0000b' }, /manifest\.display_name must not contain a NUL/],
+    ['a non-string display_name', { display_name: 42 }, /display_name must be a string/],
+    ['a NUL in handshake_endpoint', { handshake_endpoint: 'https://x/\u0000' }, /handshake_endpoint must not contain a NUL/],
+    ['a missing handshake_endpoint', { handshake_endpoint: undefined }, /handshake_endpoint must be a string/],
+    ['a NUL in an offered capability', { offered_capabilities: ['a\u0000b'] }, /offered_capabilities entries must not contain a NUL/],
+    ['a lone surrogate in an offered capability', { offered_capabilities: ['a\ud800b'] }, /well-formed Unicode/],
+    ['a non-array offered_capabilities', { offered_capabilities: 'demo.echo' }, /array of strings/],
+    ['an expires_at beyond year 9999 (toISOString would throw)', { expires_at: 1e13 }, /expires_at must be a Unix timestamp/],
+    ['a 513-character aid', { aid: 'a'.repeat(513) }, /manifest\.aid exceeds 512/],
+    [
+      'a 257-character aid with no display_name (it becomes the display name)',
+      { aid: 'a'.repeat(257), display_name: undefined },
+      /manifest\.aid \(used as the display name/,
+    ],
+  ])('answers 400 BODY_INVALID for %s without consuming the jti', async (_w, over, msg) => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok' },
+        body: body(over),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { code: string; error: string };
+    expect(json.code).toBe('BODY_INVALID');
+    expect(json.error).toMatch(msg);
+    expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
+    expect(upsertAgentMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts the limits exactly: 256 astral code points of display_name', async () => {
+    validateTokenMock.mockImplementation(() => okPayload());
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ok' },
+        body: body({ display_name: '\u{1F600}'.repeat(256) }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect(consumeEnrollmentJtiMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still answers 401 TOKEN_INVALID first for a bad token', async () => {
+    validateTokenMock.mockImplementation(() => {
+      throw new Error('token signature invalid');
+    });
+    const res = await POST(
+      makeReq('/api/registry/agents', {
+        method: 'POST',
+        headers: { authorization: 'Bearer bad' },
+        body: body({ display_name: 'd'.repeat(257) }),
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+});

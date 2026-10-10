@@ -19,12 +19,19 @@ import { NextRequest } from 'next/server';
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { issuedTcts } from '@/lib/db/schema';
+import { badRequest, checkQueryParam } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
+  // A NUL in a text filter would reach a varchar comparison (22021) or a
+  // jsonb literal (22P05) and answer 500.
+  for (const name of ['issuer', 'subject', 'audience', 'capability', 'sessionId']) {
+    const problem = checkQueryParam(sp.get(name), name);
+    if (problem) return badRequest(problem, 'BAD_REQUEST');
+  }
   const wheres: SQL[] = [];
   const issuer = sp.get('issuer');
   if (issuer) wheres.push(eq(issuedTcts.issuerAid, issuer));

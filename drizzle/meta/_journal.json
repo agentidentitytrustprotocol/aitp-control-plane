@@ -57,6 +57,13 @@
       "when": 1780369963638,
       "tag": "0007_enrollment_jtis",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791653446633,
+      "tag": "0008_scrub_webhook_secret_audit",
+      "breakpoints": true
     }
   ]
 }

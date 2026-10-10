@@ -20,7 +20,7 @@ spec rather than restate it.
 - **Request ID:** Every `/api/*` response carries `x-request-id`. Clients may pre-set the header; the CP echoes it.
 - **CORS:** On `/api/*`, `Access-Control-Allow-Origin` is set to `CORS_ORIGIN` (defaults to `http://localhost:3000`). Applied per-request by the proxy, so it reads from the runtime environment — set it to the UI console's origin. A single origin is supported. `OPTIONS` preflights are answered `204` by the proxy.
 - **Filter key casing:** List filters are accepted in **both** camelCase and snake_case where noted (e.g. `runId` or `run_id`). The playground emits snake_case; UI clients tend to use camelCase. Both resolve to the same column.
-- **UUIDs:** where a route validates that a value "must be a UUID" (`jti`, `root_jti`, `parent_jti`, the JWKS route's `:id`), it accepts RFC 4122 **versions 1–5** only; a v6/v7/v8 UUID is rejected as malformed.
+- **UUIDs:** two different rules. A **token id** that "must be a UUID" (`jti`, `root_jti`, `parent_jti`) must be RFC 4122 **versions 1–5**; a v6/v7/v8 UUID is rejected as malformed. A **path `:id`** on `/api/trust-anchors/:id` (and its `/jwks`) and `/api/webhooks/:id` (and its `/circuit-breaker` routes) is checked for **syntax only** — the canonical hyphenated `8-4-4-4-12` hex form, any version, either case — and anything else is `400 ID_INVALID` before the database is touched. Ids the CP hands out are always in that form.
 - **Error shape:**
   ```json
   { "error": "human message", "code": "MACHINE_CODE" }
@@ -31,7 +31,7 @@ spec rather than restate it.
   `verifyCode` on `POST /api/registry/enroll` (which manifest check failed),
   `eventType` on `POST /api/events`' `413` (which event was too big),
   `issuerUrl` on `GET /api/trust-anchors/:id/jwks`' `503 JWKS_NOT_CACHED`, and
-  `existing: { id }` on `POST /api/trust-anchors`' `409 ALREADY_EXISTS` (the
+  `existing: { id }` on `POST` and `PATCH /api/trust-anchors`' `409 ALREADY_EXISTS` (the
   anchor that already holds that `(namespace, issuerUrl)`). Such a field is
   always optional and additive — absent means "not applicable here", never
   "unknown".
@@ -45,7 +45,7 @@ spec rather than restate it.
 
   HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / unavailable / at capacity). DELETEs do not share one success shape: some answer `204 No Content`, others `200` with a small confirmation body — so check the status per route rather than assuming one shape for "a DELETE on this API". Each DELETE's status and body are stated on that operation in [`openapi.yaml`](../openapi.yaml) (and in the route tables below).
 
-  A `500` **never** carries the shape above. Its body is whatever the framework renders, so do not parse it and do not branch on it: the status is the whole signal — retry, and if it persists, the server's operator has the detail in their logs. Routes that cannot classify a failure rethrow it on purpose, which keeps internal detail (database messages especially) out of client-facing bodies; [`openapi.yaml`](../openapi.yaml) says on each declared `500` why that route can reach it. Some input mistakes also currently surface as a `500` rather than a `400`; they are listed per route below.
+  A `500` **never** carries the shape above. Its body is whatever the framework renders, so do not parse it and do not branch on it: the status is the whole signal — retry, and if it persists, the server's operator has the detail in their logs. Routes that cannot classify a failure rethrow it on purpose, which keeps internal detail (database messages especially) out of client-facing bodies; [`openapi.yaml`](../openapi.yaml) says on each declared `500` why that route can reach it. Where a route is known to still answer `500` for an input mistake rather than a `400`, it is listed per route below. `POST /api/events` no longer does: an item the database cannot store (including one with a NUL or a lone UTF-16 surrogate in its `jsonb` fields) is dropped and reported instead (see [`POST /api/events` body](#post-apievents-body)); its `500` now means a database fault — in the batch INSERT or, with an `Idempotency-Key`, the key lookup or response re-read.
 
   This rule is about `500` specifically, **not** about 5xx. A `503` is a deliberate, classified answer and carries `{error, code}`: `SERVER_MISCONFIGURED` (gate or enrollment), `SSE_CAPACITY`, `REVOCATION_UNAVAILABLE`, `JWKS_NOT_CACHED`. The **probes are the exception**: `/api/health` and `/api/readyz` answer with their own diagnostic shapes (`{ok, service, aid, db}`, `{ready, reason}`), not with `{error, code}` — treat their bodies as probe output, not as the error contract.
 
@@ -82,7 +82,7 @@ These mutating endpoints honor an optional `Idempotency-Key` request header:
 - A key is scoped to its endpoint. Replaying the same `(endpoint, key)` returns the stored status and body without re-running the handler, and adds the response header `Idempotency-Replayed: true`.
 - The key is **not** bound to the request body: a replay with the same key and a *different* body still returns the first response.
 - Only stable outcomes are stored: `200`, `201`, `202`, `204`, `400`, `409`, `422`. A `401`, `429` or `5xx` is not stored, so a retry with the same key runs the handler again.
-- Some `400 BODY_INVALID`s (a body that is not JSON) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
+- Some `400 BODY_INVALID`s (a body that is not JSON — and, on the JSON-object-body POSTs `/api/trust-anchors`, `/api/webhooks`, `/api/pinned-keys` and `/api/revocation/entries`, a JSON body that is not an object) are decided before the idempotency layer and are never stored; field-level `400`s decided inside it are.
 - Two concurrent requests with the same key may both run; the first one stored wins and the other caller receives the winner's response.
 - A key that is empty, longer than 255 characters, or contains control characters is rejected `400 IDEMPOTENCY_KEY_INVALID`.
 
@@ -94,15 +94,15 @@ Stored responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7).
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | public | Liveness + DB ping. `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. |
-| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity, which is `/api/health`'s business. |
+| GET | `/api/health` | public | Process up + DB ping + the CP's AID: `200 {ok, service, aid, db: "ok"}`, or `503` with `db: "error"` if the ping fails. Stays `200` during a SIGTERM drain. Railway's deploy-time healthcheck (gates deploys only; never restarts a running service); not a safe restart-triggering liveness probe — see [`operations.md`](operations.md#health-readiness--graceful-shutdown). |
+| GET | `/api/readyz` | public | Readiness: not draining, and the DB answers `SELECT 1` — `503` if either fails. It checks nothing else, by decision (see [`operations.md`](operations.md#health-readiness--graceful-shutdown)); in particular it does **not** check identity (enforced at boot in production; `/api/health` reports the AID). |
 | GET | `/api/metrics` | public | Prometheus text format |
 
 ### Discovery
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest. Rewritten to `/api/well-known/aitp-manifest`. `Cache-Control: max-age=3600`. |
+| GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest. Rewritten to `/api/well-known/aitp-manifest`. `Cache-Control: max-age=3600`. Its `handshake_endpoint` is `<CP_BASE_URL>/api/aitp/handshake/hello` — required by the manifest schema, but the CP is not a handshake peer and that URL answers `404` (see [`operations.md` § Identity](operations.md#identity)). |
 | GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. `Cache-Control: max-age=60`. `503 REVOCATION_UNAVAILABLE` when the database cannot be read — see [Revocation](#revocation). |
 
 The CP's own manifest has an 86400s TTL and is kept fresh automatically — it rebuilds itself once it nears expiry, no restart required.
@@ -148,7 +148,7 @@ other top-level keys are fixture metadata):
 
 The CP verifies the manifest with the `aitp` SDK and returns `200 { token, expiresIn, aid }` — a single-use enrollment token valid for 5 minutes. Errors:
 
-- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, or `manifest.aid` is missing or does not start with `aid:`.
+- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, `manifest.aid` is missing or does not start with `aid:`, or the manifest verified but holds a value the registry cannot store: `display_name` over 256 characters (Unicode code points) or not a string, `aid` over 512 characters — or, with no `display_name`, over 256, since the AID is then stored as the display name — a NUL (U+0000) in `aid`, `display_name` or `handshake_endpoint`, a `handshake_endpoint` that is not a string, `offered_capabilities` that is not an array of NUL-free, well-formed strings, or an `expires_at` that is not a number of Unix seconds between years 0001 and 9999 (`0`, `null` or absent means no expiry). Rejected here so no token is minted for a manifest `POST /api/registry/agents` could never store. Checked after the expiry guard, so a manifest that fails both reports `MANIFEST_EXPIRED`.
 - `400 MANIFEST_EXPIRED` — the manifest is already past `expires_at`, or expires inside the 5-minute registration window. `POST /api/registry/agents` returns the same code for the same condition; both mean "re-issue with a longer TTL".
 - `400 BODY_INVALID` — the body is not JSON.
 - `503 SERVER_MISCONFIGURED` — the server has no usable `ENROLLMENT_SECRET` and cannot issue tokens to anyone. The body carries no configuration detail.
@@ -164,7 +164,7 @@ A `400` may also carry **`verifyCode`**, the `aitp` SDK's own machine-readable r
 
 Branch on `verifyCode` (or `code`), never on `error`. The value set is owned by the SDK's `verifyManifestJson` — see [aitp-rs Node SDK: Manifest verification](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification) (verified against `aitp` `^0.13.1`). It is a different set from `verifyRevocationList`'s, even where spellings overlap. How the CP maps it:
 
-- `verifyCode` is present **if and only if** the SDK rejected the manifest. It is absent when one of the CP's own guards rejected it (the `aid:` prefix check, the 5-minute window) or when the body never reached the SDK.
+- `verifyCode` is present **if and only if** the SDK rejected the manifest. It is absent when one of the CP's own guards rejected it (the `aid:` prefix check, the 5-minute window, the storable-values check) or when the body never reached the SDK.
 - SDK code `expired` maps to `code: MANIFEST_EXPIRED`; every other SDK code maps to `MANIFEST_INVALID`. So `MANIFEST_EXPIRED` arrives with `verifyCode: "expired"` (already past `expires_at`) or with no `verifyCode` (expires inside the registration window).
 - An SDK code the CP does not recognise is passed through verbatim — treat anything unknown as a generic "manifest verification failed". (The CP's `/api/metrics` counter folds unknown codes into an `other` label; see `src/lib/registry/enroll-metrics.ts`.)
 
@@ -176,14 +176,16 @@ Pass the enrollment token in `Authorization: Bearer <token>`. The body is the **
 
 Checks run in this order:
 
-1. Body not JSON, or no `manifest.aid` → `400 BODY_INVALID`. These are answered even on a misconfigured server.
+1. Body not JSON, JSON but not an object (`null`, an array, a string, a number), or no `manifest.aid` → `400 BODY_INVALID`. These are answered even on a misconfigured server.
 2. No usable `ENROLLMENT_SECRET` → `503 SERVER_MISCONFIGURED`. Your token is not the problem and is not consumed.
 3. Token invalid → `401 TOKEN_INVALID`: wrong scope, expired, `sub` not equal to `manifest.aid`, missing `jti`, malformed or badly signed, or not bound to this body. The token carries an `msh` claim, the SHA-256 (hex) of the exact `/enroll` request-body bytes, and this route recomputes it over *its* body — re-serialising the JSON (key order, whitespace) or sending a different manifest for the same AID changes the digest. This check runs before the `jti` is consumed, so a mismatch does not burn the token.
-4. The token's `jti` is consumed atomically. A second presentation returns `401 TOKEN_REPLAYED`.
-5. `manifest.expires_at` (Unix seconds) less than 5 minutes in the future → `400 MANIFEST_EXPIRED`.
-6. `manifest.extensions.namespace` present but not a string → `400 BODY_INVALID`.
+4. `X-Aitp-Namespace` header longer than 128 characters (Unicode code points) or containing a NUL (U+0000) → `400 BAD_REQUEST`. Runs before the `jti` is consumed, so fixing the header and retrying with the same token works — but send the retry with a **new** `Idempotency-Key` (or none): a `400` is stored against the key, so a retry with the same key replays the stored `400` without re-running the handler (see [Idempotency](#idempotency)).
+5. A manifest value the `agents` row cannot store → `400 BODY_INVALID`: the same rules `/enroll` applies before minting a token (`display_name` — or, when absent, `aid` — over 256 characters, `aid` over 512, a NUL in `aid`/`display_name`/`handshake_endpoint`, a non-string `handshake_endpoint`, `offered_capabilities` that is not an array of NUL-free, well-formed strings, or an `expires_at` outside Unix seconds for years 0001–9999). Since the token is bound to the exact `/enroll` body, only a token minted before `/enroll` applied these rules can reach this; it runs before the `jti` is consumed, so it does not burn the token — but the manifest is signed and token-bound, so the fix is a corrected manifest and a fresh enrollment.
+6. The token's `jti` is consumed atomically. A second presentation returns `401 TOKEN_REPLAYED`.
+7. `manifest.expires_at` (Unix seconds) less than 5 minutes in the future → `400 MANIFEST_EXPIRED`.
+8. `manifest.extensions.namespace` present but not a string, or (when no `X-Aitp-Namespace` header is sent) longer than 128 characters or containing a NUL → `400 BODY_INVALID`.
 
-Steps 5 and 6 run **after** the token has been consumed, so a client that hits either must fix the manifest and **re-enroll** — retrying with the same token returns `401 TOKEN_REPLAYED`. `/enroll` applies the same 5-minute guard first to spare you this, but the two routes read their own clocks, so a manifest near the boundary can pass enroll and fail here; and they disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
+Steps 7 and 8 run **after** the token has been consumed, so a client that hits either must fix the manifest and **re-enroll** — retrying with the same token returns `401 TOKEN_REPLAYED`. `/enroll` applies the same 5-minute guard first to spare you this, but the two routes read their own clocks, so a manifest near the boundary can pass enroll and fail here; and they disagree on `expires_at: 0` (enroll rejects it, this route treats it as absent).
 
 **Namespace** is taken from the `X-Aitp-Namespace` header (wins) or `manifest.extensions.namespace`, defaulting to `default`.
 
@@ -193,7 +195,7 @@ Response `201`: `{ "aid": "...", "displayName": "...", "registeredAt": "..." }`.
 
 #### `GET /api/registry/agents`
 
-Filters: `?capability=`, `?aid=`, `?displayName=` (or `display_name`), `?namespace=`, `?include_manifest=true`, `?limit=` (default 200, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`.
+Filters: `?capability=`, `?aid=`, `?displayName=` (or `display_name`), `?namespace=`, `?include_manifest=true`, `?limit=` (default 200, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. A NUL (U+0000) in any of the text filters returns `400 BAD_REQUEST`.
 
 > Without `?namespace=`, results span **all** namespaces by design. Namespaces are a control-plane scoping convention, not a protocol boundary — initial peer discovery is [operational and non-normative](https://agentidentitytrustprotocol.io/docs/discovery) in AITP. The CP enforces no implicit tenant isolation, so scope your queries with `?namespace=` if you need it.
 
@@ -224,7 +226,7 @@ Response `{ "agents": [...] }`. Each record:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/sessions` | API key | List handshake sessions: the newest **200** by creation time, no pagination (`limit`/`offset` are ignored). Filters: `?status=` (exact match, not validated — an unknown value returns an empty list), `?runId=` (or `run_id`), `?aid=` (either side) |
+| GET | `/api/sessions` | API key | List handshake sessions, newest first by creation time (ties by `sessionId`). `?limit=` (default **200**, max 1000; non-numeric → default, out-of-range clamped; an empty `?limit=` is clamped to `1`) and `?offset=` (default 0; negative or non-numeric → 0). Filters: `?status=` (exact match, not validated — an unknown value returns an empty list), `?runId=` (or `run_id`), `?aid=` (either side); a NUL character in any filter → `400 BAD_REQUEST` |
 | GET | `/api/sessions/:sessionId` | API key | Fetch one session + its events: `{ session, events }` |
 | GET | `/api/sessions/:sessionId/export` | API key | Bundle session + projected TCTs + events. `?format=json\|jsonl` |
 | GET | `/api/sessions/:sessionId/replay` | API key | Ordered event stream for one session: `{ sessionId, count, events }`. Filters: `?since=`, `?until=`, `?limit=` (default 1000, max 10000). Malformed `since`/`until` → `400 BAD_REQUEST`. An unknown `sessionId` is a `200` with no events, not a `404`. |
@@ -236,7 +238,7 @@ Sessions are **projected from events** — the CP does not see handshake traffic
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | POST | `/api/events` | API key (open in dev) | Ingest a batch of audit events |
-| GET | `/api/events/history` | API key | Query persisted events. Filters: `?type=`, `?aid=`, `?sessionId=` (or `session_id`), `?runId=` (or `run_id`), `?since=`, `?until=`, `?limit=` (default 100, max 1000), `?offset=` |
+| GET | `/api/events/history` | API key | Query persisted events. Filters: `?type=`, `?aid=`, `?sessionId=` (or `session_id`), `?runId=` (or `run_id`), `?since=`, `?until=`, `?limit=` (default 100, max 1000), `?offset=`. A NUL in a text filter → `400 FILTER_INVALID` |
 | GET | `/api/events/stream` | API key | Server-Sent Events (live + backlog). Filters: `?type=`, `?runId=` (or `run_id`), `?aid=` |
 
 #### `POST /api/events` body
@@ -259,17 +261,32 @@ Accepts either a bare array or `{ "events": [...] }`. Each event:
 
 No field is required. Snake_case and playground aliases are accepted, defaults are applied (e.g. `type` → `"unknown"`, `source` → `"playground"`, a missing `payload` → the whole event object), and items that are not JSON objects are silently dropped — see [`events.md`](events.md#ingest-normalization) for the full normalization. Unknown event types are stored as-is (never `4xx`); only a known set drives projections and webhooks.
 
-The CP assigns every stored event a fresh `id`; a client-supplied `id` is ignored and is **not** a de-duplication key. Re-sending a batch without an `Idempotency-Key` stores the events again.
+The CP assigns every stored event's `id` (a client-supplied `id` is never used as the id). An event with a valid `ts` gets an id derived from its content and the caller's API key, so the same producer re-sending the same event — a retry, or a superset batch that repeats earlier events — is recognised as a **duplicate** (so give genuinely repeated, otherwise identical events a distinguishing field): stored once, streamed once, delivered to webhooks once. An event without a valid `ts` gets a random id and is stored again on every send. Recipe, caveats (at-most-once fan-out if the CP dies between the insert and the fan-out; a re-send after retention deleted the row is stored again) in [`events.md`](events.md#event-ids-and-de-duplication).
 
-Response `200`: `{ "ingested": <n> }`, where `n` counts the object items accepted.
+Response `200`: `{ "ingested": <n>, "dropped": <m>, "errors": [...], "inserted": <i>, "duplicates": <d> }`. All five fields are always present.
+
+- `ingested` — the items that passed per-item validation and were handed to the event store (non-object items and dropped items are not counted). Always `inserted + duplicates`.
+- `inserted` — of those, the events newly stored by this request. Only these are streamed over SSE and sent to webhooks.
+- `duplicates` — of those, the events that were already stored (same content-derived id) or repeated earlier in the same batch. They are still run through the session/TCT projections (idempotently), but not stored, streamed or delivered again.
+- `dropped` — object items refused by per-item validation (below). The rest of the batch is still ingested; a dropped item is not stored, streamed, projected or sent to webhooks. Non-object items are skipped silently and are **not** counted here.
+- `errors` — one `{ "index", "field", "reason" }` per dropped item, **at most 20** (`dropped` is the full count). `index` is the item's position in the array you sent (counting non-object items); `field` names the normalized field (`type`, `aidA`, `aidB`, `sessionId`, `runId`, `source`, `grants`, `payload` — e.g. an over-long `session_id` reports `sessionId`); `reason` is human prose and never echoes your data.
+
+Per-item validation (after [normalization](events.md#ingest-normalization)) drops an item when:
+
+- `type` or `source` is over **128** characters, `aidA`/`aidB` over **512**, or `sessionId`/`runId` over **255** (counted in Unicode code points, the unit the columns use);
+- any of those text fields, any `grants` entry, or any key or string value anywhere in `payload` contains a NUL character (U+0000) — Postgres cannot store it;
+- any `grants` entry, or any key or string value anywhere in `payload`, contains a lone (unpaired) UTF-16 surrogate, e.g. the JSON escape `"\ud800"` with no low surrogate after it — `payload` and `grants` are `jsonb`, which rejects it (`reason`: `"<field> contains a lone UTF-16 surrogate"`). Well-formed surrogate pairs (emoji and other astral characters) are fine. When `payload` is absent the whole event is the payload, so this then covers every field of the event. (In the text columns of an item that has its own `payload`, a lone surrogate is not a drop: it is stored as U+FFFD.)
+- `payload` is nested more than **64** levels deep (`reason` says "too deep").
+
+A `ts` that is out of range (a number beyond ±8.64×10¹⁵ ms, or one that renders outside years 0001–9999) is not a drop: like an unparseable `ts`, it is replaced with the ingest time. Dropped items are logged server-side as counts only and counted in the `events_dropped_total` metric ([`operations.md`](operations.md#metrics)). With an `Idempotency-Key`, a replay returns the same `dropped`/`errors` report and does not count the drops in `events_dropped_total` again (the handler does not re-run).
 
 Limits: a single batch must be ≤ 256 KiB on the wire and contain ≤ 500 events, and each event's `payload` must be ≤ 65,536 **characters** when serialized with `JSON.stringify` (UTF-16 code units, not bytes; when `payload` is absent the whole event is measured). Over-cap requests return `413 PAYLOAD_TOO_LARGE` (the offending `eventType` is included when a single event is too big). Split large batches into multiple requests.
 
-A body that is not JSON is `400 BODY_INVALID`. A JSON body that is neither an array nor an object with an `events` member (or has `"events": null`) ingests nothing and answers `200 { "ingested": 0 }`. A body whose `events` member is present but is not an array (a string, number, boolean or object) currently answers `500` — except that the route checks `events.length` against the 500-event cap before anything else, so a string longer than 500 characters, or an object with a numeric `length` over 500, answers `413 PAYLOAD_TOO_LARGE` instead. An item with a value the database cannot store (for example a `type` over 128 characters, an AID over 512, a `sessionId`/`runId` over 255, or a NUL character) also answers `500`, and the whole batch is rejected.
+A body that is not JSON is `400 BODY_INVALID`. A body whose `events` member is present and not `null` but is not an array (a string, number, boolean or object — including one with a numeric `length`) is `400 BODY_INVALID` (`"events must be an array"`), checked before the 500-event cap; like any `400` it is stored against an `Idempotency-Key`, so resend the corrected body with a new key. A JSON body that is neither an array nor an object with an `events` member (or has `"events": null`) ingests nothing and answers `200 { "ingested": 0, "dropped": 0, "errors": [], "inserted": 0, "duplicates": 0 }`. The `413` caps above stay whole-batch: a batch with one over-cap payload is refused entirely, even if that item would also have been dropped.
 
 #### `GET /api/events/history` response
 
-`{ "events": [...], "count": <n> }`. Only `since` and `until` are validated: an unparseable value returns `400 FILTER_INVALID`. A non-numeric `limit` or `offset` falls back to the default rather than erroring, and `limit` is clamped to 1–1000. An empty `?limit=` is not "malformed": it reads as `0` and is clamped to `1`.
+`{ "events": [...], "count": <n> }`. An unparseable `since` or `until`, or a NUL (U+0000) in `type`, `aid`, `sessionId` or `runId`, returns `400 FILTER_INVALID`. A non-numeric `limit` or `offset` falls back to the default rather than erroring, and `limit` is clamped to 1–1000. An empty `?limit=` is not "malformed": it reads as `0` and is clamped to `1`.
 
 #### `GET /api/events/stream`
 
@@ -295,7 +312,7 @@ retry: 15000
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/audit` | API key | Admin audit log (who did what when), newest first. Filters: `?limit=` (default 100, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. Response `{ entries, count }`. |
+| GET | `/api/audit` | API key | Admin audit log (who did what when), newest first. Filters: `?limit=` (default 100, max 1000; an empty `?limit=` is clamped to `1`), `?offset=`. Response `{ entries, count }`. Entry `details` never carry a webhook secret: a `webhook.update` that sets it records `secretRotated: true`. |
 
 This is the **admin action** log (registrations, revocations, webhook changes), distinct from the telemetry event store served by `/api/events/history`.
 
@@ -309,7 +326,7 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 { "jti": "uuid", "reason": "operator action", "revokedAt": "2026-06-01T00:00:00Z" }
 ```
 
-`jti` must be a UUID (v1–5) or `400 JTI_INVALID`. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason }`.
+`jti` must be a UUID (v1–5) or `400 JTI_INVALID`. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input — including a body that is not JSON or is JSON but not an object (`null`, an array, a string, a number) — → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason }`.
 
 Recording a revocation also flips the matching `issued_tcts.revoked` flag, cascades to descendant delegations, and emits a `tct.revoked` event (and webhook).
 
@@ -317,7 +334,7 @@ Recording a revocation also flips the matching `issued_tcts.revoked` flag, casca
 
 Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits: **`revokedAt` must fall inside a bounded date range** (as a UTC instant — the epoch is the lower bound, because the signed list carries `revoked_at` as seconds since it), and **`reason` must not contain a NUL (U+0000)** (other control characters are fine). The exact bounds and their reasons are in [`openapi.yaml`](../openapi.yaml), `RevocationEntryRequest`.
 
-A genuine database fault is a framework `500` with no `{error, code}` body, per [Conventions](#conventions). If you use `Idempotency-Key` here, note that the `BODY_INVALID` for a non-JSON body is never stored, while the field-level `400`s are.
+A genuine database fault is a framework `500` with no `{error, code}` body, per [Conventions](#conventions). If you use `Idempotency-Key` here, note that the `BODY_INVALID` for a non-JSON or non-object body is never stored, while the field-level `400`s are.
 
 **List freshness.** `GET /.well-known/aitp-revocation-list` is served from a per-process cache that re-reads the database and re-signs at most every **60 seconds**. A `POST` here invalidates that cache only on the replica that handled it, so other replicas can serve a list without the new entry for up to 60 seconds. `REVOCATION_LIST_TTL_SECS` is something else: the validity window of each signed list (its `expires_at`). The HTTP response carries `Cache-Control: max-age=60`.
 
@@ -344,11 +361,13 @@ A genuine database fault is a framework `500` with no `{error, code}` body, per 
 
 `url` must be `http(s)` — `https` only in production — and pass the SSRF guard (private/loopback/link-local ranges and hosts outside `WEBHOOK_URL_ALLOWLIST` are rejected `400 URL_NOT_ALLOWED`); a non-string `url` is `400 BODY_INVALID`. An empty/omitted `events` array means **all deliverable event types**. Only a fixed set of event types is deliverable — see [`events.md`](events.md#webhook-deliverable-events). If `secret` is omitted the server generates one. The `201` response is the **only** place the secret is returned (`{ id, url, events, secret, active, createdAt }`); store it then.
 
-`PATCH /api/webhooks/:id` applies only the fields present (a new `url` passes the same guard) and answers `200 { id, url, events, active, updatedAt }`. A `:id` that is not a UUID currently answers `500` on PATCH and DELETE rather than `404`.
+`400 BODY_INVALID` on POST and PATCH when: the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `secret` is longer than 255 characters (Unicode code points); or `url`, `secret` or any `events` entry contains a NUL (U+0000), or an `events` entry holds a lone UTF-16 surrogate (e.g. `"\ud800"`, which `jsonb` cannot store). These are checked before the SSRF guard.
+
+`PATCH /api/webhooks/:id` applies only the fields present (a new `url` passes the same guard) and answers `200 { id, url, events, active, updatedAt }`. On PATCH and DELETE a `:id` that is not a UUID is `400 ID_INVALID` (see [Conventions](#conventions)); an unknown UUID is `404 NOT_FOUND`. A PATCH that sets `secret` is recorded in the admin audit log as `secretRotated: true` — the secret itself is never written there. (Releases before this one did write it; the `0008` migration scrubs those rows, but **rotate any webhook secret that was ever set via PATCH**, since it may already have been read through `GET /api/audit`.)
 
 Deliveries are POSTed with body `{ deliveryId, eventType, payload, enqueuedAt }` (`payload` is the full event record) and headers `X-Aitp-Signature: sha256=<hex>` — an HMAC-SHA256 over the exact body bytes using the webhook's `secret` — plus `X-Aitp-Event` (the event type) and `X-Aitp-Delivery` (the delivery id). The body is fixed at enqueue time, so every retry of a delivery carries the same bytes and signature. Retries follow `WEBHOOK_RETRY_ATTEMPTS` (default 3) with exponential backoff; a circuit breaker trips a repeatedly-failing endpoint open (thresholds configurable via `WEBHOOK_BREAKER_FAILURE_THRESHOLD` / `WEBHOOK_BREAKER_RESET_MS` — see [`operations.md`](operations.md#webhook-delivery)).
 
-Circuit-breaker state is held **per process**: each replica has its own breaker per webhook, and the snapshot and reset routes see only the replica that served them. Both routes accept any `:id` — an unknown id returns a fresh `closed` snapshot rather than `404`, and a reset of an unknown id still writes an admin audit entry.
+Circuit-breaker state is held **per process**: each replica has its own breaker per webhook, and the snapshot and reset routes see only the replica that served them. Both routes answer `400 ID_INVALID` for a `:id` that is not a UUID. Any UUID is accepted otherwise — an unknown id returns a fresh `closed` snapshot rather than `404`, and a reset of an unknown id still writes an admin audit entry.
 
 ### Dashboard JSON
 
@@ -363,7 +382,7 @@ The CP **observes** TCTs from agent-reported `tct.issued` and `handshake.complet
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/tcts` | API key | Query observed TCTs. Filters: `?issuer=`, `?subject=`, `?audience=`, `?capability=`, `?sessionId=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=` |
+| GET | `/api/tcts` | API key | Query observed TCTs. Filters: `?issuer=`, `?subject=`, `?audience=`, `?capability=`, `?sessionId=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`. A NUL in a text filter → `400 BAD_REQUEST` |
 
 By default the projection records reported claims without checking any signature. With `OBSERVED_ARTIFACT_VERIFICATION=strict`, reports whose signed token does not verify (including claims-only reports) are not projected, so they never appear in `/api/tcts` or `/api/delegations`; `warn` projects every report and logs a warning only for one that carries a signed token which fails to verify — a claims-only report is projected without a log line. See [`operations.md`](operations.md#observed-artifact-verification).
 
@@ -373,42 +392,43 @@ By default the projection records reported claims without checking any signature
 |---|---|---|---|
 | GET | `/api/delegations` | API key | Query delegations |
 
-`?root_jti=<uuid>` (or `rootJti`) returns the whole descendant tree rooted at that JTI via a recursive CTE, oldest first; when it is present **every other filter, `limit` and `offset` are ignored**. Otherwise: `?parent_jti=` (or `parentJti`), `?delegator=`, `?delegatee=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`, newest first. A malformed `root_jti`/`parent_jti` (not a UUID) returns `400 BAD_REQUEST`.
+`?root_jti=<uuid>` (or `rootJti`) returns the whole descendant tree rooted at that JTI via a recursive CTE, oldest first; when it is present **every other filter, `limit` and `offset` are ignored**. Otherwise: `?parent_jti=` (or `parentJti`), `?delegator=`, `?delegatee=`, `?active=true`, `?limit=` (default 100, max 1000), `?offset=`, newest first. A malformed `root_jti`/`parent_jti` (not a UUID), or a NUL (U+0000) in `delegator`/`delegatee`, returns `400 BAD_REQUEST`.
 
 ### Trust anchors (OIDC)
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/trust-anchors` | API key | List. `?namespace=` filter |
-| POST | `/api/trust-anchors` | API key | Create. Body: `{ issuerUrl, namespace?, jwksUrl?, label? }`. `400 BODY_INVALID` if `issuerUrl` is not an `http(s)://` string or the body is not JSON. `409 ALREADY_EXISTS` (with `existing: { id }`) if `(namespace, issuerUrl)` exists. A `namespace` or `label` longer than 128 characters currently answers `500`. |
+| GET | `/api/trust-anchors` | API key | List. `?namespace=` filter (a NUL in it is `400 BAD_REQUEST`) |
+| POST | `/api/trust-anchors` | API key | Create. Body: `{ issuerUrl, namespace?, jwksUrl?, label? }`. `400 BODY_INVALID` if the body is not a JSON object, `issuerUrl` or a non-empty `jwksUrl` is not an `http(s)://` string, or a field is not storable (limits below). `409 ALREADY_EXISTS` (with `existing: { id }`) if `(namespace, issuerUrl)` exists. |
 | GET | `/api/trust-anchors/:id` | API key | Fetch one (without `addedBy`) |
-| PATCH | `/api/trust-anchors/:id` | API key | Update `issuerUrl` / `jwksUrl` / `label` (without `addedBy` in the response). `issuerUrl` is not checked for `http(s)`. Changing `issuerUrl` to one another anchor in the namespace already has, or a `label` longer than 128 characters, currently answers `500`. |
+| PATCH | `/api/trust-anchors/:id` | API key | Update `issuerUrl` / `jwksUrl` / `label` (without `addedBy` in the response; `namespace` is not patchable; a field of the wrong type is ignored). `400 BODY_INVALID` if the body is not a JSON object, a string `issuerUrl` or a non-empty `jwksUrl` is not an `http(s)://` URL, or a field is not storable (limits below). `409 ALREADY_EXISTS` (with `existing: { id }`) if the new `issuerUrl` is already used by another anchor in this anchor's namespace; nothing is changed. Clears the cached JWKS when `issuerUrl` or `jwksUrl` actually changes (see JWKS route below). |
 | DELETE | `/api/trust-anchors/:id` | API key | Remove (`204`) |
 | GET | `/api/trust-anchors/:id/jwks` | API key | The CP-cached JWKS for the anchor, for agents that cannot reach the issuer |
 
-On `GET`/`PATCH`/`DELETE /api/trust-anchors/:id`, an `:id` that is not a UUID currently answers `500`; only the `/jwks` route validates it (`400 ID_INVALID`).
+On every `/api/trust-anchors/:id` route (including `/jwks`), an `:id` that is not a UUID is `400 ID_INVALID` (see [Conventions](#conventions)); an unknown UUID is `404 NOT_FOUND`.
+
+**Field limits** (POST and PATCH, `400 BODY_INVALID` when exceeded): `namespace` and `label` at most 128 characters (Unicode code points); `issuerUrl` at most 2048 characters **and** 2048 UTF-8 bytes (it sits in a unique index whose row limit is in bytes); `jwksUrl` at most 2048 characters; none may contain a NUL (U+0000). An empty-string `jwksUrl` means "no explicit JWKS URL" and is stored as `null` (on PATCH it clears the field, like `null`).
 
 **JWKS route.** The cache is filled by a background refresher (see [`operations.md`](operations.md#trust-anchor-jwks-refresh)), never by this request.
 
 - `200` returns the cached JWKS with `Cache-Control: max-age=300` and `X-JWKS-Cached-At` (the cache time).
 - `503 JWKS_NOT_CACHED` (body includes `issuerUrl`; headers `Retry-After: 60`, `Cache-Control: no-store`) until the refresher has fetched the keyset once. If it never succeeds — the issuer is unreachable, `JWKS_REFRESH_ENABLED=false`, or the URL is `http://` in production — this persists.
 - After one successful fetch, later failures do **not** clear the cache: the route keeps serving the last good keyset with `200`. Check `X-JWKS-Cached-At` to judge its age.
-- A `PATCH` that changes `issuerUrl` or `jwksUrl` does not clear the cache, so the old issuer's keyset is served until the refresher next treats the entry as stale (`JWKS_STALE_AFTER_MS`).
-- `400 ID_INVALID` (not a UUID), `404 NOT_FOUND`.
+- A `PATCH` that **actually changes** `issuerUrl` or `jwksUrl` clears the cache (`jwks_cache` and `jwks_cached_at`) in the same statement, so the old issuer's keys are never served for the new URLs. The route then answers `503 JWKS_NOT_CACHED` until the refresher's next pass fetches the new keyset — up to `JWKS_REFRESH_INTERVAL_MS` (default 15 min), longer if that fetch fails. The PATCH does not trigger a fetch itself. A `PATCH` that only changes `label`, or resends the current URLs unchanged (as the ui-console does on every edit; `""` and `null` are the same `jwksUrl`), keeps the cache. A refresh that was already in flight when the URLs changed discards the keyset it fetched for the old URLs.
+- `400 ID_INVALID` (not a UUID — syntax only, any version), `404 NOT_FOUND`.
 
 ### Pinned keys
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup (`namespace` defaults to `default`) |
+| GET | `/api/pinned-keys` | API key | List. `?namespace=` filter, or `?aid=&namespace=` for a single-row lookup (`namespace` defaults to `default`). A NUL in either → `400 BAD_REQUEST`. |
 | POST | `/api/pinned-keys` | API key | Upsert. Body: `{ aid, pubkey, namespace?, label?, expiresAt? }`. `201` whether the row was created or replaced. |
-| DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid` → `400 BAD_REQUEST`. |
+| DELETE | `/api/pinned-keys?namespace=&aid=` | API key | Remove (`204`). Missing `aid`, or a NUL in `aid`/`namespace` → `400 BAD_REQUEST`. |
 
-`POST` returns `400 BODY_INVALID` when `aid` is missing or empty, `pubkey` is not a 43-character base64url Ed25519 key, `label` is over 128 characters or contains a NUL, or `expiresAt` is unparseable or outside the writable `timestamptz` window (exact bounds in [`openapi.yaml`](../openapi.yaml); a past instant is allowed and retires the pin). Behaviour to be aware of:
+`POST` returns `400 BODY_INVALID` when the body is not JSON or is JSON but not an object (`null`, an array, a string, a number); `aid` is missing, empty, longer than 512 characters or contains a NUL; `namespace` is longer than 128 characters or contains a NUL; `pubkey` is not a 43-character base64url Ed25519 key; `label` is neither a string nor `null`, or is over 128 characters or contains a NUL; or `expiresAt` is neither a string nor `null`, or is unparseable or outside the writable `timestamptz` window (exact bounds in [`openapi.yaml`](../openapi.yaml); a past instant is allowed and retires the pin). Lengths count Unicode code points; other control characters (newline, tab) are allowed. Behaviour to be aware of:
 
-- The upsert **replaces** `pubkey`, `label` and `expiresAt` on an existing `(namespace, aid)`: omitting `label` or `expiresAt` clears them.
-- A `label` or `expiresAt` that is not a string is treated as absent (stored as `null`), not rejected.
-- An `aid` longer than 512 characters, an `aid` containing a NUL, or a `namespace` longer than 128 characters currently answers `500`.
+- The upsert **replaces** `pubkey`, `label` and `expiresAt` on an existing `(namespace, aid)`: sending `null` for `label` or `expiresAt` clears it, and so does omitting it (full-replace semantics, intended).
+- A `namespace` that is not a string, or is empty, means `default`.
 
 ## Headers
 

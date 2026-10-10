@@ -118,6 +118,32 @@ describe('EnrollmentService', () => {
     expect(code).not.toBe('');
   });
 
+  it.each([
+    ['a 257-character display_name', 'd'.repeat(257)],
+    ['a NUL in display_name', 'a\u0000b'],
+    ['a NUL in an offered capability', undefined],
+  ])(
+    'refuses to mint a token for a SIGNED manifest with %s (the SDK accepts it; the agents row cannot hold it)',
+    (_label, displayName) => {
+      const agent = AitpAgent.generate();
+      const manifest = agent.buildManifest({
+        displayName: displayName ?? 'ok',
+        handshakeEndpoint: 'https://agent.example.com/handshake',
+        offeredCaps: displayName === undefined ? ['a\u0000b'] : ['demo.echo'],
+        ttlSecs: 3600,
+      });
+      let caught: unknown;
+      try {
+        service.verifyAndIssueToken(manifest);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(ManifestRejectedError);
+      expect((caught as ManifestRejectedError).cpCode).toBe('MANIFEST_INVALID');
+      expect(sdkVerifyCode(caught)).toBeUndefined();
+    },
+  );
+
   it('rejects a token signed with a different secret', () => {
     const manifest = buildManifest();
     const other = new EnrollmentService(

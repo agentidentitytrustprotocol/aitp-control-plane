@@ -24,14 +24,24 @@ export async function ingestOneEvent(
   await db.insert(auditEvents).values(toRow(record)).onConflictDoNothing();
 }
 
+/**
+ * Insert a batch in ONE multi-row INSERT and return the ids of the rows that
+ * were actually written. A record whose id already exists (a re-sent event
+ * under the content-derived id recipe, src/lib/audit/event-id.ts) is skipped
+ * by `ON CONFLICT DO NOTHING` and is absent from the result — `RETURNING`
+ * yields only inserted rows. With several replicas the primary key decides:
+ * exactly one concurrent insert of an id gets it back.
+ */
 export async function ingestEvents(
   records: AuditEventRecord[],
-): Promise<void> {
-  if (records.length === 0) return;
-  await db
+): Promise<string[]> {
+  if (records.length === 0) return [];
+  const rows = await db
     .insert(auditEvents)
     .values(records.map(toRow))
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ id: auditEvents.id });
+  return rows.map((r) => r.id);
 }
 
 export interface HistoryFilters {

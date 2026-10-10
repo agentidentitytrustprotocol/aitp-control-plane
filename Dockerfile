@@ -22,23 +22,23 @@ ENV NEXT_OUTPUT=standalone
 # Throwaway placeholders giving `next build` (which evaluates route modules
 # under NODE_ENV=production) concrete values for anything read at module scope.
 #
-# They are NOT satisfying a boot-time config validation. There IS one now —
-# src/instrumentation.ts exits non-zero under NODE_ENV=production when
-# ENROLLMENT_SECRET is unusable (issue #99) — but it is a BOOT check and this is
-# a BUILD: Next does not run the instrumentation hook during a production build
+# They are NOT satisfying a boot-time config validation. There ARE boot checks
+# now — src/instrumentation.ts exits non-zero under NODE_ENV=production when
+# ENROLLMENT_SECRET is unusable (issue #99) or CP_AID_SEED_HEX is missing or does
+# not decode to 32 bytes — but they are BOOT checks and this is a BUILD: Next
+# does not run the instrumentation hook during a production build
 # (registerInstrumentation() in
 # next/dist/server/lib/router-utils/instrumentation-globals.external.js returns
 # early on NEXT_PHASE=phase-production-build). Everything
 # else here is lazier still: src/lib/config.ts only `console.warn`s,
-# EnrollmentService is constructed on first use, and CP_AID_SEED_HEX's production
-# throw lives inside initCpIdentity(), reached from a handler rather than at
-# module scope.
+# EnrollmentService is constructed on first use, and the CP identity is built by
+# initCpIdentity(), reached from a handler rather than at module scope.
 #
 # Re-measured after that check landed: `next build` with NEXT_OUTPUT=standalone,
 # NODE_ENV=production and ALL of these unset exits 0 and builds every route, so
 # none of them is load-bearing for the build. They are kept as belt-and-braces so
 # the build never depends on that staying true — and note the runner stage below
-# sets NODE_ENV=production, so the boot check DOES apply to every container
+# sets NODE_ENV=production, so the boot checks DO apply to every container
 # started from this image, where the real value must be supplied.
 #
 # These are NOT real secrets and are overridden by the runtime

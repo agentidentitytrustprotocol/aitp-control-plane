@@ -26,7 +26,7 @@
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { eq, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { trustAnchors } from '../db/schema';
 import { config } from '../config';
@@ -89,10 +89,30 @@ export async function refreshStaleJwks(): Promise<number> {
     for (const anchor of anchors) {
       try {
         const jwks = await fetchJwks(anchor.issuerUrl, anchor.jwksUrl);
-        await db
+        // Write only if the anchor still has the URLs this keyset was fetched
+        // from. A PATCH that changed issuer_url/jwks_url while the fetch was in
+        // flight cleared the cache; an unconditional write would repopulate it
+        // with the OLD issuer's keys and a fresh timestamp (served until it
+        // goes stale). A skipped write is picked up by the next pass, since
+        // the PATCH left jwks_cached_at NULL.
+        const written = await db
           .update(trustAnchors)
           .set({ jwksCache: jwks, jwksCachedAt: new Date().toISOString() })
-          .where(eq(trustAnchors.id, anchor.id));
+          .where(
+            and(
+              eq(trustAnchors.id, anchor.id),
+              eq(trustAnchors.issuerUrl, anchor.issuerUrl),
+              sql`${trustAnchors.jwksUrl} IS NOT DISTINCT FROM ${anchor.jwksUrl}::text`,
+            ),
+          )
+          .returning({ id: trustAnchors.id });
+        if (written.length === 0) {
+          logger.info(
+            { issuerUrl: anchor.issuerUrl, anchorId: anchor.id },
+            'jwks-refresher: anchor URLs changed (or anchor deleted) during refresh; keyset discarded',
+          );
+          continue;
+        }
         refreshed += 1;
       } catch (err) {
         // The previous cache (if any) is left in place; it is retried next pass.

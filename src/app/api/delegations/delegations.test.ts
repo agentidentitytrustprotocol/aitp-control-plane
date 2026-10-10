@@ -226,3 +226,17 @@ describe('GET /api/delegations — list path filters', () => {
     ]);
   });
 });
+
+describe('GET /api/delegations — NUL in text filters (P1b)', () => {
+  it.each(['delegator', 'delegatee'])(
+    'answers 400 BAD_REQUEST for NUL in ?%s and never queries',
+    async (name) => {
+      const res = await GET(makeReq(`?${name}=a%00b`));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('BAD_REQUEST');
+      expect(body.error).toBe(`${name} must not contain a NUL character`);
+      expect(limitArgs).toHaveLength(0);
+    },
+  );
+});

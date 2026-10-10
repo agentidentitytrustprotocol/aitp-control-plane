@@ -60,8 +60,8 @@ rate-limit, retention, and telemetry subsystems behave.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `PORT` | no | `4000` | HTTP listen port |
-| `CP_BASE_URL` | no | `http://localhost:4000` | Public base URL used in the CP's own manifest |
-| `CP_AID_SEED_HEX` | **prod** | empty | 32-byte hex seed for the CP's own Ed25519 identity. Outside production an unset seed is replaced by a random one on every boot, so the CP AID changes on restart. In production it is **not** a boot check: the process starts, and `/api/health`, `/.well-known/aitp-manifest` and the revocation list answer `500` until it is set — see [operations.md](docs/operations.md#identity). |
+| `CP_BASE_URL` | recommended (prod) | `http://localhost:4000` | Public `https://` base URL used in the CP's own manifest. In production an unset, loopback or non-https value logs a boot warning (not fatal). |
+| `CP_AID_SEED_HEX` | **prod** | empty | 32-byte hex seed (64 hex chars) for the CP's own Ed25519 identity. Outside production an unset seed is replaced by a random one on every boot, so the CP AID changes on restart. **Checked at boot: with `NODE_ENV=production` a missing seed, or one that does not decode to 32 bytes, makes the process print one fatal line and exit 1.** Trailing non-hex characters (or a 65th hex digit) after the 64 hex digits are accepted with the same AID (boot warning only) — see [operations.md](docs/operations.md#identity). |
 | `DATABASE_URL` | yes | none at runtime (`.env.example` and `drizzle-kit` use `postgres://postgres:postgres@localhost:5432/aitp_control_plane`) | Postgres connection string. The runtime pool passes it straight to `pg`, so leaving it unset falls back to `pg`'s own `PG*` defaults rather than this URL. |
 | `DB_POOL_MAX` | no | `20` | Connection pool size |
 | `API_KEYS` | **prod** | empty | Comma-separated allowlist. Empty in prod returns 503 on gated routes (fail-safe). Empty in dev disables auth. |
@@ -71,7 +71,7 @@ rate-limit, retention, and telemetry subsystems behave.
 | `REVOCATION_FAIL_MODE` | no | `fail_closed` | What the revocation list does when the DB read fails. `fail_closed` answers `503 REVOCATION_UNAVAILABLE`; `serve_stale` re-serves the last successfully-read list for up to `REVOCATION_MAX_STALENESS_SECS`, then `503`. It never signs an empty list. Unrecognised values mean `fail_closed`. |
 | `REVOCATION_MAX_STALENESS_SECS` | no | `300` | `serve_stale` only: max age of the re-served list, clamped to `REVOCATION_LIST_TTL_SECS`. |
 | `LOG_LEVEL` | no | `info` in production, `debug` otherwise | Pino log level: trace / debug / info / warn / error / fatal. Outside production logs go through `pino-pretty`; in production they are JSON. |
-| `NODE_ENV` | **prod** | unset (`next start` and the image set `production`) | Every production safeguard keys on the exact (trimmed) value `production`: `API_KEYS` fail-closed, fatal `ENROLLMENT_SECRET` check, required `CP_AID_SEED_HEX`, https-only webhook URLs, JSON logs. Any value other than `production`, `development` or `test` logs an error at boot naming what is inactive — set `production` for staging too. See [operations.md](docs/operations.md#authentication--exposure). |
+| `NODE_ENV` | **prod** | unset (`next start` and the image set `production`) | Every production safeguard keys on the exact (trimmed) value `production`: `API_KEYS` fail-closed, fatal `ENROLLMENT_SECRET` and `CP_AID_SEED_HEX` boot checks, https-only webhook URLs, JSON logs. Any value other than `production`, `development` or `test` logs an error at boot naming what is inactive — set `production` for staging too. See [operations.md](docs/operations.md#authentication--exposure). |
 
 **Webhooks & SSE**
 

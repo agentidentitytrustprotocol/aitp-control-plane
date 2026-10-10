@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { assertEnrollmentSecretUsable } from './enrollment-config';
+import { checkManifestColumns } from './manifest-columns';
 import { ManifestRejectedError, markSdkVerifyFailure } from './verify-error';
 
 // Same 5-min window as src/app/api/registry/agents/route.ts, so a caller does
@@ -145,6 +146,16 @@ export class EnrollmentService {
           'MANIFEST_EXPIRED',
         );
       }
+    }
+    // A manifest the `agents` row cannot hold (a `display_name` over 256
+    // characters, a NUL in a stored string, ...) verifies fine, and minting a
+    // token for it only moved the failure to registration — where it burned
+    // the token's `jti` and answered 500. Rejected here, before the token
+    // exists. MANIFEST_INVALID like the aid guard above: the SDK accepted it,
+    // we did not, and the route counts it under the `none` metric label.
+    const columnProblem = checkManifestColumns(manifest);
+    if (columnProblem !== null) {
+      throw new ManifestRejectedError(columnProblem, 'MANIFEST_INVALID');
     }
     const now = Math.floor(Date.now() / 1000);
     const payload: EnrollmentPayload = {

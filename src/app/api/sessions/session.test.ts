@@ -9,6 +9,9 @@ import { jest } from '@jest/globals';
 
 const recorded: { kind: string; args: unknown[] }[] = [];
 const orCalls: unknown[][] = [];
+let orderByArgs: unknown[] = [];
+let lastLimit: number | undefined;
+let lastOffset: number | undefined;
 let sessionsToReturn: unknown[] = [];
 
 jest.mock('drizzle-orm', () => {
@@ -30,8 +33,18 @@ jest.mock('@/lib/db', () => {
     recorded.push({ kind: 'select.where', args: [arg] });
     return selectChain;
   };
-  selectChain.orderBy = () => selectChain;
-  selectChain.limit = () => Promise.resolve(sessionsToReturn);
+  selectChain.orderBy = (...args: unknown[]) => {
+    orderByArgs = args;
+    return selectChain;
+  };
+  selectChain.limit = (n: number) => {
+    lastLimit = n;
+    return selectChain;
+  };
+  selectChain.offset = (n: number) => {
+    lastOffset = n;
+    return Promise.resolve(sessionsToReturn);
+  };
   return { db: { select: () => selectChain } };
 });
 
@@ -46,6 +59,8 @@ beforeEach(() => {
   recorded.length = 0;
   orCalls.length = 0;
   sessionsToReturn = [];
+  lastLimit = undefined;
+  lastOffset = undefined;
 });
 
 describe('GET /api/sessions (Plan Bug 1)', () => {
@@ -74,4 +89,37 @@ describe('GET /api/sessions (Plan Bug 1)', () => {
     await GET(makeReq('?aid=aid:pubkey:X&status=complete&run_id=abc'));
     expect(orCalls.length).toBe(1);
   });
+});
+
+describe('GET /api/sessions pagination and filter validation', () => {
+  it.each([
+    ['', 200, 0],
+    ['?limit=50', 50, 0],
+    ['?limit=5000', 1000, 0],
+    ['?limit=abc', 200, 0],
+    ['?limit=0', 1, 0],
+    ['?limit=10&offset=30', 10, 30],
+    ['?offset=-3', 200, 0],
+    ['?offset=abc', 200, 0],
+  ])('%s -> limit %i offset %i', async (qs, limit, offset) => {
+    const res = await GET(makeReq(qs));
+    expect(res.status).toBe(200);
+    expect(lastLimit).toBe(limit);
+    expect(lastOffset).toBe(offset);
+  });
+
+  it('orders by createdAt then sessionId (stable offset pages)', async () => {
+    await GET(makeReq(''));
+    expect(orderByArgs).toHaveLength(2);
+  });
+
+  it.each(['status', 'run_id', 'runId', 'aid'])(
+    'answers 400 BAD_REQUEST for a NUL in %s without querying',
+    async (name) => {
+      const res = await GET(makeReq(`?${name}=a%00b`));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('BAD_REQUEST');
+      expect(lastLimit).toBeUndefined();
+    },
+  );
 });
