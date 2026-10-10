@@ -162,6 +162,14 @@ describe('isUniqueViolation', () => {
     expect(isUniqueViolation(null)).toBe(false);
     expect(isUniqueViolation('23505')).toBe(false);
   });
+
+  it('reads the SQLSTATE through a wrapper\'s .cause (drizzle DrizzleQueryError)', () => {
+    const pgErr = Object.assign(new Error('duplicate key'), { code: '23505' });
+    expect(isUniqueViolation(new Error('Failed query: ...', { cause: pgErr }))).toBe(true);
+    expect(
+      isUniqueViolation(new Error('Failed query', { cause: { code: '22001' } })),
+    ).toBe(false);
+  });
 });
 
 describe('isHttpUrl', () => {

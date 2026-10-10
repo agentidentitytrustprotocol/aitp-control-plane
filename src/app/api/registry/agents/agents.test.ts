@@ -636,6 +636,7 @@ describe('POST /api/registry/agents — unstorable manifest values (P1b)', () =>
     ['a NUL in an offered capability', { offered_capabilities: ['a\u0000b'] }, /offered_capabilities entries must not contain a NUL/],
     ['a lone surrogate in an offered capability', { offered_capabilities: ['a\ud800b'] }, /well-formed Unicode/],
     ['a non-array offered_capabilities', { offered_capabilities: 'demo.echo' }, /array of strings/],
+    ['an expires_at beyond year 9999 (toISOString would throw)', { expires_at: 1e13 }, /expires_at must be a Unix timestamp/],
     ['a 513-character aid', { aid: 'a'.repeat(513) }, /manifest\.aid exceeds 512/],
     [
       'a 257-character aid with no display_name (it becomes the display name)',

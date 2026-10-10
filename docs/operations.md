@@ -481,6 +481,21 @@ anchor` and keeps the previous cache (so the endpoint can serve a stale keyset
 while the issuer is down; check `X-JWKS-Cached-At`). Replicas refresh
 independently (idempotent; no lock).
 
+**After a URL change.** A `PATCH /api/trust-anchors/:id` that actually changes
+`issuerUrl` or `jwksUrl` clears the anchor's cache in the same `UPDATE` (a
+label-only edit, or resending the same URLs, keeps it). The next pass picks the
+anchor up because its cache is missing, so `GET /api/trust-anchors/:id/jwks`
+answers `503 JWKS_NOT_CACHED` for **up to `JWKS_REFRESH_INTERVAL_MS`** (longer
+if the new issuer cannot be fetched, indefinitely with
+`JWKS_REFRESH_ENABLED=false`). The PATCH deliberately does not start a refresh
+of its own: the "one pass at a time" guard is per module instance, and the
+route and the boot-time job are separate instances, so a route-triggered pass
+could overlap the scheduled one. Each refresher write is conditional on the
+anchor still having the `issuer_url` / `jwks_url` the pass read, so a pass that
+was mid-fetch when the URLs changed cannot put the old issuer's keys back; it
+logs `jwks-refresher: anchor URLs changed (or anchor deleted) during refresh;
+keyset discarded` (info) and the next pass fetches the new keyset.
+
 - **`JWKS_REFRESH_ENABLED`** (default true), **`JWKS_REFRESH_INTERVAL_MS`**
   (default 900000), **`JWKS_STALE_AFTER_MS`** (default 3600000),
   **`JWKS_FETCH_TIMEOUT_MS`** (default 10000).

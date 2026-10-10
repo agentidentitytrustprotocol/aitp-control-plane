@@ -112,14 +112,21 @@ export async function readJsonObject(req: Request): Promise<JsonObjectResult> {
   return { ok: true, body: parsed as Record<string, unknown> };
 }
 
-/** True when `err` is a Postgres unique violation (SQLSTATE 23505). */
+/**
+ * True when `err` is a Postgres unique violation (SQLSTATE 23505).
+ *
+ * drizzle-orm (>= 0.44) wraps every driver error in a `DrizzleQueryError`
+ * whose own `code` is unset; the pg error with the SQLSTATE is its `.cause`.
+ * So the code is read off `err` and then down the `.cause` chain (bounded).
+ * Checking `err.code` alone never matches against a real database.
+ */
 export function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code: unknown }).code === '23505'
-  );
+  let e: unknown = err;
+  for (let depth = 0; depth < 5 && typeof e === 'object' && e !== null; depth++) {
+    if ('code' in e && (e as { code: unknown }).code === '23505') return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**

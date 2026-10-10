@@ -952,8 +952,10 @@ paths:
             string, `aid` over 512 (or over 256 when there is no
             `display_name`, since the AID is then the stored display name), a
             NUL in `aid`, `display_name` or `handshake_endpoint`, a non-string
-            `handshake_endpoint`, or `offered_capabilities` that is not an
-            array of NUL-free, well-formed strings. `verifyCode` is
+            `handshake_endpoint`, `offered_capabilities` that is not an
+            array of NUL-free, well-formed strings, or an `expires_at` that is
+            not a number of Unix seconds between years 0001 and 9999 (`0`,
+            `null` or absent means no expiry). `verifyCode` is
             present when the `aitp` SDK was the thing that rejected the
             manifest — branch on it, not on `error`.
           content:
@@ -1082,8 +1084,9 @@ paths:
             `BODY_INVALID` when a manifest value cannot be stored —
             `display_name` (or, when absent, `aid`) over 256 characters, `aid`
             over 512, a NUL in `aid`, `display_name` or `handshake_endpoint`, a
-            non-string `handshake_endpoint`, or `offered_capabilities` that is
-            not an array of NUL-free, well-formed strings (the rules `/enroll`
+            non-string `handshake_endpoint`, `offered_capabilities` that is
+            not an array of NUL-free, well-formed strings, or an `expires_at`
+            outside Unix seconds for years 0001-9999 (the rules `/enroll`
             applies before minting a token; checked after the token is
             validated but before its `jti` is consumed);
             `IDEMPOTENCY_KEY_INVALID` for a bad `Idempotency-Key`.
@@ -1835,12 +1838,18 @@ paths:
       tags: [trust]
       summary: Update a trust anchor
       description: >-
-        Applies only the fields present. `issuerUrl` is not checked for an
-        http(s) scheme; changing it to a value another anchor in the same
-        namespace already has currently answers `500`. Changing `issuerUrl` or
-        `jwksUrl` does not clear the cached JWKS. An empty-string `jwksUrl`
-        clears it (stored as `null`), like `null`. The response omits
-        `addedBy`.
+        Applies only the fields present (a field of the wrong type is
+        ignored; `namespace` is not patchable). A string `issuerUrl` and a
+        non-empty `jwksUrl` must start `http://` or `https://`. Changing
+        `issuerUrl` to one another anchor in the same namespace already has is
+        `409 ALREADY_EXISTS`. An empty-string `jwksUrl` clears it (stored as
+        `null`), like `null`. When `issuerUrl` or `jwksUrl` ACTUALLY changes,
+        the cached JWKS (`jwksCachedAt` and the keyset) is cleared in the same
+        update, and `GET /api/trust-anchors/{id}/jwks` answers `503
+        JWKS_NOT_CACHED` until the background refresher's next pass (up to
+        `JWKS_REFRESH_INTERVAL_MS`, default 15 min); the PATCH does not fetch
+        the new keyset itself. A label-only edit, or resending the current
+        URLs unchanged, keeps the cache. The response omits `addedBy`.
       requestBody:
         required: true
         content:
@@ -1873,8 +1882,9 @@ paths:
         "400":
           description: >-
             `ID_INVALID` when `id` is not a UUID; `BODY_INVALID` when the body
-            is not JSON or not a JSON object, or a field breaks a limit above
-            (length, NUL).
+            is not JSON or not a JSON object, a string `issuerUrl` or a
+            non-empty `jwksUrl` does not start `http://` or `https://`, or a
+            field breaks a limit above (length, NUL).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1883,6 +1893,22 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            `code` is `ALREADY_EXISTS` — another anchor in this anchor's
+            namespace already has the new `issuerUrl`. `existing.id` names it.
+            Nothing was changed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      existing:
+                        type: object
+                        properties:
+                          id: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
@@ -1911,8 +1937,10 @@ paths:
         For agents in OIDC mode that cannot reach the issuer. Populated only
         by the background refresher, never by this request. Once a keyset has
         been cached, later refresh failures keep the old copy in place and it
-        keeps being served with `200`; a PATCH of `issuerUrl`/`jwksUrl` does
-        not clear it either.
+        keeps being served with `200`. A PATCH that actually changes
+        `issuerUrl` or `jwksUrl` clears it, so the old issuer's keys are never
+        served for the new URLs; a refresh already in flight for the old URLs
+        discards its result.
       responses:
         "200":
           description: The cached JWKS document.
@@ -1942,7 +1970,10 @@ paths:
         "503":
           description: >-
             Nothing cached yet (`code` is `JWKS_NOT_CACHED`; body includes
-            `issuerUrl`). Retry after `Retry-After` (60) seconds. Persists
+            `issuerUrl`). Retry after `Retry-After` (60) seconds. Also answered
+            after a PATCH changed `issuerUrl`/`jwksUrl`, for up to
+            `JWKS_REFRESH_INTERVAL_MS` (default 15 min), until the refresher's
+            next pass caches the new keyset. Persists
             indefinitely if the refresher never succeeds — issuer unreachable,
             `JWKS_REFRESH_ENABLED=false`, or an `http://` URL in production. (A
             production server with an empty `API_KEYS` also answers `503`,

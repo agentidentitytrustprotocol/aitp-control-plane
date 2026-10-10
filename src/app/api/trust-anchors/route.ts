@@ -12,7 +12,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { and, desc, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
@@ -32,6 +32,7 @@ import {
   checkIssuerUrl,
   checkJwksUrl,
 } from '@/lib/trust-anchors/columns';
+import { alreadyExistsBody, findAnchorIdByIssuer } from '@/lib/trust-anchors/existing';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -117,24 +118,9 @@ export async function POST(req: NextRequest) {
       });
     } catch (err) {
       if (isUniqueViolation(err)) {
-        const existing = await db
-          .select({ id: trustAnchors.id })
-          .from(trustAnchors)
-          .where(
-            and(
-              eq(trustAnchors.namespace, namespace),
-              eq(trustAnchors.issuerUrl, issuerUrl),
-            ),
-          )
-          .limit(1);
         return {
           status: 409,
-          body: {
-            error:
-              'trust anchor already exists for this (namespace, issuerUrl) — PATCH the existing id to update',
-            code: 'ALREADY_EXISTS',
-            existing: existing[0] ? { id: existing[0].id } : undefined,
-          },
+          body: alreadyExistsBody(await findAnchorIdByIssuer(namespace, issuerUrl)),
         };
       }
       throw err;

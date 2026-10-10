@@ -5,7 +5,10 @@
 //              (label > 128 code points or NUL, issuerUrl/jwksUrl > 2048 or
 //              NUL), 404 when update matches no row, 200 with only
 //              whitelisted fields applied (issuerUrl must be a string;
-//              jwksUrl/label accept string or null; '' jwksUrl clears)
+//              jwksUrl/label accept string or null; '' jwksUrl clears),
+//              400 on a non-http(s) issuerUrl/jwksUrl, 409 ALREADY_EXISTS on a
+//              duplicate (namespace, issuerUrl), JWKS-cache clear expressions
+//              in SET only when a URL is sent
 //   • DELETE — 404 when nothing was deleted, 204 (empty body) on success
 //
 // @/lib/db is mocked with chained stubs; params arrive as a Promise per the
@@ -14,6 +17,9 @@
 import { jest } from '@jest/globals';
 
 let selectResult: unknown[] = [];
+// Per-call select results (consumed first); falls back to selectResult.
+const selectQueue: unknown[][] = [];
+let updateError: unknown = null;
 let updateReturning: unknown[] = [];
 let deleteReturning: unknown[] = [];
 const setCalls: unknown[] = [];
@@ -23,7 +29,7 @@ jest.mock('@/lib/db', () => {
   const selectChain: Record<string, unknown> = {};
   selectChain.from = () => selectChain;
   selectChain.where = () => selectChain;
-  selectChain.limit = () => Promise.resolve(selectResult);
+  selectChain.limit = () => Promise.resolve(selectQueue.shift() ?? selectResult);
   return {
     db: {
       select: () => {
@@ -35,7 +41,10 @@ jest.mock('@/lib/db', () => {
           dbCalls++;
           setCalls.push(patch);
           return {
-            where: () => ({ returning: () => Promise.resolve(updateReturning) }),
+            where: () => ({
+              returning: () =>
+                updateError ? Promise.reject(updateError) : Promise.resolve(updateReturning),
+            }),
           };
         },
       }),
@@ -54,6 +63,8 @@ jest.mock('@/lib/audit-log/service', () => ({
   writeAdminAudit: (e: unknown) => writeAdminAuditMock(e),
 }));
 
+import { SQL, is } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { GET, PATCH, DELETE } from './route';
 import { NextRequest } from 'next/server';
 
@@ -86,6 +97,8 @@ function anchorRow(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   selectResult = [];
+  selectQueue.length = 0;
+  updateError = null;
   updateReturning = [];
   deleteReturning = [];
   setCalls.length = 0;
@@ -262,5 +275,94 @@ describe('PATCH /api/trust-anchors/[id] body validation', () => {
     const p = setCalls[0] as Record<string, unknown>;
     expect(p.jwksUrl).toBeNull();
     expect(p.label).toBeNull();
+  });
+});
+
+describe('PATCH /api/trust-anchors/[id] URL rules and JWKS cache invalidation', () => {
+  const dialect = new PgDialect();
+  const render = (v: unknown) => dialect.sqlToQuery(v as SQL);
+
+  function patch(body: unknown) {
+    return PATCH(
+      makeReq(`/api/trust-anchors/${ID}`, { method: 'PATCH', body: JSON.stringify(body) }),
+      ctx(ID),
+    );
+  }
+
+  it('rejects a non-http(s) issuerUrl or jwksUrl with 400 BODY_INVALID', async () => {
+    for (const [body, error] of [
+      [{ issuerUrl: 'ftp://x' }, 'issuerUrl must be an http(s) URL'],
+      [{ issuerUrl: '' }, 'issuerUrl must be an http(s) URL'],
+      [{ jwksUrl: 'file:///etc/passwd' }, 'jwksUrl must be an http(s) URL'],
+    ] as const) {
+      const res = await patch(body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: 'BODY_INVALID' });
+    }
+    expect(setCalls).toHaveLength(0);
+  });
+
+  it('a label-only edit leaves jwks_cache / jwks_cached_at out of SET', async () => {
+    updateReturning = [anchorRow()];
+    expect((await patch({ label: 'x' })).status).toBe(200);
+    const p = setCalls[0] as Record<string, unknown>;
+    expect('jwksCache' in p).toBe(false);
+    expect('jwksCachedAt' in p).toBe(false);
+  });
+
+  it('sending URLs sets the cache columns to a CASE that clears only on an actual change', async () => {
+    updateReturning = [anchorRow()];
+    expect(
+      (await patch({ issuerUrl: 'https://new.example.com', jwksUrl: null })).status,
+    ).toBe(200);
+    const p = setCalls[0] as Record<string, unknown>;
+    expect(is(p.jwksCache, SQL)).toBe(true);
+    expect(is(p.jwksCachedAt, SQL)).toBe(true);
+    const cache = render(p.jwksCache);
+    expect(cache.sql).toMatch(
+      /^CASE WHEN \("trust_anchors"\."issuer_url" IS DISTINCT FROM \$1::text or "trust_anchors"\."jwks_url" IS DISTINCT FROM \$2::text\) THEN NULL ELSE "trust_anchors"\."jwks_cache" END$/,
+    );
+    expect(cache.params).toEqual(['https://new.example.com', null]);
+    expect(render(p.jwksCachedAt).sql).toContain('ELSE "trust_anchors"."jwks_cached_at" END');
+    // The URL values themselves are still plain SET values.
+    expect(p.issuerUrl).toBe('https://new.example.com');
+    expect(p.jwksUrl).toBeNull();
+  });
+
+  it('only the URL that was sent is compared', async () => {
+    updateReturning = [anchorRow()];
+    await patch({ jwksUrl: 'https://issuer.example.com/keys' });
+    const q = render((setCalls[0] as Record<string, unknown>).jwksCache);
+    expect(q.sql).toBe(
+      'CASE WHEN "trust_anchors"."jwks_url" IS DISTINCT FROM $1::text THEN NULL ELSE "trust_anchors"."jwks_cache" END',
+    );
+    expect(q.params).toEqual(['https://issuer.example.com/keys']);
+  });
+
+  it('audit details carry the requested changes, not the SQL expressions', async () => {
+    updateReturning = [anchorRow()];
+    await patch({ issuerUrl: 'https://new.example.com', label: 'l' });
+    const details = (writeAdminAuditMock.mock.calls[0]![0] as { details: Record<string, unknown> })
+      .details;
+    expect(details.issuerUrl).toBe('https://new.example.com');
+    expect(details.label).toBe('l');
+    expect('jwksCache' in details).toBe(false);
+  });
+
+  it('maps a duplicate (namespace, issuerUrl) 23505 to 409 ALREADY_EXISTS with existing.id', async () => {
+    updateError = Object.assign(new Error('duplicate key'), { code: '23505' });
+    const OTHER = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+    selectQueue.push([{ namespace: 'ns-a' }], [{ id: OTHER }]);
+    const res = await patch({ issuerUrl: 'https://taken.example.com' });
+    expect(res.status).toBe(409);
+    const b = (await res.json()) as { code: string; existing: { id: string } };
+    expect(b.code).toBe('ALREADY_EXISTS');
+    expect(b.existing).toEqual({ id: OTHER });
+    expect(writeAdminAuditMock).not.toHaveBeenCalled();
+  });
+
+  it('rethrows any other database error', async () => {
+    updateError = Object.assign(new Error('boom'), { code: '57014' });
+    await expect(patch({ issuerUrl: 'https://x.example.com' })).rejects.toThrow('boom');
   });
 });

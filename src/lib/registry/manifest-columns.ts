@@ -89,8 +89,9 @@ export function checkManifestColumns(manifest: unknown): string | null {
   // The SDK's Timestamp is an unbounded i64, so a signed manifest can carry a
   // value that makes toISOString() throw (RangeError, a 500 after the jti is
   // burned) or that renders outside the years Postgres timestamptz accepts
-  // from an ISO string. Mirror the route's truthiness test: 0/absent/null are
-  // stored as NULL and need no check.
+  // from an ISO string. Follows the route's truthiness test (0/absent/null are
+  // stored as NULL and need no check) but is stricter for other falsy/truthy
+  // non-numbers (false, "", numeric strings), which are rejected.
   if (m.expires_at !== undefined && m.expires_at !== null && m.expires_at !== 0) {
     const e = m.expires_at;
     if (

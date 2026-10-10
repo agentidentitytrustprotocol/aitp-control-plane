@@ -157,7 +157,7 @@ OIDC identity mode ([RFC-AITP-0002](https://agentidentitytrustprotocol.io/spec/i
 | `namespace` | varchar(128) | Indexed |
 | `issuer_url` | text | The API caps it at 2048 characters and 2048 UTF-8 bytes (it is in the unique btree, whose row limit is in bytes) |
 | `jwks_url` | text | Optional override of issuer's `jwks_uri`; the API caps it at 2048 characters and stores an empty string as `NULL` |
-| `jwks_cache`, `jwks_cached_at` | jsonb / timestamptz | Issuer keyset cached by the CP's background JWKS refresher; served by `GET /api/trust-anchors/:id/jwks`. List/detail responses expose only `jwksCachedAt`. See [`operations.md`](operations.md#trust-anchor-jwks-refresh) |
+| `jwks_cache`, `jwks_cached_at` | jsonb / timestamptz | Issuer keyset cached by the CP's background JWKS refresher; served by `GET /api/trust-anchors/:id/jwks`. List/detail responses expose only `jwksCachedAt`. Both are set to `NULL` by a `PATCH` that actually changes `issuer_url` or `jwks_url` (decided in the `UPDATE` itself), and the refresher only writes a keyset if the row still has the URLs it fetched from. See [`operations.md`](operations.md#trust-anchor-jwks-refresh) |
 | `label`, `added_by` | varchar | |
 | `created_at`, `updated_at` | timestamptz | |
 
