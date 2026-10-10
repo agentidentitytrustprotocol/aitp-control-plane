@@ -226,7 +226,7 @@ Response `{ "agents": [...] }`. Each record:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/sessions` | API key | List handshake sessions: the newest **200** by creation time, no pagination (`limit`/`offset` are ignored). Filters: `?status=` (exact match, not validated — an unknown value returns an empty list), `?runId=` (or `run_id`), `?aid=` (either side) |
+| GET | `/api/sessions` | API key | List handshake sessions, newest first by creation time (ties by `sessionId`). `?limit=` (default **200**, max 1000; non-numeric → default, out-of-range clamped; an empty `?limit=` is clamped to `1`) and `?offset=` (default 0; negative or non-numeric → 0). Filters: `?status=` (exact match, not validated — an unknown value returns an empty list), `?runId=` (or `run_id`), `?aid=` (either side); a NUL character in any filter → `400 BAD_REQUEST` |
 | GET | `/api/sessions/:sessionId` | API key | Fetch one session + its events: `{ session, events }` |
 | GET | `/api/sessions/:sessionId/export` | API key | Bundle session + projected TCTs + events. `?format=json\|jsonl` |
 | GET | `/api/sessions/:sessionId/replay` | API key | Ordered event stream for one session: `{ sessionId, count, events }`. Filters: `?since=`, `?until=`, `?limit=` (default 1000, max 10000). Malformed `since`/`until` → `400 BAD_REQUEST`. An unknown `sessionId` is a `200` with no events, not a `404`. |

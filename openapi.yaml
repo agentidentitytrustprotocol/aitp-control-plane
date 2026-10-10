@@ -1323,9 +1323,12 @@ paths:
       tags: [sessions]
       summary: List handshake sessions
       description: >-
-        Returns at most the newest 200 sessions by creation time. There is no
-        pagination: `limit` and `offset` are not read.
+        Returns sessions newest first by creation time (ties broken by
+        `sessionId`), paged with `limit` (default 200, max 1000) and `offset`.
+        A NUL character in any filter is a `400 BAD_REQUEST`.
       parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 200, minimum: 1, maximum: 1000 }, description: "Non-numeric values fall back to the default; out-of-range values are clamped. An empty value reads as 0 and is clamped to 1, not defaulted." }
+        - { name: offset, in: query, schema: { type: integer, default: 0, minimum: 0 }, description: "Negative or non-numeric values read as 0." }
         - name: status
           in: query
           schema: { type: string }
@@ -1355,6 +1358,11 @@ paths:
                   sessions:
                     type: array
                     items: { $ref: "#/components/schemas/HandshakeSession" }
+        "400":
+          description: A filter contains a NUL character (`BAD_REQUEST`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 

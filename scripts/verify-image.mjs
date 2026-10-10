@@ -2637,7 +2637,7 @@ const ROUTES_MANIFEST_PATH = '/app/.next/routes-manifest.json';
  * to `runEdgeFunction`, loading the `files` THIS MANIFEST NAMES in the edge sandbox. A file
  * named there that no chunk loads is outside `bootGraph` by construction, so check 13 cannot
  * see it. (Not to be confused with `functions-config-manifest.json`'s own `functions` key,
- * which holds all thirty built routes. Two different files, two different `functions`.)
+ * which holds every built route. Two different files, two different `functions`.)
  *
  * Read cold — `docker create` + `docker cp`, container never started — for the reason
  * `extractRoutesManifest` gives: the artifact must not get to report on the manifests that decide
@@ -5869,8 +5869,8 @@ async function main() {
         'BOTH the compiled `regexp` and its `originalSource`, and the regexp is the ' +
         'load-bearing half: it is what Next matches requests against, while ' +
         'originalSource enforces nothing. Narrowing only the regexp, with the source ' +
-        'left byte-identical, was measured to pass every other check while leaving all ' +
-        'ten dynamic /api/* routes ungated. `apiRoutes` pins the IDENTITIES of the built ' +
+        'left byte-identical, was measured to pass every other check while leaving every ' +
+        'dynamic /api/* route (ten at the time) ungated. `apiRoutes` pins the IDENTITIES of the built ' +
         '/api/* routes and `apiRouteCount` their number; identities are pinned because a ' +
         'count cannot see a SUBSTITUTION — renaming 19 gated routes to decoy names, ' +
         'count unchanged at 30, was measured to pass every check while six admin routes ' +
@@ -5905,7 +5905,7 @@ async function main() {
         'dataRouteRegex is ALREADY compiled straight from the manifest string. Read `page` ' +
         'first on every entry: it is what the router recomputes each matcher from and the key ' +
         'it resolves the handler with. A new route reds check 27 AND check 11, which pins the ' +
-        'same 30 built /api routes out of a DIFFERENT file — check 11 green with 27 red (or the ' +
+        'same built /api routes out of a DIFFERENT file — check 11 green with 27 red (or the ' +
         'reverse) means the two manifests disagree, which is what a thin-overlay tamper looks ' +
         'like. ' +
         '`middlewareManifest` is .next/server/middleware-manifest.json, pinned WHOLE, and the ' +
@@ -5925,8 +5925,8 @@ async function main() {
         'populated at all (the precondition that makes the fallback branch the one that runs), ' +
         'and 26b asserts the whole manifest equals this pin, so a Next `version` bump or a new ' +
         'key arrives as a review rather than silently. NOT to be confused with ' +
-        'functions-config-manifest.json, whose own `functions` key holds all thirty built ' +
-        'routes; two different files. ' +
+        'functions-config-manifest.json, whose own `functions` key holds every built ' +
+        'route; two different files. ' +
         '`bootGraph`, `nextTreeSha` and `imageConfig` are check 13, the gate-code pin, ' +
         'and they cover the gate\'s whole LOAD PATH rather than just its own chunk: ' +
         'bootGraph is server.js plus every file the middleware and instrumentation ' +
@@ -6952,7 +6952,7 @@ async function main() {
             'CHECK 11 GREEN AND THIS RED IS THE CASE TO READ CAREFULLY, because the two pins ' +
             'come from DIFFERENT FILES: check 11 reads ' +
             '`functions-config-manifest.json` and this reads `routes-manifest.json`. They ' +
-            'describe the same 30 built /api routes, so a disagreement means one file was ' +
+            'describe the same set of built /api routes, so a disagreement means one file was ' +
             'changed and the other was not — which is what a thin-overlay tamper on ' +
             '`routes-manifest.json` looks like (measured, aitp-control-plane#105), and what a ' +
             'Next release emitting one table differently also looks like.\n' +
@@ -7203,8 +7203,8 @@ async function main() {
           'scripts/image-artifact-baseline.json pins matcher SOURCE STRINGS only ' +
             `(${JSON.stringify(sourcesOnly)}), not the compiled regexps Next actually ` +
             'matches requests against. Narrowing only the regexp, with the source left ' +
-            'byte-identical, was measured to pass every check here while leaving all ten ' +
-            `dynamic /api/* routes ungated. Regenerate with \`${REPIN_CMD} --allow-removals\` ` +
+            'byte-identical, was measured to pass every check here while leaving every ' +
+            `dynamic /api/* route (ten at the time) ungated. Regenerate with \`${REPIN_CMD} --allow-removals\` ` +
             '(the shape change reads as a removal) and review the recorded regexp by hand.',
         );
       }

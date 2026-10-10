@@ -132,7 +132,7 @@ record of what those calls depend on.
 | `POST /api/revocation/entries` | no | body `{jti, reason?}`; `jti` must be a UUID. Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
 | `GET /.well-known/aitp-revocation-list` | no | fetched by the playground's **agents**, not its service; see [Revocation list](#revocation-list) |
 | `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit`; reads `events` |
-| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. The playground also sends `limit`, which this route ignores: it always returns up to 200 newest sessions |
+| `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. reads `limit` (default 200, max 1000) and `offset`; the playground sends `limit` |
 | `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
 | `POST /api/webhooks` | no | body `{url, events, secret?, active}`; `events: []` ⇒ all deliverable types |
 | `DELETE /api/webhooks/{id}` | no | the playground treats `404` as success |
