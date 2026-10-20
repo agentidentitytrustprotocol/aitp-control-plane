@@ -187,7 +187,7 @@ components:
                 The value set is owned by the `aitp` SDK's `verifyManifestJson`
                 (listed at
                 https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification;
-                verified against `aitp` `^0.17.0`, which added `unknown_field`). It is deliberately not an
+                verified against `aitp` `^0.18.0`; `unknown_field` since 0.15). It is deliberately not an
                 `enum`: a new SDK release may add values, which this service
                 passes through verbatim. Treat any unrecognized value as a
                 generic "manifest verification failed".
@@ -613,7 +613,7 @@ components:
         jti:
           type: string
           format: uuid
-          description: RFC 4122 UUID **version 4** only (either case); any other version is `400 JTI_INVALID`. aitp ≥ 0.14 verifiers reject a whole revocation list carrying a non-v4 entry.
+          description: Lowercase, hyphenated RFC 4122 UUID **version 4** only; any other version, and an uppercase, braced, `urn:uuid:` or unhyphenated spelling, is `400 JTI_INVALID` (rejected, never normalized). aitp ≥ 0.14 verifiers reject a whole revocation list carrying any other form, and aitp ≥ 0.18 signers refuse to sign one.
         reason:
           type: string
           maxLength: 500

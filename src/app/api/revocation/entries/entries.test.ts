@@ -134,7 +134,17 @@ describe('POST /api/revocation/entries — validation', () => {
       expect(res.status).toBe(400);
       const json = (await res.json()) as { code: string; error: string };
       expect(json.code).toBe('JTI_INVALID');
-      expect(json.error).toBe('jti must be a UUID v4');
+      expect(json.error).toBe('jti must be a lowercase UUID v4');
+    }
+    expect(insertedValues).toHaveLength(0);
+  });
+
+  it('returns 400 JTI_INVALID for a v4 that is not lowercase hyphenated (rejected, never normalized)', async () => {
+    const v4 = '3f1d2c4b-1a2b-4c3d-8e4f-5a6b7c8d9e0f';
+    for (const jti of [v4.toUpperCase(), `{${v4}}`, `urn:uuid:${v4}`, v4.replace(/-/g, '')]) {
+      const res = await post({ jti });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('JTI_INVALID');
     }
     expect(insertedValues).toHaveLength(0);
   });

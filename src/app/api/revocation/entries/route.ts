@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
 
   return withIdempotency(req, 'revocation.entries', async () => {
     if (typeof body.jti !== 'string' || !JTI_V4_RE.test(body.jti)) {
-      return { status: 400, body: { error: 'jti must be a UUID v4', code: 'JTI_INVALID' } };
+      return { status: 400, body: { error: 'jti must be a lowercase UUID v4', code: 'JTI_INVALID' } };
     }
 
     if (body.reason !== undefined && body.reason !== null) {

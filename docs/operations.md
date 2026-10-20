@@ -81,8 +81,11 @@ What is specific to this service:
   `revocation DB read failed` (warn when serving stale, error when refusing),
   and the shipped-image harness asserts on that text — keep it.
 - **Every entry `jti` is a UUID v4.** aitp ≥ 0.14 verifiers reject the whole
-  list as malformed if any entry is not, and the 0.17 Node signer does not
-  check. `POST /api/revocation/entries` accepts only v4, and if a non-v4 row is
+  list as malformed if any entry is not, and aitp ≥ 0.18 signers refuse to
+  sign one (0.17 signed it). `POST /api/revocation/entries` accepts only a
+  lowercase hyphenated v4 (an uppercase or braced spelling is `400
+  JTI_INVALID`; the `uuid` column would return it lowercase anyway, so this
+  only keeps the webhook and audit `jti` in the published form). If a non-v4 row is
   in `revocation_entries` anyway (written before that check) the producer
   refuses to sign: the endpoint answers `503 REVOCATION_UNAVAILABLE` and logs
   `revocation list signing failed, refusing to publish a list` at error with

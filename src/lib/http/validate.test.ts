@@ -31,10 +31,16 @@ describe('JTI_UUID_RE (v1-5 only — the historical jti rule)', () => {
   });
 });
 
-describe('JTI_V4_RE (revocation entries: v4 only, aitp >= 0.14)', () => {
-  it('accepts v4 in either case', () => {
+describe('JTI_V4_RE (revocation entries: lowercase v4 only, aitp >= 0.18)', () => {
+  it('accepts lowercase v4', () => {
     expect(JTI_V4_RE.test(V4)).toBe(true);
-    expect(JTI_V4_RE.test(V4.toUpperCase())).toBe(true);
+  });
+
+  it('rejects every non-canonical spelling of a v4 (the 0.18 signer refuses them)', () => {
+    expect(JTI_V4_RE.test(V4.toUpperCase())).toBe(false);
+    expect(JTI_V4_RE.test(`{${V4}}`)).toBe(false);
+    expect(JTI_V4_RE.test(`urn:uuid:${V4}`)).toBe(false);
+    expect(JTI_V4_RE.test(V4.replace(/-/g, ''))).toBe(false);
   });
 
   it('rejects v1, v5, v7, the nil uuid, a bad variant, and non-uuids', () => {

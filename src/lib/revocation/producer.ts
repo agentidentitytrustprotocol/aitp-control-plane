@@ -53,10 +53,11 @@ class RevocationProducer {
       return this.handleReadFailure(err);
     }
     const agent = getCpAgent();
-    // aitp 0.17's signer does NOT enforce the UUID v4 rule its verifier does:
-    // a non-v4 row signs fine, then every consumer rejects the WHOLE list as
-    // malformed. Check before signing, and self-verify after (catches any
-    // other sign/verify asymmetry), so a bad list is never published.
+    // aitp >= 0.18's signer refuses a non-v4 or non-lowercase jti itself (0.17
+    // signed one and every consumer then rejected the WHOLE list). Checking
+    // first anyway names the offending rows in the log, and the self-verify
+    // after catches any other sign/verify asymmetry: a bad list is never
+    // published either way.
     if (entries.some((e) => !JTI_V4_RE.test(e.jti))) {
       return this.handleSignFailure(new Error('non-v4 jti in revocation_entries'), entries);
     }
