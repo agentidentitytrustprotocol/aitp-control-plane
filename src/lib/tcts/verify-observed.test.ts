@@ -47,10 +47,12 @@ function fixture() {
   const a = AitpAgent.generate();
   const b = AitpAgent.generate();
   const c = AitpAgent.generate();
-  a.buildManifest(opts('a'));
+  const manifestA = a.buildManifest(opts('a'));
+  const manifestC = c.buildManifest(opts('c'));
   const manifestB = b.buildManifest(opts('b'));
-  const initiator = a.newSession();
-  const responder = b.newResponder();
+  // Pinned admission (aitp >= 0.15): each side must pin the other's AID.
+  const initiator = a.newSession(null, { pinnedKeys: [b.aid] });
+  const responder = b.newResponder(null, { pinnedKeys: [a.aid] });
   const hello = responder.processHello(initiator.buildHello(manifestB, ['demo.echo']));
   const commit = initiator.processHelloAck(hello.ackJson, hello.sessionId);
   const committed = responder.processCommit(commit);
@@ -59,7 +61,7 @@ function fixture() {
   const dClaims = JSON.parse(
     Buffer.from(delegation.split('.')[1], 'base64url').toString('utf8'),
   ) as Record<string, unknown>;
-  return { done, delegation, dClaims };
+  return { done, delegation, dClaims, manifestA, manifestC };
 }
 
 function tamper(jws: string): string {
@@ -96,34 +98,58 @@ describe('verifyObservedTct', () => {
 });
 
 describe('verifyObservedDelegation', () => {
-  const { delegation, dClaims } = fixture();
+  const { delegation, dClaims, manifestA, manifestC } = fixture();
   const payload = { delegation: { token: delegation, claims: dClaims } };
 
-  it('verifies a genuine reported delegation', () => {
-    expect(verifyObservedDelegation(payload)).toEqual(OK);
+  it('verifies a genuine reported delegation under the delegator Manifest', () => {
+    expect(verifyObservedDelegation(payload, [manifestA])).toEqual(OK);
   });
 
   it('accepts the wrapper under payload.tct as well', () => {
-    expect(verifyObservedDelegation({ tct: payload.delegation })).toEqual(OK);
+    expect(verifyObservedDelegation({ tct: payload.delegation }, [manifestA])).toEqual(OK);
+  });
+
+  it('fails with KEY_RESOLUTION_FAILED when no delegator Manifest is supplied', () => {
+    const out = verifyObservedDelegation(payload, []);
+    expect(out).toMatchObject({ attempted: true, verified: false });
+    expect(out.error).toMatch(/KEY_RESOLUTION_FAILED|key/i);
+  });
+
+  it("fails under another agent's Manifest", () => {
+    expect(verifyObservedDelegation(payload, [manifestC])).toMatchObject({
+      attempted: true,
+      verified: false,
+    });
+  });
+
+  it('fails under an aitp/0.2 delegator Manifest', () => {
+    const env = JSON.parse(manifestA) as { manifest: Record<string, unknown> };
+    env.manifest.version = 'aitp/0.2';
+    expect(verifyObservedDelegation(payload, [JSON.stringify(env)])).toMatchObject({
+      attempted: true,
+      verified: false,
+    });
   });
 
   it('fails a delegation whose signature was altered', () => {
-    const out = verifyObservedDelegation({
-      delegation: { token: tamper(delegation), claims: dClaims },
-    });
+    const out = verifyObservedDelegation(
+      { delegation: { token: tamper(delegation), claims: dClaims } },
+      [manifestA],
+    );
     expect(out).toMatchObject({ attempted: true, verified: false });
   });
 
   it('fails when the claims carry no aud', () => {
     const { aud: _aud, ...rest } = dClaims;
     void _aud;
-    const out = verifyObservedDelegation({
-      delegation: { token: delegation, claims: rest },
-    });
+    const out = verifyObservedDelegation(
+      { delegation: { token: delegation, claims: rest } },
+      [manifestA],
+    );
     expect(out).toMatchObject({ attempted: true, verified: false });
   });
 
   it('does not attempt a report without a token', () => {
-    expect(verifyObservedDelegation({ delegation: { claims: dClaims } }).attempted).toBe(false);
+    expect(verifyObservedDelegation({ delegation: { claims: dClaims } }, [manifestA]).attempted).toBe(false);
   });
 });

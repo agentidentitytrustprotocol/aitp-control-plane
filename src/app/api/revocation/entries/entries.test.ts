@@ -125,6 +125,20 @@ describe('POST /api/revocation/entries — validation', () => {
     expect(insertedValues).toHaveLength(0);
   });
 
+  it('returns 400 JTI_INVALID for a well-formed non-v4 UUID (aitp >= 0.14 signs v4 only)', async () => {
+    for (const jti of [
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8', // v1
+      '3f2b8c1e-9a4d-5e5f-8a6b-7c8d9e0f1a2b', // v5
+    ]) {
+      const res = await post({ jti });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { code: string; error: string };
+      expect(json.code).toBe('JTI_INVALID');
+      expect(json.error).toBe('jti must be a UUID v4');
+    }
+    expect(insertedValues).toHaveLength(0);
+  });
+
   it('rejects a non-string reason', async () => {
     const res = await post({ jti: GOOD_JTI, reason: { nested: true } });
     expect(res.status).toBe(400);

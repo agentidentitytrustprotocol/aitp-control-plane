@@ -36,7 +36,8 @@
  */
 
 /**
- * The eight codes `aitp`'s `verifyManifestJson` documents. A snapshot, used
+ * The nine codes `aitp`'s `verifyManifestJson` documents (`unknown_field`
+ * since 0.15). A snapshot, used
  * ONLY to bound label cardinality — never to decide what reaches a caller.
  */
 const KNOWN_VERIFY_CODES: readonly string[] = [
@@ -47,10 +48,11 @@ const KNOWN_VERIFY_CODES: readonly string[] = [
   'version_unknown',
   'identity_hint_malformed',
   'incompatible_identity_type',
+  'unknown_field',
   'malformed',
 ];
 
-/** Any code outside the allowlist. Keeps cardinality bounded at 10. */
+/** Any code outside the allowlist. Keeps cardinality bounded at 11. */
 const OTHER_LABEL = 'other';
 
 /**

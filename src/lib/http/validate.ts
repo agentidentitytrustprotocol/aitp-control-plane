@@ -23,6 +23,17 @@
 export const JTI_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * UUID version 4 (RFC 4122 variant) only. aitp >= 0.14 verifiers reject a
+ * revocation list carrying any non-v4 `entries[].jti` -- the WHOLE list, as
+ * malformed. (The 0.17 Node signer still signs one, so the producer checks
+ * before signing and refuses to publish.) Use
+ * this for revocation entries only; other jti filters keep {@link JTI_UUID_RE}.
+ * Case-insensitive: the `uuid` column stores (and the signer reads) lowercase.
+ */
+export const JTI_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /** Canonical 8-4-4-4-12 hex form, any version / variant, any case. */
 const ANY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

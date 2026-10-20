@@ -2,6 +2,7 @@
 
 import {
   JTI_UUID_RE,
+  JTI_V4_RE,
   badRequest,
   checkColumnString,
   checkQueryParam,
@@ -27,6 +28,22 @@ describe('JTI_UUID_RE (v1-5 only — the historical jti rule)', () => {
     expect(JTI_UUID_RE.test('00000000-0000-0000-0000-000000000000')).toBe(false);
     expect(JTI_UUID_RE.test('3f2b8c1e-9a4d-4e5f-ca6b-7c8d9e0f1a2b')).toBe(false); // variant c
     expect(JTI_UUID_RE.test('not-a-uuid')).toBe(false);
+  });
+});
+
+describe('JTI_V4_RE (revocation entries: v4 only, aitp >= 0.14)', () => {
+  it('accepts v4 in either case', () => {
+    expect(JTI_V4_RE.test(V4)).toBe(true);
+    expect(JTI_V4_RE.test(V4.toUpperCase())).toBe(true);
+  });
+
+  it('rejects v1, v5, v7, the nil uuid, a bad variant, and non-uuids', () => {
+    expect(JTI_V4_RE.test('6ba7b810-9dad-11d1-80b4-00c04fd430c8')).toBe(false); // v1
+    expect(JTI_V4_RE.test('3f2b8c1e-9a4d-5e5f-8a6b-7c8d9e0f1a2b')).toBe(false); // v5
+    expect(JTI_V4_RE.test(V7)).toBe(false);
+    expect(JTI_V4_RE.test('00000000-0000-0000-0000-000000000000')).toBe(false);
+    expect(JTI_V4_RE.test('3f2b8c1e-9a4d-4e5f-ca6b-7c8d9e0f1a2b')).toBe(false); // variant c
+    expect(JTI_V4_RE.test('not-a-uuid')).toBe(false);
   });
 });
 

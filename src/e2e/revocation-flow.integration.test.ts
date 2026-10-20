@@ -231,7 +231,7 @@ describe('integration: revocation entry → signed well-known list → delegatio
     });
 
     const env = await fetchList();
-    expect(env.revocation_list.version).toBe('aitp/0.2');
+    expect(env.revocation_list.version).toBe('aitp/0.3');
     expect(env.revocation_list.issuer).toMatch(/^aid:pubkey:/);
     const nowSecs = Math.floor(Date.now() / 1000);
     expect(env.revocation_list.published_at).toBeLessThanOrEqual(nowSecs + 5);
@@ -462,7 +462,7 @@ describe('integration: revocation entry → signed well-known list → delegatio
               payload: {
                 tct: {
                   claims: {
-                    ver: 'aitp/0.2',
+                    ver: 'aitp/0.3',
                     jti: parentTctJti,
                     iss: issuerAid,
                     sub: delegatorAid,

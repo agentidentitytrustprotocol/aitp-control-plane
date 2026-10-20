@@ -65,9 +65,9 @@ describe('enroll failure counter', () => {
     expect(Object.values(totals).every((v) => v === 0)).toBe(true);
   });
 
-  it('bounds the label set at exactly ten', () => {
-    expect(ENROLL_FAILURE_LABELS).toHaveLength(10);
-    expect(new Set(ENROLL_FAILURE_LABELS).size).toBe(10);
+  it('bounds the label set at exactly eleven', () => {
+    expect(ENROLL_FAILURE_LABELS).toHaveLength(11);
+    expect(new Set(ENROLL_FAILURE_LABELS).size).toBe(11);
   });
 
   it.each([
@@ -78,6 +78,7 @@ describe('enroll failure counter', () => {
     'version_unknown',
     'identity_hint_malformed',
     'incompatible_identity_type',
+    'unknown_field',
     'malformed',
   ])('gives %s its own series', (code) => {
     recordEnrollFailure(code);
@@ -101,7 +102,7 @@ describe('enroll failure counter', () => {
     }
     const totals = getEnrollFailureTotals();
     expect(totals.other).toBe(200);
-    expect(Object.keys(totals)).toHaveLength(10);
+    expect(Object.keys(totals)).toHaveLength(11);
   });
 
   it('never grows the key set, whatever it is fed', () => {
