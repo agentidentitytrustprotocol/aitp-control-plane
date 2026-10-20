@@ -118,6 +118,33 @@ describe('EnrollmentService', () => {
     expect(code).not.toBe('');
   });
 
+  // These two DO pin today's codes, on purpose: they are the aitp 0.15 / 0.17
+  // behaviour changes this service documents to callers (docs/api.md,
+  // docs/operations.md), and a silent reclassification should fail here.
+  function rejectCode(envelope: string): string | undefined {
+    try {
+      service.verifyAndIssueToken(envelope);
+    } catch (err) {
+      return sdkVerifyCode(err);
+    }
+    throw new Error('expected verifyAndIssueToken to throw');
+  }
+
+  it('rejects a SIGNED manifest carrying an extra member as unknown_field (aitp >= 0.15)', () => {
+    const env = JSON.parse(buildManifest()) as { manifest: Record<string, unknown> };
+    env.manifest.extra = true;
+    expect(rejectCode(JSON.stringify(env))).toBe('unknown_field');
+  });
+
+  it('rejects an aitp/0.2 manifest as version_unknown, before the signature check (aitp >= 0.17)', () => {
+    // Restamping breaks the signature too; version_unknown (not
+    // signature_invalid) pins that the version check runs first.
+    const env = JSON.parse(buildManifest()) as { manifest: Record<string, unknown> };
+    expect(env.manifest.version).toBe('aitp/0.3');
+    env.manifest.version = 'aitp/0.2';
+    expect(rejectCode(JSON.stringify(env))).toBe('version_unknown');
+  });
+
   it.each([
     ['a 257-character display_name', 'd'.repeat(257)],
     ['a NUL in display_name', 'a\u0000b'],

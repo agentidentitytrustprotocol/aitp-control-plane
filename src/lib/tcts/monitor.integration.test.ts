@@ -149,7 +149,7 @@ describe('integration: tctMonitor revocation cascade', () => {
           tct: {
             token: 'eyJhbGciOiJFZERTQSIsInR5cCI6ImFpdHAtdGN0K2p3dCJ9.eyJ9.sig',
             claims: {
-              ver: 'aitp/0.2',
+              ver: 'aitp/0.3',
               jti,
               iss: 'aid:test:issuer',
               sub: 'aid:test:subject',
@@ -269,7 +269,7 @@ describe('integration: tctMonitor revocation cascade', () => {
           tct: {
             token,
             claims: {
-              ver: 'aitp/0.2',
+              ver: 'aitp/0.3',
               iss: 'aid:test:delegator',
               sub: 'aid:test:delegatee',
               aud: 'aid:test:grantor',

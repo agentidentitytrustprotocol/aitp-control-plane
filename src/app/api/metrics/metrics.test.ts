@@ -254,7 +254,7 @@ describe('GET /api/metrics — enrollment failures with a fresh counter', () => 
       .filter((l) =>
         l.startsWith('aitp_control_plane_enroll_verification_failures{'),
       );
-    expect(emitted).toHaveLength(10);
+    expect(emitted).toHaveLength(11);
   });
 });
 

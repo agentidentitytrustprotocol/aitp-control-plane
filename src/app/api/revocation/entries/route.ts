@@ -10,7 +10,7 @@ import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { tctMonitor } from '@/lib/tcts/monitor';
-import { JTI_UUID_RE, readJsonObject } from '@/lib/http/validate';
+import { JTI_V4_RE, readJsonObject } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -72,8 +72,8 @@ export async function POST(req: NextRequest) {
   const body = parsed.body as RequestBody;
 
   return withIdempotency(req, 'revocation.entries', async () => {
-    if (typeof body.jti !== 'string' || !JTI_UUID_RE.test(body.jti)) {
-      return { status: 400, body: { error: 'jti must be a UUID', code: 'JTI_INVALID' } };
+    if (typeof body.jti !== 'string' || !JTI_V4_RE.test(body.jti)) {
+      return { status: 400, body: { error: 'jti must be a UUID v4', code: 'JTI_INVALID' } };
     }
 
     if (body.reason !== undefined && body.reason !== null) {

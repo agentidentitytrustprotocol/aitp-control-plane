@@ -298,7 +298,7 @@ export async function POST(req: NextRequest) {
     // counted in `dropped`). Each object keeps its index in the ORIGINAL
     // array so `errors[].index` points at what the caller sent.
     //
-    // The id is derived from the RAW event (content-derived id recipe v1,
+    // The id is derived from the RAW event (content-derived id recipe v2,
     // src/lib/audit/event-id.ts): same producer key + same raw content +
     // a valid `ts` => same id on every request, so a re-sent event collides
     // on the primary key instead of becoming a second row. Computed only for

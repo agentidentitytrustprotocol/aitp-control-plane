@@ -11,8 +11,10 @@
  * identity) is captured as a failed outcome so projection cannot crash.
  *
  * What a pass means: the token's signature, expiry, and (for a TCT) its
- * grant/audience check out under the key encoded in the issuer AID. It does NOT
- * consult the revocation list, and an expired token fails -- so a late report
+ * grant/audience check out -- a TCT under the key encoded in the issuer AID, a
+ * delegation under the key from the delegator's verified Manifest (taken from
+ * the registry; see {@link verifyObservedDelegation}). It does NOT consult the
+ * revocation list, and an expired token fails -- so a late report
  * of a TCT that has since expired is dropped in strict mode.
  */
 
@@ -115,9 +117,15 @@ export function verifyObservedTct(raw: unknown, parsed: ParsedTct): Verification
  * and checks the embedded voucher under that AID's key, so we pass the token's
  * own `aud`. Multi-hop chains are rejected by the strict single-hop verifier
  * and therefore fail verification here.
+ *
+ * Since aitp 0.16 the token is verified under the key from the delegator's
+ * Manifest (RFC-AITP-0006 §4 step 1), so `issuerManifests` must carry the
+ * delegator's registry Manifest JSON. With none (delegator not enrolled), or
+ * with an expired or `aitp/0.2` one, the SDK fails with `KEY_RESOLUTION_FAILED`.
  */
 export function verifyObservedDelegation(
   payload: Record<string, unknown>,
+  issuerManifests: string[],
 ): VerificationOutcome {
   const wrapper = payload.tct ?? payload.delegation;
   const token = wrapperToken(wrapper);
@@ -133,7 +141,7 @@ export function verifyObservedDelegation(
     };
   }
   try {
-    verifyDelegation(token, aud);
+    verifyDelegation(token, aud, issuerManifests);
     return { attempted: true, verified: true, error: null };
   } catch (err) {
     return failure(err);

@@ -99,16 +99,22 @@ For each `POST /api/events` batch, in order:
 Producers re-send events: the playground flushes a run's log mid-run and posts
 the whole log again when the run ends (a prefix, then a superset), and any
 client may retry a timed-out request. The CP recognises a re-sent event by its
-id, which it derives from what was sent (**recipe v1**):
+id, which it derives from what was sent (**recipe v2**):
 
 - **When the event has a valid `ts`** (parseable and in range — the cases where
   the stored `ts` is the client's, not the ingest time), its id is a
   deterministic UUID (RFC 9562 version 8) computed from SHA-256 over a
-  version tag (`aitp-event:v1`), a fingerprint of the caller's API key (the
+  version tag (`aitp-event:v2`), a fingerprint of the caller's API key (the
   bearer token), and the event object **exactly as received** in canonical form
   (object keys sorted, so key order on the wire does not matter; every other
   difference — another field, a different sub-millisecond `ts` digit, a
-  different array order — makes a different event).
+  different array order — makes a different event). One exception, from
+  [RFC-AITP-0001 §5.4.3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md):
+  a signed object embedded in the event counts by what its signature covers,
+  not by its bytes. A compact-JWS string (a TCT or delegation `token`)
+  contributes only its `header.payload`, and a `{ manifest | revocation_list,
+  signature }` envelope contributes without its `signature` — so a re-send
+  whose signature was re-encoded is still the same event.
 - **When it has no valid `ts`**, its id is random, as before: two identical
   ts-less events are most likely two real occurrences, and both are kept.
 
@@ -153,8 +159,10 @@ Consequences for producers and consumers:
   `duplicates`) without running the handler at all. Content-derived ids cover
   what a key cannot — a re-send whose batch differs (a superset), or a producer
   that sends no key.
-- Rows written before recipe v1 keep their random ids; a future recipe would
-  carry a new tag and yield ids disjoint from v1's.
+- Rows written under an earlier recipe keep their ids (random before v1, v1's
+  whole-content hash before v2); each recipe carries its own tag, so its ids
+  are disjoint from every other recipe's. A producer re-sending, across the v2
+  upgrade, an event first stored under v1 stores it once more.
 
 ## Recognized event types
 
@@ -193,16 +201,17 @@ The claim names are defined by [RFC-AITP-0005 (TCT) §2](https://github.com/agen
 
 - **delegator / delegatee:** `payload.delegator_aid`/`delegator` (resp. `delegatee_aid`/`delegatee`), then the claims' `delegator`/`delegator_aid`/`iss` (resp. `delegatee`/`delegatee_aid`/`sub`).
 - **parent_jti:** `payload.parent_jti`/`parentJti`/`src_jti`; then the claims' `src_jti`/`parent_jti`/`parentJti`; then the `src_jti` (or `parent_jti`) claim of the embedded grant voucher — `claims.voucher`, or for a multi-hop token the `voucher` of the first `claims.chain` entry. The CP only decodes the voucher to read this claim; it does not verify it. What the voucher is: [RFC-AITP-0005 §8](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0005-tct.md), [RFC-AITP-0006](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0006-delegation.md); chain encoding: [aitp-rs multi-hop delegation](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/multihop-delegation.md).
-- **jti:** `payload.jti`/`child_jti`; then the claims' `jti`/`child_jti`; then a deterministic UUIDv5 over the wrapper's opaque `token` (single-hop tokens carry no `jti`, so re-reporting the same token maps to the same row).
+- **jti:** `payload.jti`/`child_jti`; then the claims' `jti`/`child_jti`; then a deterministic UUIDv5 over the wrapper's `token` — its JWS signing input `header.payload`, never the signature segment ([RFC-AITP-0001 §5.4.3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md)) — so re-reporting the same delegation maps to the same row (single-hop tokens carry no `jti`). The recipe changed with aitp 0.17 (tag `aitp-delegation:v2`): a delegation stored before it and reported again afterwards gets a second row.
 - **scope:** the claims' `scope` (or `grants`). **issued_at / expires_at:** `iat`/`exp` (or `issued_at`/`expires_at`), `issued_at` defaulting to the event `ts`.
 - Both `jti` and `parent_jti` must be UUIDs, and delegator/delegatee must be present, or the event projects nothing.
 
 **Optional verification.** By default the CP projects reported claims as-is.
 With `OBSERVED_ARTIFACT_VERIFICATION=warn|strict` it also verifies the signed
-`token` of a v0.2 wrapper with the SDK before projecting `tct.issued` /
+`token` of a `{ token, claims }` wrapper with the SDK before projecting `tct.issued` /
 `handshake.complete` TCTs and `delegation.issued` (`warn` logs failures and
 projects anyway; `strict` drops anything not verified, including reports with no
-token). See [`operations.md`](operations.md#observed-artifact-verification).
+token). A delegation verifies only against its delegator's Manifest from the
+registry, so its delegator must be enrolled with this CP. See [`operations.md`](operations.md#observed-artifact-verification).
 
 ### CP-emitted events
 
@@ -211,7 +220,7 @@ The CP emits these itself (`source: "cp"`) as a side effect of registry/revocati
 | Type | Emitted by | `aidA` / payload |
 |---|---|---|
 | `agent.registered` | `POST /api/registry/agents` | `aidA` = agent AID; `payload.displayName`, `payload.namespace` |
-| `agent.expired` | periodic expiry sweep, when a manifest TTL lapses | `aidA` = agent AID; `payload.reason="manifest_expired"`, `payload.displayName`, `payload.namespace` |
+| `agent.expired` | periodic expiry sweep, when a manifest TTL lapses, or when an active agent's stored Manifest is not `aitp/0.3` | `aidA` = agent AID; `payload.reason="manifest_expired"` or `"manifest_version_unsupported"`, `payload.displayName`, `payload.namespace` |
 | `agent.deregistered` | `DELETE /api/registry/agents/:aid` | `aidA` = agent AID; `payload.reason="admin_deregister"` |
 | `tct.revoked` | `POST /api/revocation/entries` | no `aidA`; `payload.jti`, `payload.reason` (may be `null`). Also drives the projection above. |
 

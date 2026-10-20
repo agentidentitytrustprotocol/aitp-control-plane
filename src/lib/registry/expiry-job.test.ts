@@ -11,6 +11,12 @@ let transitionedRows: Array<{ aid: string; displayName: string; namespace: strin
     { aid: 'aid:pubkey:two', displayName: 'two', namespace: 'production' },
   ];
 
+// The job issues two UPDATEs per tick: the TTL sweep, then the
+// unsupported-Manifest-version sweep. Each `returning()` call takes the next
+// canned result in that order.
+let versionRows: Array<{ aid: string; displayName: string; namespace: string }> = [];
+let updateCalls = 0;
+
 jest.mock('../db', () => {
   // UPDATE … RETURNING returns the canned rows the job has just
   // claimed/transitioned. The new implementation no longer SELECTs
@@ -18,7 +24,8 @@ jest.mock('../db', () => {
   const updateChain: Record<string, unknown> = {};
   updateChain.set = () => updateChain;
   updateChain.where = () => updateChain;
-  updateChain.returning = () => Promise.resolve(transitionedRows);
+  updateChain.returning = () =>
+    Promise.resolve(updateCalls++ % 2 === 0 ? transitionedRows : versionRows);
 
   // INSERT chain — for ingestOneEvent best-effort calls
   const insertChain: Record<string, unknown> = {};
@@ -51,6 +58,8 @@ import { logger } from '../logger';
 
 beforeEach(() => {
   insertShouldReject = false;
+  versionRows = [];
+  updateCalls = 0;
   dispatchWebhooksMock.mockClear();
   dispatchWebhooksMock.mockResolvedValue(undefined);
   jest.clearAllMocks();
@@ -72,6 +81,40 @@ describe('enforceManifestExpiry', () => {
       expect(seen).toEqual(
         expect.arrayContaining(['aid:pubkey:one', 'aid:pubkey:two']),
       );
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('retires active rows on an unsupported Manifest version with their own reason', async () => {
+    transitionedRows = [];
+    versionRows = [{ aid: 'aid:pubkey:old', displayName: 'old', namespace: 'default' }];
+    const seen: { aid: string | undefined; reason: unknown }[] = [];
+    const unsubscribe = eventBus.subscribe((e) => {
+      if (e.type === 'agent.expired') seen.push({ aid: e.aidA, reason: e.payload.reason });
+    });
+    try {
+      expect(await enforceManifestExpiry()).toBe(1);
+      expect(seen).toEqual([{ aid: 'aid:pubkey:old', reason: 'manifest_version_unsupported' }]);
+      expect(dispatchWebhooksMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('counts both sweeps and keeps each reason apart', async () => {
+    versionRows = [{ aid: 'aid:pubkey:old', displayName: 'old', namespace: 'default' }];
+    const reasons: unknown[] = [];
+    const unsubscribe = eventBus.subscribe((e) => {
+      if (e.type === 'agent.expired') reasons.push(e.payload.reason);
+    });
+    try {
+      expect(await enforceManifestExpiry()).toBe(3);
+      expect(reasons).toEqual([
+        'manifest_expired',
+        'manifest_expired',
+        'manifest_version_unsupported',
+      ]);
     } finally {
       unsubscribe();
     }

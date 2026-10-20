@@ -161,6 +161,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
   function envelope(secondsUntilExpiry: number): string {
     return JSON.stringify({
       manifest: {
+        version: 'aitp/0.3',
         aid: 'aid:pubkey:fake',
         display_name: 'fake',
         handshake_endpoint: 'https://fake.example.com/handshake',
@@ -187,6 +188,31 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     expect(body.error).toMatch(/5 minutes/);
     expect(upsertAgentMock).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['aitp/0.2', 'aitp/0.2'],
+    ['a missing version', undefined],
+  ])(
+    'returns 400 MANIFEST_INVALID for %s before consuming the jti (aitp/0.3 cutover)',
+    async (_label, version) => {
+      validateTokenMock.mockImplementation(() => okPayload());
+      const env = JSON.parse(envelope(3600)) as { manifest: Record<string, unknown> };
+      env.manifest.version = version;
+      const res = await POST(
+        makeReq('/api/registry/agents', {
+          method: 'POST',
+          headers: { authorization: 'Bearer ok-token' },
+          body: JSON.stringify(env),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('MANIFEST_INVALID');
+      expect(body.error).toMatch(/aitp\/0\.3/);
+      expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
+      expect(upsertAgentMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns 201 + persists for a manifest expiring in 1 hour', async () => {
     validateTokenMock.mockImplementation(() => okPayload());
@@ -386,6 +412,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
           headers: { authorization: 'Bearer ok-token' },
           body: JSON.stringify({
             manifest: {
+              version: 'aitp/0.3',
               aid: 'aid:pubkey:fake',
               display_name: 'fake',
               handshake_endpoint: 'https://fake.example.com/handshake',
@@ -453,6 +480,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     validateTokenMock.mockImplementation(() => okPayload());
     const body = JSON.stringify({
       manifest: {
+        version: 'aitp/0.3',
         aid: 'aid:pubkey:fake',
         display_name: 'fake',
         handshake_endpoint: 'https://fake.example.com/handshake',
@@ -521,6 +549,7 @@ describe('POST /api/registry/agents — envelope and namespace validation (P1b)'
   function manifestBody(extensions?: Record<string, unknown>): string {
     return JSON.stringify({
       manifest: {
+        version: 'aitp/0.3',
         aid: 'aid:pubkey:fake',
         display_name: 'fake',
         handshake_endpoint: 'https://fake.example.com/handshake',
@@ -617,6 +646,7 @@ describe('POST /api/registry/agents — unstorable manifest values (P1b)', () =>
   function body(over: Record<string, unknown>): string {
     return JSON.stringify({
       manifest: {
+        version: 'aitp/0.3',
         aid: 'aid:pubkey:fake',
         display_name: 'fake',
         handshake_endpoint: 'https://fake.example.com/handshake',

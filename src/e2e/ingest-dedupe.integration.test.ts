@@ -1,6 +1,6 @@
 /**
  * Integration (real Postgres): POST /api/events de-duplication (content-derived
- * event ids, recipe v1 — src/lib/audit/event-id.ts).
+ * event ids, recipe v2 — src/lib/audit/event-id.ts).
  *
  * The playground flushes a run's log mid-run and posts the WHOLE log again at
  * the end (a prefix, then a superset). Before content-derived ids every

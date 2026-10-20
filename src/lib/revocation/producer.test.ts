@@ -33,6 +33,10 @@ jest.mock('../identity/cp-agent', () => ({
   }),
 }));
 
+// The real self-verify cannot check the fake 'envelope-N' strings; the real
+// signer and verifier are exercised in producer.sdk.test.ts.
+jest.mock('aitp', () => ({ verifyRevocationList: () => undefined }));
+
 const mockConfig = {
   revocationListTtlSecs: 777,
   revocationFailMode: 'fail_closed' as 'fail_closed' | 'serve_stale',
@@ -87,11 +91,11 @@ describe('revocationProducer.getEnvelopeJson', () => {
   it('maps DB rows to signer entries (epoch secs, reason optional) with the configured TTL', async () => {
     rowsToReturn = [
       {
-        jti: 'jti-1',
+        jti: '11111111-1111-4111-8111-111111111111',
         revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000),
         reason: 'key compromised',
       },
-      { jti: 'jti-2', revokedAt: Math.floor(Date.parse('2026-07-02T12:30:45.999Z') / 1000), reason: null },
+      { jti: '22222222-2222-4222-8222-222222222222', revokedAt: Math.floor(Date.parse('2026-07-02T12:30:45.999Z') / 1000), reason: null },
     ];
 
     const envelope = await revocationProducer.getEnvelopeJson();
@@ -101,12 +105,12 @@ describe('revocationProducer.getEnvelopeJson', () => {
     expect(signCalls[0].ttl).toBe(777);
     expect(signCalls[0].entries).toEqual([
       {
-        jti: 'jti-1',
+        jti: '11111111-1111-4111-8111-111111111111',
         revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000),
         reason: 'key compromised',
       },
       {
-        jti: 'jti-2',
+        jti: '22222222-2222-4222-8222-222222222222',
         revokedAt: Math.floor(Date.parse('2026-07-02T12:30:45.999Z') / 1000),
         reason: undefined,
       },
@@ -115,23 +119,23 @@ describe('revocationProducer.getEnvelopeJson', () => {
 
   it('passes the SQL-computed epoch seconds through unchanged, including negative (pre-1970) values', async () => {
     // Year 0001-01-01 is -62135596800; the producer must not re-parse it.
-    rowsToReturn = [{ jti: 'jti-low', revokedAt: -62135596800, reason: null }];
+    rowsToReturn = [{ jti: '44444444-4444-4444-8444-444444444444', revokedAt: -62135596800, reason: null }];
     await revocationProducer.getEnvelopeJson();
     expect(signCalls[0].entries).toEqual([
-      { jti: 'jti-low', revokedAt: -62135596800, reason: undefined },
+      { jti: '44444444-4444-4444-8444-444444444444', revokedAt: -62135596800, reason: undefined },
     ]);
   });
 
   it('caches the signed envelope — a second call re-signs nothing and ignores new rows', async () => {
     rowsToReturn = [
-      { jti: 'jti-1', revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000), reason: null },
+      { jti: '11111111-1111-4111-8111-111111111111', revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000), reason: null },
     ];
     const first = await revocationProducer.getEnvelopeJson();
 
     // A newly revoked token appears in the DB, but the cache is fresh.
     rowsToReturn = [
-      { jti: 'jti-1', revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000), reason: null },
-      { jti: 'jti-2', revokedAt: Math.floor(Date.parse('2026-07-03T00:00:00.000Z') / 1000), reason: null },
+      { jti: '11111111-1111-4111-8111-111111111111', revokedAt: Math.floor(Date.parse('2026-07-01T00:00:00.000Z') / 1000), reason: null },
+      { jti: '22222222-2222-4222-8222-222222222222', revokedAt: Math.floor(Date.parse('2026-07-03T00:00:00.000Z') / 1000), reason: null },
     ];
     const second = await revocationProducer.getEnvelopeJson();
 
@@ -145,7 +149,7 @@ describe('revocationProducer.getEnvelopeJson', () => {
     expect(signCalls.length).toBe(1);
 
     rowsToReturn = [
-      { jti: 'jti-9', revokedAt: Math.floor(Date.parse('2026-07-05T00:00:00.000Z') / 1000), reason: null },
+      { jti: '99999999-9999-4999-8999-999999999999', revokedAt: Math.floor(Date.parse('2026-07-05T00:00:00.000Z') / 1000), reason: null },
     ];
     revocationProducer.invalidate();
     const envelope = await revocationProducer.getEnvelopeJson();
@@ -154,7 +158,7 @@ describe('revocationProducer.getEnvelopeJson', () => {
     expect(signCalls.length).toBe(2);
     expect(
       (signCalls[1].entries as { jti: string }[]).map((e) => e.jti),
-    ).toEqual(['jti-9']);
+    ).toEqual(['99999999-9999-4999-8999-999999999999']);
   });
 
   it('fail_closed (default): throws RevocationUnavailableError and signs NOTHING when the DB read fails', async () => {

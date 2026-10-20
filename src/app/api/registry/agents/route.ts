@@ -4,6 +4,7 @@ import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
 import { consumeEnrollmentJti } from '@/lib/registry/jti-store';
 import { listAgents, upsertAgent } from '@/lib/registry/store';
 import { checkManifestColumns } from '@/lib/registry/manifest-columns';
+import { SUPPORTED_MANIFEST_VERSION } from '@/lib/registry/manifest-version';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { writeAdminAudit } from '@/lib/audit-log/service';
@@ -19,6 +20,7 @@ export const dynamic = 'force-dynamic';
 
 interface ManifestEnvelope {
   manifest: {
+    version?: unknown;
     aid: string;
     display_name?: string;
     handshake_endpoint: string;
@@ -260,6 +262,21 @@ export async function POST(req: NextRequest) {
     const columnProblem = checkManifestColumns(manifest);
     if (columnProblem) {
       return { status: 400, body: { error: columnProblem, code: 'BODY_INVALID' } };
+    }
+
+    // The enrollment token binds the manifest bytes but this route does not
+    // re-run verifyManifestJson, so a token minted before the aitp/0.3 cutover
+    // could still register an aitp/0.2 Manifest for up to its 5-minute life.
+    // 0.17 consumers reject such rows on `version_unknown`. Before the jti is
+    // consumed, so the caller can re-enroll with the same flow.
+    if (manifest.version !== SUPPORTED_MANIFEST_VERSION) {
+      return {
+        status: 400,
+        body: {
+          error: `manifest.version must be ${SUPPORTED_MANIFEST_VERSION} — re-enroll with a current SDK`,
+          code: 'MANIFEST_INVALID',
+        },
+      };
     }
 
     // One-time-token enforcement: atomically consume the jti. A second

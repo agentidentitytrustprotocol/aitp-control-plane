@@ -42,7 +42,13 @@ interface EnrollmentPayload {
   msh: string;
 }
 
-/** SHA-256 hex digest of the exact ManifestEnvelope body bytes (UTF-8). */
+/** SHA-256 hex digest of the exact ManifestEnvelope body bytes (UTF-8).
+ *
+ * Deliberately over raw bytes, an accepted exception to RFC-AITP-0001 §5.4.3:
+ * `msh` binds a one-time enrollment token to one request body and fails
+ * closed on any re-serialisation; it is never the Manifest's identity (the
+ * registry keys agents by AID). Moving it to JCS would change the client
+ * contract for no security gain. */
 export function manifestDigest(manifestEnvelopeJson: string): string {
   return createHash('sha256').update(manifestEnvelopeJson, 'utf8').digest('hex');
 }

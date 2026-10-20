@@ -1,9 +1,11 @@
 import { sql } from 'drizzle-orm';
+import { verifyRevocationList } from 'aitp';
 import { getCpAgent } from '../identity/cp-agent';
 import { db } from '../db';
 import { revocationEntries } from '../db/schema';
 import { config } from '../config';
 import { logger } from '../logger';
+import { JTI_V4_RE } from '../http/validate';
 
 /**
  * Thrown when the DB read failed and policy forbids serving anything else.
@@ -51,14 +53,27 @@ class RevocationProducer {
       return this.handleReadFailure(err);
     }
     const agent = getCpAgent();
-    this.cachedEnvelope = agent.signRevocationList(
-      entries.map((e) => ({
-        jti: e.jti,
-        revokedAt: Number(e.revokedAt),
-        reason: e.reason ?? undefined,
-      })),
-      config.revocationListTtlSecs,
-    );
+    // aitp 0.17's signer does NOT enforce the UUID v4 rule its verifier does:
+    // a non-v4 row signs fine, then every consumer rejects the WHOLE list as
+    // malformed. Check before signing, and self-verify after (catches any
+    // other sign/verify asymmetry), so a bad list is never published.
+    if (entries.some((e) => !JTI_V4_RE.test(e.jti))) {
+      return this.handleSignFailure(new Error('non-v4 jti in revocation_entries'), entries);
+    }
+    try {
+      const envelope = agent.signRevocationList(
+        entries.map((e) => ({
+          jti: e.jti,
+          revokedAt: Number(e.revokedAt),
+          reason: e.reason ?? undefined,
+        })),
+        config.revocationListTtlSecs,
+      );
+      verifyRevocationList(envelope, agent.aid);
+      this.cachedEnvelope = envelope;
+    } catch (err) {
+      return this.handleSignFailure(err, entries);
+    }
     this.cachedAt = Date.now();
     this.cachedUntil = this.cachedAt + 60_000;
     return this.cachedEnvelope;
@@ -94,6 +109,24 @@ class RevocationProducer {
         haveSnapshot: this.cachedEnvelope !== '',
       },
       'revocation DB read failed, refusing to publish a list',
+    );
+    throw new RevocationUnavailableError();
+  }
+
+  /**
+   * The list cannot be published: a row fails the UUID v4 `entries[].jti`
+   * rule (aitp >= 0.14; the entries route accepted v1-5 before), or the SDK
+   * failed to sign or to verify its own output.
+   * Fail LOUD but contained: name the offending rows and answer 503 rather
+   * than letting an untyped error escape as a 500. Never drop rows to get a
+   * signature -- that would silently un-revoke them. Not serve_stale either:
+   * the cause persists, so a stale list would only postpone the outage.
+   */
+  private handleSignFailure(err: unknown, entries: { jti: string }[]): never {
+    const nonV4 = entries.map((e) => e.jti).filter((j) => !JTI_V4_RE.test(j));
+    logger.error(
+      { err, entryCount: entries.length, nonV4Jtis: nonV4.slice(0, 20), nonV4Count: nonV4.length },
+      'revocation list signing failed, refusing to publish a list',
     );
     throw new RevocationUnavailableError();
   }

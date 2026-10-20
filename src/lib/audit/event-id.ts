@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isEnvelopeSignature, jwsSigningInput } from './signed-content';
 
 /**
- * Event ids for `POST /api/events` — content-derived id recipe **v1**.
+ * Event ids for `POST /api/events` — content-derived id recipe **v2**.
  *
  * Producers never send an event id, and they re-send events: the playground
  * flushes a run's log mid-run and posts the whole log again when the run ends
@@ -11,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
  *
  * So an event that carries a valid `ts` gets an id derived from what was sent:
  *
- *   uuidv8( SHA-256( "aitp-event:v1\0" + producerKey + "\0" + canonicalJson(rawEvent) ) )
+ *   uuidv8( SHA-256( "aitp-event:v2\0" + producerKey + "\0" + canonicalJson(rawEvent, { signedContent: true }) ) )
  *
  * - `producerKey` is the bearer-token fingerprint from `actorIdFromAuthHeader`
  *   (src/lib/audit-log/actor.ts) (same `Bearer `/raw parsing as the proxy), or `""` with none. Two
@@ -22,6 +23,12 @@ import { createHash, randomUUID } from 'node:crypto';
  *   normalized record: normalization truncates `ts` to milliseconds and fills
  *   defaults, which would merge events the producer considered distinct.
  * - `canonicalJson` sorts object keys, so key order on the wire is irrelevant.
+ * - v2 (RFC-AITP-0001 §5.4.3): signed artifacts embedded in the event are
+ *   hashed by their signed content, never their raw bytes. A compact JWS
+ *   (a reported TCT or delegation `token`) contributes only its signing input
+ *   `header.payload`; a `{manifest|revocation_list, signature}` envelope
+ *   drops its `signature`. A re-send whose token or signature was re-encoded
+ *   is then still the same event. v1 hashed them verbatim.
  * - The first 16 bytes of the digest become an RFC 9562 version-8 UUID
  *   (version nibble 8, variant 10). Not v5: v5 is SHA-1 over a namespace.
  *
@@ -32,7 +39,7 @@ import { createHash, randomUUID } from 'node:crypto';
  * The `v1` tag is part of the hashed input, so a future recipe (`v2`) yields
  * disjoint ids; rows written under an earlier recipe keep theirs.
  */
-export const EVENT_ID_RECIPE_TAG = 'aitp-event:v1';
+export const EVENT_ID_RECIPE_TAG = 'aitp-event:v2';
 
 /**
  * A `Date` the `ts` column can store: a valid instant (a number beyond the
@@ -72,8 +79,12 @@ type Frame = { lit: string } | { value: unknown };
  * — an explicit stack, no recursion — so a deeply nested value cannot
  * overflow the call stack. Values JSON cannot represent (undefined,
  * functions) do not occur in parsed input; they serialize as `null`.
+ *
+ * `signedContent`: key embedded signed artifacts by what their signature
+ * covers (see `signed-content.ts`): a compact-JWS string becomes its signing
+ * input, and an envelope's detached `signature` member is omitted.
  */
-export function canonicalJson(root: unknown): string {
+export function canonicalJson(root: unknown, opts: { signedContent?: boolean } = {}): string {
   const out: string[] = [];
   const stack: Frame[] = [{ value: root }];
   while (stack.length > 0) {
@@ -84,6 +95,13 @@ export function canonicalJson(root: unknown): string {
     }
     const v = frame.value;
     if (v === null || typeof v !== 'object') {
+      if (opts.signedContent && typeof v === 'string') {
+        const signingInput = jwsSigningInput(v);
+        if (signingInput !== null) {
+          out.push(JSON.stringify(`jws-signing-input:${signingInput}`));
+          continue;
+        }
+      }
       out.push(
         typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))
           ? JSON.stringify(v)
@@ -100,11 +118,14 @@ export function canonicalJson(root: unknown): string {
       }
       continue;
     }
-    const keys = Object.keys(v).sort();
+    const obj = v as Record<string, unknown>;
+    const keys = Object.keys(obj)
+      .filter((k) => !(opts.signedContent && isEnvelopeSignature(obj, k)))
+      .sort();
     out.push('{');
     stack.push({ lit: '}' });
     for (let i = keys.length - 1; i >= 0; i -= 1) {
-      stack.push({ value: (v as Record<string, unknown>)[keys[i]] });
+      stack.push({ value: obj[keys[i]] });
       stack.push({ lit: `${JSON.stringify(keys[i])}:` });
       if (i > 0) stack.push({ lit: ',' });
     }
@@ -122,7 +143,7 @@ function uuidV8(digest: Buffer): string {
 }
 
 /**
- * The id for one raw ingested event under recipe v1: content-derived when the
+ * The id for one raw ingested event under recipe v2: content-derived when the
  * event has a valid `ts`, random otherwise. `producerKey` is the bearer-token
  * fingerprint (`actorIdFromAuthHeader`) or `null`.
  */
@@ -133,7 +154,7 @@ export function eventIdFor(
   if (parseEventTimestamp(rawEvent.ts) === null) return randomUUID();
   const digest = createHash('sha256')
     .update(`${EVENT_ID_RECIPE_TAG}\0${producerKey ?? ''}\0`)
-    .update(canonicalJson(rawEvent))
+    .update(canonicalJson(rawEvent, { signedContent: true }))
     .digest();
   return uuidV8(digest);
 }
