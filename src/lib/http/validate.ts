@@ -24,15 +24,17 @@ export const JTI_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * UUID version 4 (RFC 4122 variant) only. aitp >= 0.14 verifiers reject a
- * revocation list carrying any non-v4 `entries[].jti` -- the WHOLE list, as
- * malformed. (The 0.17 Node signer still signs one, so the producer checks
- * before signing and refuses to publish.) Use
- * this for revocation entries only; other jti filters keep {@link JTI_UUID_RE}.
- * Case-insensitive: the `uuid` column stores (and the signer reads) lowercase.
+ * Lowercase, hyphenated UUID version 4 (RFC 4122 variant) only: exactly the
+ * `entries[].jti` form aitp's revocation signer (>= 0.18) and verifier
+ * (>= 0.14) accept. Anything else makes the verifier reject the WHOLE list as
+ * malformed, and the 0.18 signer refuse to sign it. Deliberately
+ * case-SENSITIVE: a genuine TCT's jti is lowercase on the wire, so an
+ * uppercase one cannot name a real token and is a client bug -- reject it
+ * rather than normalize it. Use this for revocation entries only; other jti
+ * filters keep {@link JTI_UUID_RE}.
  */
 export const JTI_V4_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Canonical 8-4-4-4-12 hex form, any version / variant, any case. */
 const ANY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
