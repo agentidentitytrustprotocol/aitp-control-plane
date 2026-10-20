@@ -179,8 +179,10 @@ back after cutover breaks the same way in the other direction.
   for why. Still verify an enrollment after any deploy that changes the value:
   boot only proves the secret is *usable*, not that it is the same one your
   already-issued tokens were minted under.
-- **`CORS_ORIGIN`** — allowed browser origin (the UI console's origin). Set it
-  to a single origin, e.g. `https://console.example.com`. Applied per-request at
+- **`CORS_ORIGIN`** — allowed browser origin for `/api/*`. Only a browser app
+  that calls the CP directly needs it; the UI console does not, since its BFF
+  proxy calls the CP server-to-server, where CORS does not apply. Set it to a
+  single origin, e.g. `https://dashboard.example.com`. Applied per-request at
   runtime by the proxy, so it can be changed via the deploy environment
   without rebuilding the image. Defaults to `http://localhost:3000` if unset.
   That "without rebuilding the image" claim is not taken on trust: `verify:image`

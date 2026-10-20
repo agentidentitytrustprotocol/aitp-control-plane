@@ -36,8 +36,9 @@ import { isEnvelopeSignature, jwsSigningInput } from './signed-content';
  * the cases where the stored `ts` falls back to ingest time) keeps a random
  * id: two identical ts-less events are most likely two real occurrences.
  *
- * The `v1` tag is part of the hashed input, so a future recipe (`v2`) yields
- * disjoint ids; rows written under an earlier recipe keep theirs.
+ * The recipe tag (`aitp-event:v2`) is part of the hashed input, so each recipe
+ * yields disjoint ids: rows written under v1 keep their v1 ids, and a re-send
+ * of such an event under v2 gets a new id rather than colliding.
  */
 export const EVENT_ID_RECIPE_TAG = 'aitp-event:v2';
 

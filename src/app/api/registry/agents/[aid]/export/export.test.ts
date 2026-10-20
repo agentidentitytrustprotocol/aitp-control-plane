@@ -51,7 +51,7 @@ function ctx() {
 const agentRow = { aid: AID, displayName: 'exporter', status: 'active' };
 const sessionRow = { sessionId: 's1', aidA: AID, aidB: 'aid:pubkey:other' };
 const tctRow = { jti: 'jti-1', issuerAid: AID };
-const eventRow = { id: 'ev-1', type: 'handshake.completed', aidA: AID };
+const eventRow = { id: 'ev-1', type: 'handshake.complete', aidA: AID };
 
 beforeEach(() => {
   selectResults = [];
