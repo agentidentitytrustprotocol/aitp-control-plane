@@ -41,12 +41,12 @@ describe('parseEventTimestamp', () => {
   );
 });
 
-describe('eventIdFor (recipe v1)', () => {
+describe('eventIdFor (recipe v2)', () => {
   const ev = { type: 't', ts: '2026-01-01T00:00:00Z', payload: { a: 1 } };
 
   it('is the documented recipe: v8 UUID over SHA-256 of tag, producer key, canonical JSON', () => {
     const digest = createHash('sha256')
-      .update(`aitp-event:v1\0apikey:0123456789abcdef\0${canonicalJson(ev)}`)
+      .update(`aitp-event:v2\0apikey:0123456789abcdef\0${canonicalJson(ev, { signedContent: true })}`)
       .digest();
     const b = Buffer.from(digest.subarray(0, 16));
     b[6] = (b[6] & 0x0f) | 0x80;
@@ -63,6 +63,41 @@ describe('eventIdFor (recipe v1)', () => {
     expect(eventIdFor(ev, 'k')).toBe(eventIdFor(reordered, 'k'));
     expect(eventIdFor(ev, 'k')).not.toBe(eventIdFor(ev, 'j'));
     expect(eventIdFor(ev, null)).toBe(eventIdFor(ev, null));
+  });
+
+  // RFC-AITP-0001 §5.4.3: never key dedup on a signed object's raw bytes.
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const signingInput = `${b64({ alg: 'EdDSA', typ: 'aitp-tct+jwt' })}.${b64({ jti: 'x', iss: 'a' })}`;
+
+  it('keys an embedded compact JWS on its signing input, not its signature', () => {
+    const at = (sig: string) => ({
+      type: 'tct.issued',
+      ts: '2026-01-01T00:00:00Z',
+      payload: { tct: { token: `${signingInput}.${sig}`, claims: { jti: 'x' } } },
+    });
+    expect(eventIdFor(at('c2lnQQ'), 'k')).toBe(eventIdFor(at('c2lnQR'), 'k'));
+    const otherClaims = `${b64({ alg: 'EdDSA' })}.${b64({ jti: 'y' })}.c2lnQQ`;
+    expect(eventIdFor(at('c2lnQQ'), 'k')).not.toBe(
+      eventIdFor({ ...at('c2lnQQ'), payload: { tct: { token: otherClaims, claims: { jti: 'x' } } } }, 'k'),
+    );
+  });
+
+  it('drops the detached signature of a manifest / revocation_list envelope', () => {
+    const at = (signature: string) => ({
+      type: 'agent.registered',
+      ts: '2026-01-01T00:00:00Z',
+      payload: { envelope: { manifest: { aid: 'a', version: 'aitp/0.3' }, signature } },
+    });
+    expect(eventIdFor(at('ed25519:AAAA'), 'k')).toBe(eventIdFor(at('AAAA'), 'k'));
+    // A bare `signature` field with no signed sibling is ordinary content.
+    const bare = (signature: string) => ({ type: 't', ts: '2026-01-01T00:00:00Z', payload: { signature } });
+    expect(eventIdFor(bare('a'), 'k')).not.toBe(eventIdFor(bare('b'), 'k'));
+  });
+
+  it('leaves dotted strings that are not a JWS untouched', () => {
+    const at = (v: string) => ({ type: 't', ts: '2026-01-01T00:00:00Z', payload: { v } });
+    expect(eventIdFor(at('a.b.c'), 'k')).not.toBe(eventIdFor(at('a.b.d'), 'k'));
+    expect(canonicalJson({ v: 'a.b.c' }, { signedContent: true })).toBe('{"v":"a.b.c"}');
   });
 
   it('is random when ts is absent or invalid', () => {

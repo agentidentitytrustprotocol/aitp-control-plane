@@ -13,7 +13,7 @@
 //     or with a payload nested too deep is
 //     dropped and reported in `dropped` / `errors[]` while the rest ingest;
 //     out-of-range `ts` falls back to ingest time
-//   • de-duplication (#P5): content-derived ids (recipe v1) — same raw event
+//   • de-duplication (#P5): content-derived ids (recipe v2) — same raw event
 //     + same bearer token + valid ts => same id across requests; key order
 //     irrelevant; ts-less events keep random ids; in-batch duplicates
 //     collapsed; events the store did not insert still reach the monitors but

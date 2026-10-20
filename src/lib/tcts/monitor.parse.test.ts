@@ -32,7 +32,7 @@ describe('parseTct', () => {
     const raw = {
       token: 'eyJhbGciOiJFZERTQSJ9.eyJqdGkiOiIuLi4ifQ.sig',
       claims: {
-        ver: 'aitp/0.2',
+        ver: 'aitp/0.3',
         jti: JTI,
         iss: 'aid:test:issuer',
         sub: 'aid:test:subject',
@@ -123,11 +123,11 @@ describe('parseDelegation', () => {
   });
 
   it('projects a real single-hop token: parent from voucher.src_jti, synthetic jti', () => {
-    // The real SDK v0.2 single-hop delegation: no top-level jti, no
+    // The real SDK single-hop delegation (aitp/0.3 still): no top-level jti, no
     // top-level src_jti — the parent TCT jti lives only inside the
     // embedded grant voucher.
     const voucher = jws({
-      ver: 'aitp/0.2',
+      ver: 'aitp/0.3',
       iss: 'aid:test:grantor',
       sub: 'aid:test:delegator',
       src_jti: PARENT,
@@ -139,7 +139,7 @@ describe('parseDelegation', () => {
       tct: {
         token: 'eyJhbGciOiJFZERTQSJ9.ZGVsZWdhdGlvbi1ib2R5.sig',
         claims: {
-          ver: 'aitp/0.2',
+          ver: 'aitp/0.3',
           iss: 'aid:test:delegator',
           sub: 'aid:test:delegatee',
           aud: 'aid:test:grantor',
@@ -172,6 +172,13 @@ describe('parseDelegation', () => {
       tct: { ...payload.tct, token: 'eyJhbGciOiJFZERTQSJ9.b3RoZXI.sig' },
     };
     expect(parseDelegation(other, TS)?.jti).not.toBe(out?.jti);
+
+    // RFC-AITP-0001 §5.4.3: the same delegation with a re-encoded signature
+    // segment is the same row -- the jti keys on what the signature covers.
+    const reSigned = {
+      tct: { ...payload.tct, token: 'eyJhbGciOiJFZERTQSJ9.ZGVsZWdhdGlvbi1ib2R5.c2ln' },
+    };
+    expect(parseDelegation(reSigned, TS)?.jti).toBe(out?.jti);
   });
 
   it('reads voucher.src_jti for a single-hop token even with an explicit jti', () => {

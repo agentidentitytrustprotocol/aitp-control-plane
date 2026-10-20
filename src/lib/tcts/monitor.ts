@@ -28,6 +28,8 @@ import type { AuditEventRecord } from '../audit/stream';
 import { logger } from '../logger';
 import { config } from '../config';
 import { JTI_UUID_RE } from '../http/validate';
+import { getAgent } from '../registry/store';
+import { jwsSigningInput } from '../audit/signed-content';
 import {
   decideProjection,
   verifyObservedTct,
@@ -151,15 +153,21 @@ function wrapperToken(wrapper: unknown): string | undefined {
 }
 
 /**
- * Deterministic RFC-4122 v5 UUID over a delegation token. SDK v0.2
- * single-hop delegation tokens carry no protocol `jti` (per
- * `aitp-delegation`, `jti` is REQUIRED only for multi-hop chains), but the
- * projection row still needs a stable, unique primary key. Hashing the
- * exact token bytes makes the jti idempotent: re-ingesting the same event
- * yields the same jti, so `onConflictDoNothing` continues to dedupe.
+ * Deterministic RFC-4122 v5-shaped UUID for a delegation token. Single-hop
+ * delegation tokens carry no protocol `jti` (per `aitp-delegation`, `jti` is
+ * REQUIRED only for multi-hop chains; still true in aitp/0.3), but the
+ * projection row needs a stable, unique primary key, so re-ingesting the same
+ * delegation must yield the same jti for `onConflictDoNothing` to dedupe.
+ *
+ * Keyed on the JWS signing input (`header.payload`), NOT the whole token:
+ * the signature segment is not canonical, so hashing it would give one
+ * delegation two rows (RFC-AITP-0001 §5.4.3). The `:v2` tag keeps these ids
+ * disjoint from the v1 ids (whole-token hash) already stored. A token that is
+ * not a compact JWS falls back to its full string.
  */
 function syntheticDelegationJti(token: string): string {
-  const b = createHash('sha1').update(`aitp-delegation:${token}`).digest().subarray(0, 16);
+  const content = jwsSigningInput(token) ?? token;
+  const b = createHash('sha1').update(`aitp-delegation:v2\0${content}`).digest().subarray(0, 16);
   b[6] = (b[6] & 0x0f) | 0x50; // version 5
   b[8] = (b[8] & 0x3f) | 0x80; // RFC-4122 variant
   const x = b.toString('hex');
@@ -393,11 +401,18 @@ class TctMonitorService {
   private async recordDelegation(event: AuditEventRecord): Promise<void> {
     const delegation = parseDelegation(event.payload, event.ts);
     if (!delegation) return;
+    // aitp 0.16: delegation verification needs the delegator's Manifest. Look
+    // it up only when verification will run, so `off` stays free of DB work.
+    let issuerManifests: string[] = [];
+    if (config.observedArtifactVerification !== 'off') {
+      const row = await getAgent(delegation.delegatorAid);
+      if (row) issuerManifests = [row.manifestJson];
+    }
     if (
       !gateObserved(
         'delegation',
         delegation.jti,
-        () => verifyObservedDelegation(event.payload),
+        () => verifyObservedDelegation(event.payload, issuerManifests),
       )
     ) {
       return;
