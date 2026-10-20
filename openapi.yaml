@@ -187,7 +187,7 @@ components:
                 The value set is owned by the `aitp` SDK's `verifyManifestJson`
                 (listed at
                 https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification;
-                verified against `aitp` `^0.13.1`). It is deliberately not an
+                verified against `aitp` `^0.17.0`, which added `unknown_field`). It is deliberately not an
                 `enum`: a new SDK release may add values, which this service
                 passes through verbatim. Treat any unrecognized value as a
                 generic "manifest verification failed".
@@ -440,11 +440,13 @@ components:
         One event as submitted to `POST /api/events`. No field is required;
         the server normalizes each item (full rules: docs/events.md#ingest-normalization).
         The server always assigns the stored `id` (a client-supplied `id` is
-        never used as the id; it is just part of the content). Recipe v1: an
+        never used as the id; it is just part of the content). Recipe v2: an
         item with a valid `ts` gets a deterministic UUID (RFC 9562 version 8)
-        derived from SHA-256 over the tag `aitp-event:v1`, a fingerprint of the
+        derived from SHA-256 over the tag `aitp-event:v2`, a fingerprint of the
         caller's bearer token, and the item exactly as received in canonical
-        JSON (keys sorted — key order is irrelevant); an item without a valid
+        JSON (keys sorted — key order is irrelevant; an embedded compact JWS
+        counts as its signing input and a Manifest / revocation-list
+        envelope without its `signature`, per RFC-AITP-0001 §5.4.3); an item without a valid
         `ts` gets a random id. So the same producer re-sending the same event
         is recognised as a duplicate (`EventIngestResponse.duplicates`): stored,
         streamed and delivered to webhooks once; different API keys never
@@ -611,7 +613,7 @@ components:
         jti:
           type: string
           format: uuid
-          description: RFC 4122 UUID, versions 1–5 only (v6/v7/v8 are `400 JTI_INVALID`).
+          description: RFC 4122 UUID **version 4** only (either case); any other version is `400 JTI_INVALID`. aitp ≥ 0.14 verifiers reject a whole revocation list carrying a non-v4 entry.
         reason:
           type: string
           maxLength: 500
@@ -1170,7 +1172,9 @@ paths:
             (checked first, before the token); `BAD_REQUEST` when the
             `X-Aitp-Namespace` header is over 128 characters or contains a NUL
             (checked after the token is validated but before its `jti` is
-            consumed, so the same token can be retried); `MANIFEST_EXPIRED`
+            consumed, so the same token can be retried); `MANIFEST_INVALID`
+            when `manifest.version` is not `aitp/0.3` (also before the `jti` is
+            consumed; re-enroll with a current SDK); `MANIFEST_EXPIRED`
             when `manifest.expires_at` is inside the 5-minute registration
             window (the same code `POST /api/registry/enroll` returns for that
             condition); `BODY_INVALID` when `manifest.extensions.namespace` is

@@ -80,6 +80,42 @@ What is specific to this service:
   revocation discards that fallback. Both paths log a line containing
   `revocation DB read failed` (warn when serving stale, error when refusing),
   and the shipped-image harness asserts on that text — keep it.
+- **Every entry `jti` is a UUID v4.** aitp ≥ 0.14 verifiers reject the whole
+  list as malformed if any entry is not, and the 0.17 Node signer does not
+  check. `POST /api/revocation/entries` accepts only v4, and if a non-v4 row is
+  in `revocation_entries` anyway (written before that check) the producer
+  refuses to sign: the endpoint answers `503 REVOCATION_UNAVAILABLE` and logs
+  `revocation list signing failed, refusing to publish a list` at error with
+  the offending `nonV4Jtis`. Nothing is dropped or rewritten automatically —
+  deciding what to do with such a row is an operator call. Count them with
+  `select count(*) from revocation_entries where jti::text !~*
+  '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
+
+## aitp/0.3 cutover (aitp 0.17)
+
+aitp 0.17 moves the wire protocol from `aitp/0.2` to `aitp/0.3` with **no
+dual-accept**: a 0.17 verifier rejects every `aitp/0.2` artifact, and a 0.13
+verifier rejects every `aitp/0.3` one. The CP is an issuer (its own Manifest,
+the revocation list, enrollment), so it must be deployed **together with** the
+playground and the UI console, never ahead of or behind them. Rolling the CP
+back after cutover breaks the same way in the other direction.
+
+- **The published image is `:latest` from `main`.** CI pushes
+  `ghcr.io/agentidentitytrustprotocol/aitp-control-plane:latest` on every push
+  to `main`, and a deployment that tracks `:latest` picks it up on its next
+  redeploy or restart. Merging the 0.17 bump is therefore the deploy trigger —
+  merge only inside the coordinated window.
+- **Enrollment.** `/enroll` rejects an `aitp/0.2` Manifest as
+  `version_unknown`; `POST /api/registry/agents` rejects a non-`aitp/0.3`
+  Manifest as `MANIFEST_INVALID`. Agents re-enroll with a 0.17 SDK.
+- **Existing registrations.** The expiry sweep (every tick) marks every active
+  agent whose stored Manifest is not `aitp/0.3` as `expired`, emitting
+  `agent.expired` with `reason: "manifest_version_unsupported"`. Re-enrolling
+  sets the row back to `active`. Nothing is deleted.
+- **Observed delegations.** With `OBSERVED_ARTIFACT_VERIFICATION` on, a
+  delegation verifies only once its delegator has re-enrolled (see
+  [Observed-artifact verification](#observed-artifact-verification)).
+- **Revocation entries** must be UUID v4 (above).
 
 ## Authentication & exposure
 
@@ -525,7 +561,7 @@ events are agent-reported, and by default the projection (`issued_tcts`,
 `OBSERVED_ARTIFACT_VERIFICATION` opts into checking them:
 
 - **`off`** (default) — no verification; unchanged behaviour.
-- **`warn`** — when a report carries the v0.2 `{ token, claims }` wrapper, verify
+- **`warn`** — when a report carries the `{ token, claims }` wrapper, verify
   the compact-JWS `token` with the SDK. A failure is logged (`tct-monitor:
   observed artifact failed verification`) and the row is projected anyway.
   Claims-only reports are projected silently.
@@ -540,6 +576,10 @@ grant, so the audience and grant checks are tautological and the real signal is
 signature + expiry; a TCT with no grants fails. A delegation is checked with the
 strict single-hop `verifyDelegation`, passing the delegation's own `aud` as the
 verifier AID, so **multi-hop chains fail** (and are dropped under `strict`).
+Since aitp 0.16 it also needs the **delegator's Manifest**, which the CP takes
+from the delegator's `agents` row: a delegation whose delegator is not enrolled
+here, or whose stored Manifest is expired or `aitp/0.2`, fails
+(`KEY_RESOLUTION_FAILED`) — logged under `warn`, dropped under `strict`.
 Verification does not consult the revocation list, and no `verified` flag is
 persisted: the outcome only gates projection and is logged.
 
@@ -735,8 +775,8 @@ The third — the rethrow to `500` — *is* visible, but only in the application
 Next prints the error and a stack trace to stderr. So during a `500` incident
 read the pod logs; for the other two there is nothing there to read.
 
-Its `code` label is a bounded set of **ten** values — the eight codes the `aitp`
-SDK documents for manifest verification, plus:
+Its `code` label is a bounded set of **eleven** values — the nine codes the `aitp`
+SDK documents for manifest verification (`unknown_field` since 0.15), plus:
 
 - `none` — the manifest was rejected by *this service* rather than by the SDK
   (a `manifest.aid` that is not an AID, an `expires_at` inside the 5-minute
