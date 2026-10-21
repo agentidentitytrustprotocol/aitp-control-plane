@@ -32,6 +32,22 @@ type G = {
 };
 const g = globalThis as unknown as G;
 
+/** Wait until no backend is connected to `db`; fail loudly, naming them, if one lingers. */
+async function waitForNoBackends(admin: pg.Pool, db: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { rows } = await admin.query<{ pid: number; state: string | null; query: string }>(
+      'SELECT pid, state, query FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+      [db],
+    );
+    if (rows.length === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`connections to ${db} still open after ${timeoutMs}ms: ${JSON.stringify(rows)}`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 describe('integration: revocation list fails closed on a failing database', () => {
   const admin = new pg.Pool({ connectionString: ADMIN_URL, max: 1 });
   let routeGet: () => Promise<Response>;
@@ -57,6 +73,12 @@ describe('integration: revocation list fails closed on a failing database', () =
     await producerPool.end();
     Object.assign(g, saved);
     process.env.DATABASE_URL = ADMIN_URL;
+    // pool.end() resolves once pg-pool has dropped its clients from its list,
+    // while each client's own end() is still closing its socket. A FORCE drop
+    // in that window terminates the backend (57P01) and the half-closed client,
+    // no longer in any pool, emits an unhandled 'error' (#144). Wait for the
+    // backends to go; FORCE stays only as a backstop.
+    await waitForNoBackends(admin, dbName);
     await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
     await admin.end();
   });
