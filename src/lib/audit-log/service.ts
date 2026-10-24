@@ -10,6 +10,8 @@ export interface AdminAuditEntry {
   targetId?: string;
   details?: Record<string, unknown>;
   requestId?: string;
+  /** Recorded as `details.client_ip` when present (see auditContext). */
+  clientIp?: string;
 }
 
 // Failures here never abort the caller (audit must not gate the request
@@ -28,7 +30,9 @@ export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
       action: entry.action,
       actorId: entry.actorId ?? null,
       targetId: entry.targetId ?? null,
-      details: entry.details ?? {},
+      details: entry.clientIp
+        ? { ...(entry.details ?? {}), client_ip: entry.clientIp }
+        : (entry.details ?? {}),
       requestId: entry.requestId ?? null,
     });
   } catch (err) {

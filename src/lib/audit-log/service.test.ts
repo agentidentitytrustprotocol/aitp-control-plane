@@ -95,6 +95,19 @@ describe('writeAdminAudit', () => {
     ]);
   });
 
+  it('records the gate-resolved client IP as details.client_ip, alongside the key label actor', async () => {
+    await writeAdminAudit({
+      action: 'webhook.create',
+      actorId: 'key:console',
+      details: { url: 'https://x.example' },
+      clientIp: '198.51.100.7',
+    });
+    expect(insertValuesArgs[0]).toMatchObject({
+      actorId: 'key:console',
+      details: { url: 'https://x.example', client_ip: '198.51.100.7' },
+    });
+  });
+
   it('never throws on a DB failure and increments the failure counter instead', async () => {
     insertShouldReject = true;
     const before = getAdminAuditInsertFailures();

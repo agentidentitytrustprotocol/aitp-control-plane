@@ -8,6 +8,7 @@ import { SUPPORTED_MANIFEST_VERSION } from '@/lib/registry/manifest-version';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
@@ -360,7 +361,7 @@ export async function POST(req: NextRequest) {
     await writeAdminAudit({
       action: 'agent.register',
       targetId: manifest.aid,
-      requestId: req.headers.get('x-request-id') ?? undefined,
+      ...auditContext(req, 'enrollment-token'),
     });
 
     return {

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { deactivateAgent, getAgent } from '@/lib/registry/store';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
@@ -58,7 +59,7 @@ export async function DELETE(
   await writeAdminAudit({
     action: 'agent.deregister',
     targetId: decoded,
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   const event: AuditEventRecord = {
     id: randomUUID(),

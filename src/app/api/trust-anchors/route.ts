@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
-import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
+import { actorIdFromAuthHeader, auditContext } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
 import {
   badRequest,
@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
       action: 'trust-anchor.create',
       targetId: id,
       details: { namespace, issuerUrl },
-      requestId: req.headers.get('x-request-id') ?? undefined,
+      ...auditContext(req),
     });
     const created = await db
       .select()

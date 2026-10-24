@@ -2030,9 +2030,24 @@ function parseChunkModules(text) {
   const mods = [];
   const skipLiteral = (p) => skipLiteralAt(text, p);
 
+  // Next 16.4 also emits GROUPED entries, `module.exports=[[<id>,<factory>],...]`,
+  // alongside the flat `[<id>,<factory>,...]` form. A group is one level of nesting
+  // holding the same id/factory pairs; the gate's module is in a grouped chunk.
+  let grouped = false;
   for (;;) {
     while (i < n && /[\s,]/.test(text[i])) i++;
-    if (i >= n || text[i] === ']') break;
+    if (i >= n) break;
+    if (text[i] === ']') {
+      if (!grouped) break;
+      grouped = false;
+      i++;
+      continue;
+    }
+    if (text[i] === '[' && !grouped) {
+      grouped = true;
+      i++;
+      continue;
+    }
     const m = /^(\d+)/.exec(text.slice(i, i + 24));
     if (!m) {
       throw new Error(

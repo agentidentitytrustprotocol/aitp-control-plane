@@ -125,7 +125,12 @@ back after cutover breaks the same way in the other direction.
 - **`API_KEYS`** — comma-separated allowlist for gated routes. **Required in
   production**: empty `API_KEYS` in prod makes every gated route return
   `503 SERVER_MISCONFIGURED` (fail-safe). Empty in non-prod disables auth and
-  logs a one-time warning.
+  logs a one-time warning. Entries are `label:key` (preferred) or bare `key`
+  (labelled `unlabelled-<n>`); the label is a non-secret consumer name written to
+  `admin_audit_log.actor_id` as `key:<label>`. Give each consumer its own key so
+  one can be rotated or revoked alone — see
+  [api.md](api.md#api-keys-per-consumer-labels) and
+  `scripts/handoff/rotate-api-key.sh`.
 - **`ENROLLMENT_SECRET`** — server-side HMAC key for minting/verifying one-time
   enrollment tokens. Required, and **≥ 32 characters**. Callers never see it.
   Unset or too short takes out **both** `POST /api/registry/enroll` and
@@ -303,7 +308,7 @@ discovery paths, apply it at the edge.
 |---|---|---|---|
 | `enroll-ip` | 5/min | `RATE_LIMIT_ENROLLMENT_PER_IP_MIN` | client IP (brute-force guard on enrollment) |
 | `public-ip` | 60/min | `RATE_LIMIT_PUBLIC_PER_IP_MIN` | client IP |
-| `api-key` | 600/min | `RATE_LIMIT_API_KEY_PER_MIN` | API key prefix |
+| `api-key` | 600/min | `RATE_LIMIT_API_KEY_PER_MIN` | API key prefix (per key, not per label) |
 
 - `RATE_LIMIT_WINDOW_MS` (default 60000) is the accumulation window.
 - `RATE_LIMIT_ENABLED=false` disables the limiter entirely (dev / load tests).

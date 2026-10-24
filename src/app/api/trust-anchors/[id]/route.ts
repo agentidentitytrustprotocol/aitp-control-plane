@@ -3,6 +3,7 @@ import { type SQL, eq, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import {
   badRequest,
   checkColumnString,
@@ -163,7 +164,7 @@ export async function PATCH(
     action: 'trust-anchor.update',
     targetId: id,
     details: { ...changes, updatedAt: patch.updatedAt },
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return Response.json(rowOut(updated[0]));
 }
@@ -184,7 +185,7 @@ export async function DELETE(
   await writeAdminAudit({
     action: 'trust-anchor.delete',
     targetId: id,
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return new Response(null, { status: 204 });
 }
