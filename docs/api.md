@@ -60,6 +60,22 @@ spec rather than restate it.
 
 A gated request with a missing or unknown key is rejected by the gate with `401 { "error": "Unauthorized", "code": "INVALID_API_KEY" }` before it reaches a handler. In production, an empty `API_KEYS` makes every gated route return `503 SERVER_MISCONFIGURED` — fail-safe against accidental exposure. In non-production, an empty `API_KEYS` disables auth on gated routes (a boot-time warning is logged).
 
+### API keys (per-consumer labels)
+
+`API_KEYS` is a comma-separated list. Each entry is either `label:key` or a bare `key`:
+
+```
+API_KEYS=console-20261024:<secret>,playground:<secret>,<legacy-bare-secret>
+```
+
+- **Label.** 1-40 characters matching `[A-Za-z0-9][A-Za-z0-9._-]{0,39}`, a short **non-secret** consumer name. Only the first `:` splits, and only when the prefix is a valid label; otherwise the whole entry is a bare key, so existing bare keys keep working unchanged. Clients always send just the key: `Authorization: Bearer <secret>`, never `label:secret`.
+- **Bare keys** are labelled `unlabelled-<n>` (1-based position in the list). That label moves if the list is reordered, so label every key.
+- **Guards** (boot warnings, never fatal; they never print a secret): a label that equals a configured key, or is an 8+ character substring of one, is refused and falls back to `unlabelled-<n>`; a duplicate key keeps its first entry; a label used twice is accepted but its traffic is indistinguishable.
+- **Audit attribution.** The gate resolves the label and forwards it to the handler (`x-aitp-key-label`, together with the client IP as `x-aitp-client-ip`; any client-supplied copy of either header is dropped). Every `admin_audit_log` row written by a key-authenticated mutation records `actor_id = key:<label>` and, when known, `details.client_ip`. Agent registration via an enrollment token records `actor_id = enrollment-token`. Agent telemetry (`POST /api/events` -> `audit_events`) is not labelled; its event ids still derive from a key fingerprint.
+- **Rate limits stay per key**, not per label: two keys with the same label get separate `api-key` buckets.
+- **Rotation without downtime.** Add the new key next to the old one, move the consumer to it, then remove the old entry; the removed key answers `401 INVALID_API_KEY` from then on. `scripts/handoff/rotate-api-key.sh` does this for the console key (dry run by default; `--apply`, `--rollback`).
+- **Review.** `scripts/audit-review.ts` is a read-only report over `admin_audit_log`, telemetry and the state tables for a `--since`/`--until` range, grouped by key label, route, source IP and outcome, with unattributed mutations flagged (`npx tsx scripts/audit-review.ts --since 2026-05-23 [--known-actors key:console-*,...] [--json]`; reads `AUDIT_REVIEW_DATABASE_URL` or `DATABASE_URL`, and opens a `default_transaction_read_only` session).
+
 `ENROLLMENT_SECRET` is the **server-side** HMAC key the CP uses to mint and verify enrollment tokens. Callers never present it directly. A production server whose value is unset or shorter than 32 characters refuses to start, so the enrollment `503 SERVER_MISCONFIGURED` below is something you should only see from a non-production deployment — see [operations.md](operations.md#authentication--exposure).
 
 ## Rate limiting
