@@ -302,112 +302,127 @@
   },
   "bootGraph": [
     {
-      "path": "instrumentation/chunks/[externals]_@opentelemetry_auto-instrumentations-node_1zlmz_g._.js",
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_auto-instrumentations-node_1zlmz_gx8q0c9._.js",
+      "bytes": 288,
+      "sha256": "6911af0dafe946bcade3e481c6689fc354c3f1a905dbafc4c05f5a1b4b81b39e"
+    },
+    {
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_exporter-trace-otlp-http_1ud6z9eol8y_-._.js",
       "bytes": 282,
-      "sha256": "c9657ab25a784a61ce78c767b5c0b8ce7c781e00c0d161dc227df022fd4edad2"
+      "sha256": "037450326f8bb71d8a382e87e7ddeaa55f87834f21a3080fdae97b6d4ee2bce9"
     },
     {
-      "path": "instrumentation/chunks/[externals]_@opentelemetry_exporter-trace-otlp-http_1ud6z9e._.js",
-      "bytes": 276,
-      "sha256": "39414ab19ef21000ef40552972ed68b29b2269fe0bc7427655820c68a07bd358"
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_resources_1mr2n-ub84lyl._.js",
+      "bytes": 238,
+      "sha256": "02899c005079cce7300ed48d6e0ec9913f7a5eb62ede984f16820cc9628214a3"
     },
     {
-      "path": "instrumentation/chunks/[externals]_@opentelemetry_resources_1mr2n-u._.js",
-      "bytes": 232,
-      "sha256": "db829e85d6c18030371bc862dc07bf3c84b3cdb755a32ae5a6fb6512c06355b6"
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_sdk-node_12qoa3yiiao8-._.js",
+      "bytes": 235,
+      "sha256": "1cdfa7fbabfed5cde16ff899eef6b18f3e86649d908ab2c089a137222fbac39f"
     },
     {
-      "path": "instrumentation/chunks/[externals]_@opentelemetry_sdk-node_12qoa3y._.js",
-      "bytes": 229,
-      "sha256": "c1da5689f5ed09a616bdef7bea8543e7cf1d3bb42854774821a3ed2bae9a9b04"
+      "path": "instrumentation/chunks/[externals]_@opentelemetry_semantic-conventions_1cyb5wns2n__u._.js",
+      "bytes": 271,
+      "sha256": "99c244733341e94434defbd16228c682f941522494605f727381bc0ab3168277"
     },
     {
-      "path": "instrumentation/chunks/[externals]_@opentelemetry_semantic-conventions_1cyb5wn._.js",
-      "bytes": 265,
-      "sha256": "470ad31dbbc9291196e5e3427b6504140885f150968ef2b1dfcfdc33e2fc8f54"
+      "path": "instrumentation/chunks/[root-of-the-server]__05orm08vhio36._.js",
+      "bytes": 2745,
+      "sha256": "58a2f9862d028e65b9ac2dbcb2b064b69ba40d9a2a3f739bfffb0ac74c81237e"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__05orm08._.js",
-      "bytes": 2796,
-      "sha256": "f763dc4c3c4e8868a2434cb53a15877a674a3af4a4bd4551c1459eaba9ca3a5d"
+      "path": "instrumentation/chunks/[root-of-the-server]__0f9hzcvpf25hr._.js",
+      "bytes": 1995,
+      "sha256": "632e8f7e25315f2e42393976bafe85b61118150bf12cd205223fe3f581305183"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__07lay6v._.js",
-      "bytes": 2629,
-      "sha256": "40f547c84a731a726d8751a909fa4e9334cc583e7edac420488a31981bcf14d0"
+      "path": "instrumentation/chunks/[root-of-the-server]__0jo0zzx2468bl._.js",
+      "bytes": 1967,
+      "sha256": "be9b35a03145b096151f2b597f414586ac04190d1d80115c67fc20dd4858be4e"
     },
     {
-      "path": "instrumentation/chunks/[root-of-the-server]__12r19o9._.js",
-      "bytes": 2679,
-      "sha256": "ad370278a11507973812ba84b334e4489fcd78df14e5d6fc0589506974a9193f"
-    },
-    {
-      "path": "instrumentation/chunks/[root-of-the-server]__13dqxbd._.js",
-      "bytes": 5420,
-      "sha256": "2ea073ae73004bb680cd5526a65f4819dfe66db860591615ee230c5e7357114b"
+      "path": "instrumentation/chunks/[root-of-the-server]__20ouyq-7g441c._.js",
+      "bytes": 1918,
+      "sha256": "7c716b91747277acbbe15a966ed36d57ff246acef75f50fc11a79b2271345f7e"
     },
     {
       "path": "instrumentation/chunks/[turbopack]_runtime.js",
-      "bytes": 36624,
-      "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
+      "bytes": 42675,
+      "sha256": "7420f6a55f915567d605743e72df7559cca8651e34c19ca07541a2f12c10da4f"
     },
     {
-      "path": "instrumentation/chunks/_0jazx56._.js",
-      "bytes": 109469,
-      "sha256": "7cef7f7cf1c1b5f7cf7a4b9423d759db232ae5a1457723bdbb0b9bcf64358f6a"
+      "path": "instrumentation/chunks/_0jazx56n52r0z._.js",
+      "bytes": 101822,
+      "sha256": "143ad4636e1f8b71681d13686c9917828f22984f81614c9f236f119377716e10"
     },
     {
-      "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7.js",
-      "bytes": 10159,
-      "sha256": "ad62a0d102f86f9013af971fb61c9511e1bc6f28b5f2c8b8573945fa004bc934"
+      "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7rymoxh.js",
+      "bytes": 10049,
+      "sha256": "bae1e2bcada4873174fadc984191ad8485d15b545db3198dac272f0ace8764e3"
     },
     {
-      "path": "instrumentation/chunks/src_lib_12e0lj-._.js",
-      "bytes": 5449,
-      "sha256": "99ee7200ff5cf0096881fdeb69cce89b61c4525fd83ade17ce85ea9a45f4f263"
+      "path": "instrumentation/chunks/src_instrumentation_ts_07j_8w1ivtswj._.js",
+      "bytes": 1211,
+      "sha256": "58dc5ff8331653285ba5506d70908815e02aa74d804c2a78c75587eb16a85551"
     },
     {
-      "path": "instrumentation/chunks/src_lib_1lomdag._.js",
-      "bytes": 7097,
-      "sha256": "94498e1c735542d4c23257bd03806739d91475c6762aef532d6cdf42fca70a86"
+      "path": "instrumentation/chunks/src_lib_config_ts_046tg8wb6vwch._.js",
+      "bytes": 4553,
+      "sha256": "5565132278638145ee3847ed31157c86612ce2037a2e00abba2914a9cca05d68"
     },
     {
-      "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdiv._.js",
-      "bytes": 1041,
-      "sha256": "e3ccdb4a27186d78e91f1d69e83f7ab53fc8029ca71c5d4819e9efffd49b1f15"
+      "path": "instrumentation/chunks/src_lib_identity_cp-seed-config_ts_1bksh9jjuo_hy._.js",
+      "bytes": 2738,
+      "sha256": "7fbfdf59e459bd56aacb9ee30eb2c74a4ff923090098b0b5fa96d2405cd93939"
+    },
+    {
+      "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdivqfy3he._.js",
+      "bytes": 1047,
+      "sha256": "49b8509177d110aab0997999044b84cca584070da6b477a80a64dc0d423eb38e"
+    },
+    {
+      "path": "instrumentation/chunks/src_lib_registry_enrollment-config_ts_0q5mrtz0hn02o._.js",
+      "bytes": 1108,
+      "sha256": "0660296695db55f18310931e0263cd04a955dc3ea7ccbbdecdfc5e8a9f229efe"
+    },
+    {
+      "path": "instrumentation/chunks/src_lib_request-error_ts_16sw8bxmy72_n._.js",
+      "bytes": 850,
+      "sha256": "425c63572dd85fd9478e6255f441f7c225cce54bf409735d94818c75fdb70beb"
     },
     {
       "path": "instrumentation/instrumentation.js",
-      "bytes": 179,
-      "sha256": "ffbf734cb617145c88409ae8f918d039b77a37d46dd981d865c69880076ae379"
+      "bytes": 248,
+      "sha256": "98d4ed321cbefe5a4ec170341afe7591c397eab70f84cbace245ab86788427c4"
     },
     {
-      "path": "middleware/chunks/[externals]__06hzl-k._.js",
-      "bytes": 1272,
-      "sha256": "4a408bb2af49355e765d69231e6190d14f8c34c60226c5ef69106a7398a3b8cc"
+      "path": "middleware/chunks/[externals]__0s4k65h605xvb._.js",
+      "bytes": 1178,
+      "sha256": "8b223981361bf2b2a0b723847d9ca024cd203f4ab14302aa204825cb8a511002"
     },
     {
-      "path": "middleware/chunks/[root-of-the-server]__14ebpc9._.js",
-      "bytes": 236750,
-      "sha256": "b910e8eb6b3c625d9523da7f175f88e3cba5e20b4865d49c361733163df5574d"
+      "path": "middleware/chunks/[root-of-the-server]__1rljp6ibfciql._.js",
+      "bytes": 218801,
+      "sha256": "468fa34aebe97a83a024ce7865c9240471b939468ee68fae00a4631bb011bc19"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
-      "bytes": 36624,
-      "sha256": "4edd2b962c9675984942c07b0536edfc9babb00bf86f0b769a3ca493392cebf4"
+      "bytes": 42675,
+      "sha256": "7420f6a55f915567d605743e72df7559cca8651e34c19ca07541a2f12c10da4f"
     },
     {
       "path": "middleware/middleware.js",
-      "bytes": 221,
-      "sha256": "34aebe7138d760b8bd80ba43a64176f01369f2c297c68efc4f1c6dbed57d6248"
+      "bytes": 233,
+      "sha256": "211093723ab3c663fe021e51af13ec4fdf0706138fed6c3f4d74eaef68773bc0"
     },
     {
       "path": "server.js",
-      "bytes": 7866,
-      "sha256": "a555d336cb6f0aa6ab526d1324670c553d196c95d1931bcf744c48f62f1b94a4"
+      "bytes": 8288,
+      "sha256": "d4398f6511a64086dfaf03ce5b21861c27cc42e34a2010b964c9a8d8cb824f81"
     }
   ],
-  "nextTreeSha": "542dc6ca8f7801037fc572ba549e1fa8cf083a7cf21ceb1571874c75d872a536",
+  "nextTreeSha": "c9a882c56db51eea0cc7d8e502921f09cff91b07337956e57876618d686c7aba",
   "imageConfig": {
     "Env": [
       "HOSTNAME=0.0.0.0",
@@ -428,7 +443,7 @@
   },
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
-    "bytes": 2837,
-    "sha256": "e96e4db710a8c4a714ee016a2a08d8a30d6c793c98e7063da138e78a4275fbe9"
+    "bytes": 2966,
+    "sha256": "344ea7ee3c138392b626ef643204855c2fe4f601eb736350c9d9354c712f0d45"
   }
 }
