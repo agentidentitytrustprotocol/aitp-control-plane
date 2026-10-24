@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { revocationEntries } from '@/lib/db/schema';
 import { revocationProducer } from '@/lib/revocation/producer';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import { ingestOneEvent } from '@/lib/audit/event-store';
 import { dispatchWebhooks } from '@/lib/webhooks/service';
@@ -227,7 +228,7 @@ export async function POST(req: NextRequest) {
       action: 'revocation.add',
       targetId: body.jti as string,
       details: { reason },
-      requestId: req.headers.get('x-request-id') ?? undefined,
+      ...auditContext(req),
     });
 
     return {

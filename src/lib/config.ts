@@ -1,4 +1,5 @@
 import { isProductionNodeEnv } from './node-env';
+import { parseApiKeys } from './api-keys';
 
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
@@ -89,6 +90,9 @@ function readHeartbeatMs(): number {
   );
 }
 
+// Parsed once: `label:key` or bare `key` entries (see src/lib/api-keys.ts).
+const parsedApiKeys = parseApiKeys(process.env.API_KEYS);
+
 export const config = {
   isProduction: isProductionNodeEnv(),
   port: readNumber('PORT', 4000),
@@ -98,7 +102,12 @@ export const config = {
     process.env.DATABASE_URL ??
     'postgres://postgres:postgres@localhost:5432/aitp_control_plane',
   dbPoolMax: readNumber('DB_POOL_MAX', 20),
-  apiKeys: readList('API_KEYS'),
+  // The secrets only, in list order. Kept for callers that just need "is this
+  // a configured key"; the gate itself uses apiKeyEntries for the label.
+  apiKeys: parsedApiKeys.entries.map((e) => e.key),
+  // One entry per consumer, each with a non-secret label recorded as the actor
+  // on admin audit rows. Rate limits stay per KEY, not per label.
+  apiKeyEntries: parsedApiKeys.entries,
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
   maxAuditEventsInMemory: readNumber('MAX_AUDIT_EVENTS_MEMORY', 500),
   // Per-process cap on concurrent /api/events/stream connections.
@@ -224,6 +233,15 @@ if (!config.isProduction && config.apiKeys.length === 0 && !process.env.JEST_WOR
     '[aitp-cp] API_KEYS is empty; admin routes are unauthenticated in this NODE_ENV. ' +
       'Set API_KEYS before exposing this instance to anything beyond localhost.',
   );
+}
+
+// Label problems (a duplicate, or a label refused for containing a secret).
+// The messages name entry positions and labels only, never a key.
+if (!process.env.JEST_WORKER_ID) {
+  for (const w of parsedApiKeys.warnings) {
+    // eslint-disable-next-line no-console
+    console.warn(`[aitp-cp] ${w}`);
+  }
 }
 
 // A heartbeat slower than the edge's idle timeout silently reintroduces dropped

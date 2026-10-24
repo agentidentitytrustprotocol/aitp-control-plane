@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { invalidId, isUuid } from '@/lib/http/validate';
 
 export const runtime = 'nodejs';
@@ -18,7 +19,7 @@ export async function POST(
   await writeAdminAudit({
     action: 'webhook.circuit-breaker.reset',
     targetId: id,
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return Response.json(webhookBreaker.getSnapshot(id));
 }

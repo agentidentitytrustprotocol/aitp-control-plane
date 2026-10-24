@@ -8,6 +8,7 @@ import {
   UnsafeWebhookUrlError,
 } from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
 import { readJsonObject } from '@/lib/http/validate';
 import { checkWebhookFields } from '@/lib/webhooks/validate-body';
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
       action: 'webhook.create',
       targetId: webhook.id,
       details: { url: webhook.url, events: webhook.events },
-      requestId: req.headers.get('x-request-id') ?? undefined,
+      ...auditContext(req),
     });
     return {
       status: 201,

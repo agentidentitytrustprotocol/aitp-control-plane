@@ -1,4 +1,41 @@
-import { actorIdFromAuthHeader } from './actor';
+import {
+  actorIdFromAuthHeader,
+  auditContext,
+  CLIENT_IP_FORWARD_HEADER,
+  KEY_LABEL_HEADER,
+} from './actor';
+
+function withHeaders(h: Record<string, string>) {
+  return { headers: new Headers(h) };
+}
+
+describe('auditContext', () => {
+  it('records the forwarded key label as the actor', () => {
+    expect(
+      auditContext(
+        withHeaders({
+          [KEY_LABEL_HEADER]: 'console',
+          'x-request-id': 'req-1',
+          [CLIENT_IP_FORWARD_HEADER]: '198.51.100.7',
+        }),
+      ),
+    ).toEqual({ actorId: 'key:console', requestId: 'req-1', clientIp: '198.51.100.7' });
+  });
+
+  it('uses the fallback actor only when no key label was forwarded', () => {
+    expect(auditContext(withHeaders({}), 'enrollment-token')).toEqual({
+      actorId: 'enrollment-token',
+    });
+    expect(
+      auditContext(withHeaders({ [KEY_LABEL_HEADER]: 'ops' }), 'enrollment-token'),
+    ).toEqual({ actorId: 'key:ops' });
+  });
+
+  it('omits every field that is absent', () => {
+    expect(auditContext(withHeaders({}))).toEqual({});
+  });
+});
+
 
 describe('actorIdFromAuthHeader', () => {
   it('returns null for missing or empty headers', () => {

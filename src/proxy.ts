@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { config as appConfig } from './lib/config';
 import { rateLimiter } from './lib/rate-limit';
+import { labelIndex } from './lib/api-keys';
+import {
+  CLIENT_IP_FORWARD_HEADER,
+  KEY_LABEL_HEADER,
+} from './lib/audit-log/actor';
+
+// key -> non-secret label, built once from the boot-time config.
+const KEY_LABELS = labelIndex(appConfig.apiKeyEntries);
 
 // Always public regardless of method. /api/registry/agents collection
 // is in here so POST works with only the enrollment token (the actual
@@ -107,11 +115,20 @@ function getClientIp(request: NextRequest): string {
 
 /** Pass the request through unmodified except for an x-request-id
  * header that both downstream route handlers AND the client response
- * will see. */
-function passThrough(request: NextRequest): NextResponse {
+ * will see, and the gate's attribution headers (key label, client IP),
+ * which only the gate may set: any client-supplied copy is dropped. */
+function passThrough(
+  request: NextRequest,
+  keyLabel: string | null = null,
+): NextResponse {
   const requestId = resolveRequestId(request);
   const forwarded = new Headers(request.headers);
   forwarded.set('x-request-id', requestId);
+  forwarded.delete(KEY_LABEL_HEADER);
+  forwarded.delete(CLIENT_IP_FORWARD_HEADER);
+  if (keyLabel) forwarded.set(KEY_LABEL_HEADER, keyLabel);
+  const ip = getClientIp(request);
+  if (ip !== 'unknown') forwarded.set(CLIENT_IP_FORWARD_HEADER, ip);
   const response = NextResponse.next({ request: { headers: forwarded } });
   response.headers.set('x-request-id', requestId);
   return applyCors(response);
@@ -164,7 +181,9 @@ function chooseRateLimit(
       limit: appConfig.rateLimitPublicPerIpMin,
     };
   }
-  // Hash-ish prefix is enough — we just need a stable per-key bucket.
+  // Per KEY, not per label: two keys sharing a label (e.g. during a rotation
+  // overlap) keep separate budgets. Hash-ish prefix is enough — we just need a
+  // stable per-key bucket.
   return {
     bucketName: 'api-key',
     key: token.slice(0, 24),
@@ -194,6 +213,10 @@ export function proxy(request: NextRequest) {
     : authHeader || null;
 
   // ── Auth check ─────────────────────────────────────────────────────
+  // The label of the key that authenticated this request, forwarded to the
+  // handler for the admin audit log. Public routes carry none, even if the
+  // caller sent a key.
+  let keyLabel: string | null = null;
   if (!isPublic) {
     const keys = appConfig.apiKeys;
     if (keys.length === 0) {
@@ -209,13 +232,15 @@ export function proxy(request: NextRequest) {
       }
       // Dev: fall through to rate limit + handler with no auth.
     } else {
-      if (!token || !keys.includes(token)) {
+      const label = token ? KEY_LABELS.get(token) : undefined;
+      if (!label) {
         return deny(
           request,
           { error: 'Unauthorized', code: 'INVALID_API_KEY' },
           401,
         );
       }
+      keyLabel = label;
     }
   }
 
@@ -251,7 +276,7 @@ export function proxy(request: NextRequest) {
     }
   }
 
-  return passThrough(request);
+  return passThrough(request, keyLabel);
 }
 
 export const config = {

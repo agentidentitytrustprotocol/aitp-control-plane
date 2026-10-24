@@ -4,8 +4,10 @@
 // deterministically without env juggling or a real bucket store.
 import { jest } from '@jest/globals';
 import { NextRequest } from 'next/server';
+import { parseApiKeys, type ApiKeyEntry } from './lib/api-keys';
 
 interface MockConfig {
+  /** Raw API_KEYS entries (`key` or `label:key`), parsed like config.ts does. */
   apiKeys: string[];
   isProduction: boolean;
   rateLimitEnabled: boolean;
@@ -46,7 +48,15 @@ function load(
   decision: Decision = { allowed: true, remaining: 9, resetAt: 0, limit: 60 },
 ) {
   jest.resetModules();
-  const config = { ...DEFAULTS, ...cfg };
+  const merged = { ...DEFAULTS, ...cfg };
+  // Same parse as src/lib/config.ts, so `label:key` entries are exercised
+  // through the real parser rather than a hand-built entries list.
+  const apiKeyEntries: ApiKeyEntry[] = parseApiKeys(merged.apiKeys.join(',')).entries;
+  const config = {
+    ...merged,
+    apiKeys: apiKeyEntries.map((e) => e.key),
+    apiKeyEntries,
+  };
   const check =
     jest.fn<(b: string, k: string, l: number, w: number) => Decision>(
       () => decision,
@@ -182,6 +192,92 @@ describe('proxy — auth', () => {
     const { proxy } = load({ apiKeys: ['k'] });
     const res = proxy(req('/api/registry/agents/aid:pubkey:z:abc'));
     expect(res.status).toBe(200);
+  });
+});
+
+describe('proxy — per-consumer key labels', () => {
+  const LABEL = 'x-middleware-request-x-aitp-key-label';
+
+  it('forwards the label of the key that authenticated the request', () => {
+    const { proxy } = load({ apiKeys: ['console:key-a-secret', 'ops:key-b-secret'] });
+    const a = proxy(req('/api/sessions', { headers: { authorization: 'Bearer key-a-secret' } }));
+    const b = proxy(req('/api/sessions', { headers: { authorization: 'Bearer key-b-secret' } }));
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(a.headers.get(LABEL)).toBe('console');
+    expect(b.headers.get(LABEL)).toBe('ops');
+  });
+
+  it('labels a bare key unlabelled-<n> by list position (backward compatible)', () => {
+    const { proxy } = load({ apiKeys: ['console:key-a-secret', 'bare-key-secret'] });
+    const res = proxy(req('/api/sessions', { headers: { authorization: 'Bearer bare-key-secret' } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get(LABEL)).toBe('unlabelled-2');
+  });
+
+  it('a `label:key` entry authenticates with the key alone, not the whole entry', () => {
+    const { proxy } = load({ apiKeys: ['console:key-a-secret'] });
+    const whole = proxy(
+      req('/api/sessions', { headers: { authorization: 'Bearer console:key-a-secret' } }),
+    );
+    expect(whole.status).toBe(401);
+  });
+
+  it('drops a client-supplied label / client-ip header instead of forwarding it', () => {
+    const { proxy } = load({ apiKeys: ['console:key-a-secret'] });
+    const gated = proxy(
+      req('/api/sessions', {
+        headers: {
+          authorization: 'Bearer key-a-secret',
+          'x-aitp-key-label': 'spoofed',
+          'x-aitp-client-ip': '203.0.113.9',
+        },
+      }),
+    );
+    expect(gated.headers.get(LABEL)).toBe('console');
+    expect(gated.headers.get('x-middleware-request-x-aitp-client-ip')).toBeNull();
+    const pub = proxy(req('/api/health', { headers: { 'x-aitp-key-label': 'spoofed' } }));
+    expect(pub.headers.get(LABEL)).toBeNull();
+  });
+
+  it('forwards the resolved client IP for the audit log', () => {
+    const { proxy } = load({ apiKeys: ['console:key-a-secret'] });
+    const res = proxy(
+      req('/api/sessions', {
+        headers: { authorization: 'Bearer key-a-secret', 'x-real-ip': '198.51.100.7' },
+      }),
+    );
+    expect(res.headers.get('x-middleware-request-x-aitp-client-ip')).toBe('198.51.100.7');
+  });
+
+  // The rotation shape from H0.1: old key O and new key N side by side, then O
+  // removed from API_KEYS. N keeps working; O is refused at the gate.
+  it('two keys, one removed: the removed key answers 401 and the other still works', async () => {
+    const both = load({ apiKeys: ['console-old:key-old-secret', 'console-new:key-new-secret'] });
+    for (const k of ['key-old-secret', 'key-new-secret']) {
+      const r = both.proxy(req('/api/sessions', { headers: { authorization: `Bearer ${k}` } }));
+      expect(r.status).toBe(200);
+    }
+
+    const after = load({ apiKeys: ['console-new:key-new-secret'] });
+    const old = after.proxy(
+      req('/api/sessions', { headers: { authorization: 'Bearer key-old-secret' } }),
+    );
+    expect(old.status).toBe(401);
+    await expect(old.json()).resolves.toMatchObject({ code: 'INVALID_API_KEY' });
+    const kept = after.proxy(
+      req('/api/sessions', { headers: { authorization: 'Bearer key-new-secret' } }),
+    );
+    expect(kept.status).toBe(200);
+    expect(kept.headers.get(LABEL)).toBe('console-new');
+  });
+
+  it('rate-limits per key, not per label: two keys sharing a label get separate buckets', () => {
+    const { proxy, check } = load({ apiKeys: ['console:aaaa-first-key', 'console:bbbb-second-key'] });
+    proxy(req('/api/sessions', { headers: { authorization: 'Bearer aaaa-first-key' } }));
+    proxy(req('/api/sessions', { headers: { authorization: 'Bearer bbbb-second-key' } }));
+    const keys = check.mock.calls.filter((c) => c[0] === 'api-key').map((c) => c[1]);
+    expect(keys).toEqual(['aaaa-first-key', 'bbbb-second-key']);
   });
 });
 

@@ -15,7 +15,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { pinnedKeys } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
-import { actorIdFromAuthHeader } from '@/lib/audit-log/actor';
+import { actorIdFromAuthHeader, auditContext } from '@/lib/audit-log/actor';
 import { withIdempotency } from '@/lib/idempotency';
 import {
   badRequest,
@@ -250,7 +250,7 @@ export async function POST(req: NextRequest) {
       action: 'pinned-key.upsert',
       targetId: aid,
       details: { namespace },
-      requestId: req.headers.get('x-request-id') ?? undefined,
+      ...auditContext(req),
     });
     const rows = await db
       .select()
@@ -284,7 +284,7 @@ export async function DELETE(req: NextRequest) {
     action: 'pinned-key.delete',
     targetId: aid,
     details: { namespace },
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return new Response(null, { status: 204 });
 }

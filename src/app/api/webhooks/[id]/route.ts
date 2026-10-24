@@ -5,6 +5,7 @@ import {
   UnsafeWebhookUrlError,
 } from '@/lib/webhooks/url-guard';
 import { writeAdminAudit } from '@/lib/audit-log/service';
+import { auditContext } from '@/lib/audit-log/actor';
 import { badRequest, invalidId, isUuid, readJsonObject } from '@/lib/http/validate';
 import { checkWebhookFields } from '@/lib/webhooks/validate-body';
 
@@ -64,7 +65,7 @@ export async function PATCH(
     action: 'webhook.update',
     targetId: id,
     details: secret !== undefined ? { ...auditDetails, secretRotated: true } : auditDetails,
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return Response.json({
     id: updated.id,
@@ -91,7 +92,7 @@ export async function DELETE(
   await writeAdminAudit({
     action: 'webhook.delete',
     targetId: id,
-    requestId: req.headers.get('x-request-id') ?? undefined,
+    ...auditContext(req),
   });
   return Response.json({ id, deleted: true });
 }
