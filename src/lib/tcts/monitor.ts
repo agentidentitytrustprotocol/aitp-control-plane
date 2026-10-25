@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { delegations, issuedTcts } from '../db/schema';
+import { delegations, issuedTcts, revocationEntries } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
 import { logger } from '../logger';
 import { config } from '../config';
@@ -313,6 +313,28 @@ function gateObserved(
   return decision.project;
 }
 
+/**
+ * Revocation state for a row inserted AFTER its revocation was recorded (#165).
+ * `tct.revoked` updates only rows that already exist, so a late `tct.issued` /
+ * `delegation.issued` report would otherwise project as active. The lookups run
+ * inside the INSERT statement, against `revocation_entries` (the operator's
+ * authoritative record, which the relay serves to issuers) and, for a
+ * delegation, its already-projected parent row.
+ */
+function tctRevokedAt(jti: string) {
+  return sql`(select ${revocationEntries.revokedAt} from ${revocationEntries}
+    where ${revocationEntries.jti} = ${jti}::uuid)`;
+}
+
+function parentRevokedAt(parentJti: string) {
+  return sql`coalesce(
+    ${tctRevokedAt(parentJti)},
+    (select ${issuedTcts.revokedAt} from ${issuedTcts}
+      where ${issuedTcts.jti} = ${parentJti}::uuid and ${issuedTcts.revoked}),
+    (select ${delegations.revokedAt} from ${delegations}
+      where ${delegations.jti} = ${parentJti}::uuid and ${delegations.revoked}))`;
+}
+
 class TctMonitorService {
   async onEvent(event: AuditEventRecord): Promise<void> {
     try {
@@ -357,11 +379,14 @@ class TctMonitorService {
       if (!tct) continue;
       if (!gateObserved('tct', tct.jti, () => verifyObservedTct(raw, tct))) continue;
 
+      const revokedAt = tctRevokedAt(tct.jti);
       await db
         .insert(issuedTcts)
         .values({
           ...tct,
           sessionId: event.sessionId ?? null,
+          revoked: sql`${revokedAt} is not null`,
+          revokedAt,
         })
         .onConflictDoNothing();
     }
@@ -418,7 +443,16 @@ class TctMonitorService {
       return;
     }
 
-    await db.insert(delegations).values(delegation).onConflictDoNothing();
+    const revokedAt = parentRevokedAt(delegation.parentJti);
+    await db
+      .insert(delegations)
+      .values({
+        ...delegation,
+        revoked: sql`${revokedAt} is not null`,
+        revokedAt,
+        revokedReason: sql`case when ${revokedAt} is not null then 'parent_revoked' end`,
+      })
+      .onConflictDoNothing();
   }
 
   private async recordDelegationRevocation(event: AuditEventRecord): Promise<void> {
