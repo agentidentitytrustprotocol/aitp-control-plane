@@ -1608,7 +1608,8 @@ paths:
           description: >-
             `code` is `ISS_MISMATCH`: the `iss` sent contradicts the issuer the
             CP already holds for this `jti` (its `issued_tcts` row or existing
-            entry).
+            entry), or the existing entry's `iss` disagrees with the
+            `issued_tcts` row.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

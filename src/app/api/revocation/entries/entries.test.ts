@@ -277,6 +277,27 @@ describe('POST /api/revocation/entries — issuer attribution (CP1.1)', () => {
     expect(res.status).toBe(409);
   });
 
+  it('answers 409 ISS_MISMATCH when the stored entry disagrees with the TCT issuer', async () => {
+    mockSelectRows = {
+      issued_tcts: [{ iss: ISSUER }],
+      revocation_entries: [{ iss: OTHER_ISSUER }],
+    };
+    const res = await post({ jti: GOOD_JTI });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe('ISS_MISMATCH');
+    expect(insertedValues).toHaveLength(0);
+    expect(ingestOneEventMock).not.toHaveBeenCalled();
+  });
+
+  it('ignores a projected issuer that is not an AID', async () => {
+    mockSelectRows = { issued_tcts: [{ iss: 'not-an-aid' }] };
+    const res = await post({ jti: GOOD_JTI });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('ISS_REQUIRED');
+    const ok = await post({ jti: GOOD_JTI, iss: OTHER_ISSUER });
+    expect(ok.status).toBe(201);
+  });
+
   it('answers 400 ISS_REQUIRED when no issuer is known or given', async () => {
     mockSelectRows = {};
     const res = await post({ jti: GOOD_JTI });

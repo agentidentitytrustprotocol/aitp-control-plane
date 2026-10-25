@@ -173,7 +173,22 @@ export async function POST(req: NextRequest) {
       .select({ iss: revocationEntries.iss })
       .from(revocationEntries)
       .where(eq(revocationEntries.jti, body.jti));
-    const knownIss = tct?.iss ?? existing?.iss ?? null;
+    // A projected issuer that is not an AID (an unverified `tct.issued` report)
+    // could never be pulled, so it counts as unknown.
+    const projectedIss = tct?.iss && AID_RE.test(tct.iss) ? tct.iss : null;
+    const storedIss = existing?.iss ?? null;
+    // The stored entry is what the relay serves, and the upsert never changes
+    // it, so a projection that disagrees must surface rather than be echoed.
+    if (projectedIss !== null && storedIss !== null && projectedIss !== storedIss) {
+      return {
+        status: 409,
+        body: {
+          error: 'the stored entry names a different issuer than the TCT recorded for this jti',
+          code: 'ISS_MISMATCH',
+        },
+      };
+    }
+    const knownIss = projectedIss ?? storedIss;
     const givenIss = typeof body.iss === 'string' ? body.iss : null;
     if (knownIss !== null && givenIss !== null && knownIss !== givenIss) {
       return {

@@ -364,7 +364,7 @@ sequenceDiagram
 
 `jti` must be a lowercase hyphenated UUID **v4** or `400 JTI_INVALID` (`"jti must be a lowercase UUID v4"`); see [the UUID rule](#conventions). A delegation's synthetic id from `/api/delegations` is a v5 UUID and cannot be revoked this way. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input — including a body that is not JSON or is JSON but not an object (`null`, an array, a string, a number) — → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason, iss }`.
 
-**`iss` — who the entry is relayed to.** The CP takes it from what it already knows, in order: the `issued_tcts` row for this `jti` (from the agents' `tct.issued` reports), then an existing entry for this `jti`. An explicit `iss` is needed only when neither knows the token, and must be an AID (`aid:...`) or `400 ISS_INVALID`. An explicit `iss` that contradicts what the CP knows is `409 ISS_MISMATCH`. No `iss` known and none given is `400 ISS_REQUIRED`: an entry with no issuer would be stored and enforced nowhere, so it is refused.
+**`iss` — who the entry is relayed to.** The CP takes it from what it already knows, in order: the `issued_tcts` row for this `jti` (from the agents' `tct.issued` reports), then an existing entry for this `jti`. An explicit `iss` is needed only when neither knows the token, and must be an AID (`aid:...`) or `400 ISS_INVALID`. An explicit `iss` that contradicts what the CP knows is `409 ISS_MISMATCH`, as is a stored entry whose `iss` disagrees with the TCT record (the stored value is what is relayed, and is never overwritten). A recorded issuer that is not an AID counts as unknown. No `iss` known and none given is `400 ISS_REQUIRED`: an entry with no issuer would be stored and enforced nowhere, so it is refused.
 
 Recording a revocation also flips the matching `issued_tcts.revoked` flag, cascades to descendant delegations, and emits a `tct.revoked` event (and webhook) whose payload carries `iss`.
 
@@ -393,7 +393,7 @@ Every entry recorded for `iss`, oldest `revoked_at` first. This is the full set,
 
 #### Issuer keys
 
-An issuing agent pulls with its own key from `ISSUER_KEYS` (`label@aid=key`, comma-separated), not an admin key. An issuer key opens **only** `GET /api/revocations`, and only for `iss` equal to the AID it is bound to. Anywhere else it is an unknown key (`401 INVALID_API_KEY`). A key listed in both `ISSUER_KEYS` and `API_KEYS` is refused at boot with a warning, so an issuer key never carries admin rights. Its label names the agent's series in `aitp_control_plane_revocation_last_pull_timestamp_seconds` ([`operations.md`](operations.md#revocation-relay)). Why a bearer key and not a signed request: [`DECISIONS.md`](../DECISIONS.md).
+An issuing agent pulls with its own key from `ISSUER_KEYS` (`label@aid=key`, comma-separated), not an admin key. An issuer key opens **only** `GET /api/revocations`, and only for `iss` equal to the AID it is bound to. Anywhere else it is an unknown key (`401 INVALID_API_KEY`). A key listed in both `ISSUER_KEYS` and `API_KEYS` is refused at boot with a warning, so an issuer key never carries admin rights. Its label names the agent's series in `aitp_control_plane_revocation_last_pull_timestamp_seconds` ([`operations.md`](operations.md#revocation-relay)). A bearer key rather than a signed request because the aitp SDK has no request-signing primitive yet; that is the trigger to replace it.
 
 ### Webhooks
 
