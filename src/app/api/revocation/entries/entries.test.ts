@@ -14,9 +14,11 @@
 //   • no leak    — a database error becomes a throw, never a response, asserted
 //     with an error carrying every Postgres tell at once (#98 regression); and
 //     our own rejection prose never quotes the schema.
-//   • success    — 201 with {jti, revokedAt, reason}, revokedAt normalized
-//     to ISO, producer cache invalidated, tct.revoked event ingested +
-//     published + webhooks dispatched
+//   • success    — 201 with {jti, revokedAt, reason, iss}, revokedAt normalized
+//     to ISO, tct.revoked event ingested + published + webhooks dispatched
+//   • issuer     — `iss` (who the entry is relayed to, CP1.1) comes from the
+//     TCT projection, else an existing entry, else the body; a disagreement is
+//     409 ISS_MISMATCH and no issuer at all is 400 ISS_REQUIRED
 //
 // All persistence/side-effect modules are mocked; no Idempotency-Key header
 // is sent so withIdempotency runs the handler directly.
@@ -24,25 +26,39 @@
 import { jest } from '@jest/globals';
 
 const insertedValues: unknown[] = [];
+const upsertSets: unknown[] = [];
 let insertError: unknown = null;
+// What the two issuer lookups return, keyed by table name.
+const ISSUER = 'aid:pubkey:9b2hI7B7v6rN2c1yYQ0fC4wqTnI3x0zN1nXcQwXyZ0o';
+const OTHER_ISSUER = 'aid:pubkey:Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHF1dXg';
+let mockSelectRows: Record<string, { iss: string | null }[]> = {};
 
 jest.mock('@/lib/db', () => ({
   db: {
+    select: () => ({
+      from: (table: unknown) => ({
+        where: () =>
+          Promise.resolve(
+            mockSelectRows[
+              (jest.requireActual('drizzle-orm') as typeof import('drizzle-orm')).getTableName(
+                table as never,
+              )
+            ] ?? [],
+          ),
+      }),
+    }),
     insert: () => ({
       values: (v: unknown) => {
         insertedValues.push(v);
         return {
-          onConflictDoNothing: () =>
-            insertError ? Promise.reject(insertError) : Promise.resolve(),
+          onConflictDoUpdate: (cfg: { set: unknown }) => {
+            upsertSets.push(cfg.set);
+            return insertError ? Promise.reject(insertError) : Promise.resolve();
+          },
         };
       },
     }),
   },
-}));
-
-const invalidateMock = jest.fn();
-jest.mock('@/lib/revocation/producer', () => ({
-  revocationProducer: { invalidate: () => invalidateMock() },
 }));
 
 const ingestOneEventMock = jest.fn(async (_e: unknown) => undefined);
@@ -94,8 +110,9 @@ function post(body: unknown): Promise<Response> {
 
 beforeEach(() => {
   insertedValues.length = 0;
+  upsertSets.length = 0;
   insertError = null;
-  invalidateMock.mockReset();
+  mockSelectRows = { issued_tcts: [{ iss: ISSUER }] };
   ingestOneEventMock.mockReset();
   ingestOneEventMock.mockResolvedValue(undefined);
   eventBusPublishMock.mockReset();
@@ -182,14 +199,14 @@ describe('POST /api/revocation/entries — success path', () => {
       jti: string;
       revokedAt: string;
       reason: string;
+      iss: string;
     };
     expect(body).toEqual({
       jti: GOOD_JTI,
       revokedAt: '2026-06-15T10:00:00.000Z',
       reason: 'key compromised',
+      iss: ISSUER,
     });
-
-    expect(invalidateMock).toHaveBeenCalledTimes(1);
     expect(ingestOneEventMock).toHaveBeenCalledTimes(1);
     expect(eventBusPublishMock).toHaveBeenCalledTimes(1);
     expect(tctMonitorOnEventMock).toHaveBeenCalledTimes(1);
@@ -203,7 +220,7 @@ describe('POST /api/revocation/entries — success path', () => {
     };
     expect(event.type).toBe('tct.revoked');
     expect(event.ts).toBe('2026-06-15T10:00:00.000Z');
-    expect(event.payload).toEqual({ jti: GOOD_JTI, reason: 'key compromised' });
+    expect(event.payload).toEqual({ jti: GOOD_JTI, reason: 'key compromised', iss: ISSUER });
   });
 
   it('defaults revokedAt to now and reason to null when omitted', async () => {
@@ -216,6 +233,67 @@ describe('POST /api/revocation/entries — success path', () => {
     expect(ts).toBeGreaterThanOrEqual(before);
     expect(ts).toBeLessThanOrEqual(Date.now());
   });
+});
+
+describe('POST /api/revocation/entries — issuer attribution (CP1.1)', () => {
+  it('takes iss from the TCT projection when the body omits it', async () => {
+    const res = await post({ jti: GOOD_JTI });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { iss: string }).iss).toBe(ISSUER);
+    expect(insertedValues[0]).toMatchObject({ jti: GOOD_JTI, iss: ISSUER });
+  });
+
+  it('accepts a matching explicit iss', async () => {
+    const res = await post({ jti: GOOD_JTI, iss: ISSUER });
+    expect(res.status).toBe(201);
+  });
+
+  it('takes an explicit iss for a jti the CP has no TCT for', async () => {
+    mockSelectRows = {};
+    const res = await post({ jti: GOOD_JTI, iss: OTHER_ISSUER });
+    expect(res.status).toBe(201);
+    expect(insertedValues[0]).toMatchObject({ iss: OTHER_ISSUER });
+    // The upsert only ever fills an unattributed row's iss.
+    expect(upsertSets[0]).toEqual({ iss: OTHER_ISSUER });
+  });
+
+  it('falls back to the existing entry iss on a re-post', async () => {
+    mockSelectRows = { revocation_entries: [{ iss: OTHER_ISSUER }] };
+    const res = await post({ jti: GOOD_JTI });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { iss: string }).iss).toBe(OTHER_ISSUER);
+  });
+
+  it('answers 409 ISS_MISMATCH when the body disagrees with the TCT issuer', async () => {
+    const res = await post({ jti: GOOD_JTI, iss: OTHER_ISSUER });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe('ISS_MISMATCH');
+    expect(insertedValues).toHaveLength(0);
+  });
+
+  it('answers 409 ISS_MISMATCH when the body disagrees with an existing entry', async () => {
+    mockSelectRows = { revocation_entries: [{ iss: ISSUER }] };
+    const res = await post({ jti: GOOD_JTI, iss: OTHER_ISSUER });
+    expect(res.status).toBe(409);
+  });
+
+  it('answers 400 ISS_REQUIRED when no issuer is known or given', async () => {
+    mockSelectRows = {};
+    const res = await post({ jti: GOOD_JTI });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('ISS_REQUIRED');
+    expect(insertedValues).toHaveLength(0);
+    expect(ingestOneEventMock).not.toHaveBeenCalled();
+  });
+
+  it.each([42, '', 'not-an-aid', 'aid:has space'])(
+    'answers 400 ISS_INVALID for iss=%p',
+    async (iss) => {
+      const res = await post({ jti: GOOD_JTI, iss });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('ISS_INVALID');
+    },
+  );
 });
 
 // U+0000 built rather than written, so no raw control byte ever sits in this
@@ -312,10 +390,10 @@ describe('POST /api/revocation/entries — revokedAt range (#98)', () => {
   });
 
   // The lower bound is NOT about what Postgres can store — it stores year 0001
-  // fine. It is about what the signed revocation list can faithfully publish:
-  // the producer re-parses the driver's space-separated TIMESTAMPTZ text with
-  // `new Date(...)`, and V8's legacy two-digit-year rule turns year 0001 into
-  // 2001. This asserts the mis-parse those years would suffer, so the reason for
+  // fine. It is about what an issuer's signed list can faithfully publish:
+  // anything that re-parses the driver's space-separated TIMESTAMPTZ text with
+  // `new Date(...)` hits V8's legacy two-digit-year rule, which turns year 0001
+  // into 2001 (the relay sidesteps it by having Postgres compute the epoch). This asserts the mis-parse those years would suffer, so the reason for
   // the floor is recorded as an executable fact rather than only as a comment.
   it('documents why low years are excluded: the driver text mis-parses', () => {
     expect(new Date('0001-01-01 00:00:00+00').getUTCFullYear()).toBe(2001);
@@ -371,7 +449,6 @@ describe('POST /api/revocation/entries — database fault (#98)', () => {
   it('skips every side effect when the insert fails', async () => {
     insertError = new Error('connection refused');
     await expect(post({ jti: GOOD_JTI })).rejects.toThrow();
-    expect(invalidateMock).not.toHaveBeenCalled();
     expect(ingestOneEventMock).not.toHaveBeenCalled();
     expect(eventBusPublishMock).not.toHaveBeenCalled();
     expect(tctMonitorOnEventMock).not.toHaveBeenCalled();

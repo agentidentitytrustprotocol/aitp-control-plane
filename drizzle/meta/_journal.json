@@ -64,6 +64,13 @@
       "when": 1791653446633,
       "tag": "0008_scrub_webhook_secret_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792889029260,
+      "tag": "0009_revocation_iss",
+      "breakpoints": true
     }
   ]
 }

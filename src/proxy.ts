@@ -1,14 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { config as appConfig } from './lib/config';
 import { rateLimiter } from './lib/rate-limit';
-import { labelIndex } from './lib/api-keys';
+import { issuerKeyIndex, labelIndex, type IssuerKeyEntry } from './lib/api-keys';
 import {
   CLIENT_IP_FORWARD_HEADER,
+  KEY_ISSUER_HEADER,
   KEY_LABEL_HEADER,
 } from './lib/audit-log/actor';
 
 // key -> non-secret label, built once from the boot-time config.
 const KEY_LABELS = labelIndex(appConfig.apiKeyEntries);
+// issuer key -> {label, aid}. Never consulted outside ISSUER_KEY_ROUTE.
+const ISSUER_KEYS = issuerKeyIndex(appConfig.issuerKeyEntries);
+
+// The ONLY route an issuer key (ISSUER_KEYS) opens, and only for GET. On every
+// other path such a key is not in KEY_LABELS, so it is a 401 like any unknown
+// key. The route itself enforces `iss` == the key's AID.
+const ISSUER_KEY_ROUTE = '/api/revocations';
 
 // Always public regardless of method. /api/registry/agents collection
 // is in here so POST works with only the enrollment token (the actual
@@ -19,7 +27,6 @@ const PUBLIC_PATHS = new Set<string>([
   '/api/health',
   '/api/readyz',
   '/api/well-known/aitp-manifest',
-  '/api/well-known/aitp-revocation-list',
   '/api/registry/enroll',
   '/api/registry/agents',
   '/api/metrics',
@@ -120,13 +127,16 @@ function getClientIp(request: NextRequest): string {
 function passThrough(
   request: NextRequest,
   keyLabel: string | null = null,
+  keyIssuer: string | null = null,
 ): NextResponse {
   const requestId = resolveRequestId(request);
   const forwarded = new Headers(request.headers);
   forwarded.set('x-request-id', requestId);
   forwarded.delete(KEY_LABEL_HEADER);
+  forwarded.delete(KEY_ISSUER_HEADER);
   forwarded.delete(CLIENT_IP_FORWARD_HEADER);
   if (keyLabel) forwarded.set(KEY_LABEL_HEADER, keyLabel);
+  if (keyIssuer) forwarded.set(KEY_ISSUER_HEADER, keyIssuer);
   const ip = getClientIp(request);
   if (ip !== 'unknown') forwarded.set(CLIENT_IP_FORWARD_HEADER, ip);
   const response = NextResponse.next({ request: { headers: forwarded } });
@@ -217,7 +227,14 @@ export function proxy(request: NextRequest) {
   // handler for the admin audit log. Public routes carry none, even if the
   // caller sent a key.
   let keyLabel: string | null = null;
-  if (!isPublic) {
+  // Set only when an issuer key authenticated the request: the AID the route
+  // must restrict the answer to.
+  let issuerKey: IssuerKeyEntry | undefined;
+  if (pathname === ISSUER_KEY_ROUTE && method === 'GET' && token) {
+    issuerKey = ISSUER_KEYS.get(token);
+    if (issuerKey) keyLabel = issuerKey.label;
+  }
+  if (!isPublic && !issuerKey) {
     const keys = appConfig.apiKeys;
     if (keys.length === 0) {
       if (appConfig.isProduction) {
@@ -276,7 +293,7 @@ export function proxy(request: NextRequest) {
     }
   }
 
-  return passThrough(request, keyLabel);
+  return passThrough(request, keyLabel, issuerKey?.aid ?? null);
 }
 
 export const config = {

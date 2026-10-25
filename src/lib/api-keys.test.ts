@@ -1,4 +1,4 @@
-import { LABEL_RE, labelIndex, parseApiKeys } from './api-keys';
+import { LABEL_RE, issuerKeyIndex, labelIndex, parseApiKeys, parseIssuerKeys } from './api-keys';
 
 describe('parseApiKeys', () => {
   it('returns no entries for unset or empty input', () => {
@@ -77,5 +77,53 @@ describe('parseApiKeys', () => {
     expect(idx.get('k1')).toBe('console');
     expect(idx.get('k2')).toBe('unlabelled-2');
     expect(idx.get('nope')).toBeUndefined();
+  });
+});
+
+describe('parseIssuerKeys', () => {
+  const AID = 'aid:pubkey:O4nSX0IWKDbZqISunQN2NnEba2AnDIlxY2jjSmqMCMs';
+
+  it('parses label@aid=key entries', () => {
+    const { entries, warnings } = parseIssuerKeys(`researcher@${AID}=k-1, writer@aid:pubkey:p256:abc=k-2`);
+    expect(entries).toEqual([
+      { label: 'researcher', aid: AID, key: 'k-1' },
+      { label: 'writer', aid: 'aid:pubkey:p256:abc', key: 'k-2' },
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  it('keeps everything after the first = as the key', () => {
+    expect(parseIssuerKeys(`r@${AID}=a=b`).entries[0].key).toBe('a=b');
+  });
+
+  it.each([
+    ['no aid', 'r=sekrit'],
+    ['no key', `r@${AID}=`],
+    ['no label', `@${AID}=sekrit`],
+    ['not an aid', 'r@did:web:x=sekrit'],
+    ['bad label', `r r@${AID}=sekrit`],
+  ])('skips a malformed entry (%s) with a warning that does not echo it', (_why, raw) => {
+    const { entries, warnings } = parseIssuerKeys(raw);
+    expect(entries).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).not.toContain('sekrit');
+  });
+
+  it('refuses a key that is also an admin key', () => {
+    const { entries, warnings } = parseIssuerKeys(`r@${AID}=admin-secret`, ['admin-secret']);
+    expect(entries).toEqual([]);
+    expect(warnings[0]).toMatch(/also an API_KEYS key/);
+  });
+
+  it('refuses a duplicate key, keeping the first', () => {
+    const { entries, warnings } = parseIssuerKeys(`a@${AID}=k,b@${AID}=k`);
+    expect(entries.map((e) => e.label)).toEqual(['a']);
+    expect(warnings[0]).toMatch(/duplicate key/);
+  });
+
+  it('indexes by key', () => {
+    const idx = issuerKeyIndex(parseIssuerKeys(`a@${AID}=k`).entries);
+    expect(idx.get('k')).toEqual({ label: 'a', aid: AID, key: 'k' });
+    expect(idx.get('a')).toBeUndefined();
   });
 });

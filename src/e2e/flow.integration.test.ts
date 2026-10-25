@@ -24,7 +24,7 @@
  *   6. POST /api/events with a synthetic handshake.complete event
  *   7. GET /api/events/history → event visible
  *   8. POST /api/revocation/entries → entry persists
- *   9. GET /.well-known/aitp-revocation-list → signed list contains the JTI
+ *   9. GET /api/revocations?iss=<issuer> → the issuer's relayed entries contain the JTI
  *
  * Failures here mean an integration-level regression that unit tests
  * cannot catch — typically a route signature change or a DB
@@ -48,7 +48,7 @@ import {
 import { POST as eventsPost } from '@/app/api/events/route';
 import { GET as eventsHistoryGet } from '@/app/api/events/history/route';
 import { POST as revocationPost } from '@/app/api/revocation/entries/route';
-import { GET as revocationListGet } from '@/app/api/well-known/aitp-revocation-list/route';
+import { GET as revocationsGet } from '@/app/api/revocations/route';
 
 import { db, pool } from '@/lib/db';
 import {
@@ -395,17 +395,19 @@ describe('integration: enroll → register → discover → event → revoke flo
     );
   });
 
-  it('records a revocation and serves a signed list containing the JTI', async () => {
+  it("records a revocation and relays it to the researcher's issuer pull", async () => {
     const res = await revocationPost(
       mkReq('http://localhost/api/revocation/entries', {
         method: 'POST',
-        body: JSON.stringify({ jti: REVOKED_JTI, reason: 'e2e-test' }),
+        body: JSON.stringify({ jti: REVOKED_JTI, reason: 'e2e-test', iss: researcher.aid }),
         headers: { 'content-type': 'application/json' },
       }),
     );
     expect(res.status).toBe(201);
 
-    const listRes = await revocationListGet();
+    const listRes = await revocationsGet(
+      mkReq(`http://localhost/api/revocations?iss=${encodeURIComponent(researcher.aid)}`),
+    );
     expect(listRes.status).toBe(200);
     const listText = await listRes.text();
     expect(listText).toContain(REVOKED_JTI);

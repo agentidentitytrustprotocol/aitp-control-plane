@@ -152,8 +152,8 @@ export function cpSeedBootFailure(): { fatal: boolean; message: string } | null 
   if (problem === null) return null;
 
   const consequence =
-    'The CP cannot build its identity, so /.well-known/aitp-manifest, ' +
-    '/api/revocation/list and /api/health would fail on every request.';
+    'The CP cannot build its identity, so /.well-known/aitp-manifest ' +
+    'and /api/health would fail on every request.';
 
   if (config.isProduction) {
     return {

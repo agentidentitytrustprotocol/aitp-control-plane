@@ -84,7 +84,7 @@ export async function register(): Promise<void> {
 
   // Same shape, same reasons, for the CP's own identity seed: in production a
   // missing CP_AID_SEED_HEX, or one that does not decode to 32 bytes, used to
-  // boot green and then fail the manifest, the revocation list and /api/health
+  // boot green and then fail the manifest and /api/health
   // on first use. Now it is one FATAL line and exit 1. The acceptance rule is
   // exactly the identity's own decode (shared in cp-seed-config.ts), so no seed
   // that works today is refused; values that work but are not clean, and a

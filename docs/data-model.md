@@ -99,13 +99,14 @@ Parent→child TCT relationships — single-hop [RFC-AITP-0006](https://agentide
 Indexes: `parent_jti`, `delegator_aid`, `delegatee_aid`. For how `jti` and `parent_jti` are derived from reported tokens, see [`events.md`](events.md#tct--delegation-projection).
 
 ### `revocation_entries` — revoked JTIs
-Backs the signed `/.well-known/aitp-revocation-list` (format: [RFC-AITP-0008](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md)). Adding a row via `POST /api/revocation/entries` emits `tct.revoked`, which flips `issued_tcts.revoked`. An ingested `tct.revoked` event flips `issued_tcts.revoked` but does **not** add a row here.
+Backs the per-issuer relay `GET /api/revocations?iss=` ([`api.md`](api.md#revocation)); each issuer signs its own entries into an [RFC-AITP-0008](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md) list, and the CP signs none. Adding a row via `POST /api/revocation/entries` emits `tct.revoked`, which flips `issued_tcts.revoked`. An ingested `tct.revoked` event flips `issued_tcts.revoked` but does **not** add a row here.
 
 | Column | Type | Notes |
 |---|---|---|
 | `jti` | uuid PK | |
 | `revoked_at` | timestamptz | Defaults to now |
 | `reason` | text | Optional |
+| `iss` | varchar(512) | AID of the TCT's issuer, the agent the entry is relayed to. Nullable: set by `POST /api/revocation/entries` (from `issued_tcts`, else the body), backfilled by `0009`, and filled — never changed — by a later re-post. A row with `iss IS NULL` is relayed to nobody. Indexed (`revocation_entries_iss_idx`) |
 | `created_at` | timestamptz | |
 
 ### `webhooks` — subscriptions
@@ -211,6 +212,7 @@ See [`drizzle/README.md`](../drizzle/README.md) for the migration workflow.
 | `0006_trust_anchors_uniq.sql` | Unique `(namespace, issuer_url)` |
 | `0007_enrollment_jtis.sql` | `enrollment_jtis` table + index on `expires_at` |
 | `0008_scrub_webhook_secret_audit.sql` | Data-only, no schema change: removes webhook secrets leaked into `admin_audit_log.details` by `webhook.update` rows (replaced with `secretRotated: true`). Idempotent |
+| `0009_revocation_iss.sql` | `revocation_entries.iss` + `revocation_entries_iss_idx`; backfills `iss` from `issued_tcts.issuer_aid` (unmatched rows stay `NULL`). Idempotent. Rollback: `drizzle/manual/0009_revocation_iss.down.sql` |
 
 `drizzle/manual/0002_offered_caps_gin.concurrent.sql` is a parallel, operator-applied
 variant of `0002` that builds the same GIN index with `CREATE INDEX CONCURRENTLY`

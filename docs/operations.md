@@ -9,7 +9,8 @@ subsystems and how to tune them.
 ## Identity
 
 The CP has its own AITP identity (Ed25519), served at
-`/.well-known/aitp-manifest` and used to sign the revocation list.
+`/.well-known/aitp-manifest`. It signs no revocation list: each issuing agent
+signs its own (see [Revocation relay](#revocation-relay)).
 
 - **`CP_AID_SEED_HEX`** — 32-byte hex seed. **Required in production.** Outside
   production a missing seed is replaced by a random one on every boot (logged
@@ -19,7 +20,7 @@ The CP has its own AITP identity (Ed25519), served at
   `[aitp-cp] FATAL: CP_AID_SEED_HEX …` line and exits `1` before serving
   anything — the deploy fails and the previous one keeps serving. Outside
   production the same check only warns (a malformed seed then fails on first
-  use of the identity: the manifest, the revocation list and `/api/health`
+  use of the identity: the manifest and `/api/health`
   answer `500`). Generate once and store it as a secret:
   ```bash
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
@@ -54,52 +55,65 @@ The CP has its own AITP identity (Ed25519), served at
 Rotating `CP_AID_SEED_HEX` rotates the control-plane identity — treat it like a
 signing key, not a config toggle.
 
-## Revocation list
+## Revocation relay
 
-`GET /.well-known/aitp-revocation-list` serves a revocation snapshot signed with
-the CP identity. The envelope and its signing input are the spec's —
+The CP stores revocation entries and relays each issuer's own set at
+`GET /api/revocations?iss=<aid>`; it signs no revocation list. Under
 [RFC-AITP-0008 §1.5](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#15-signed-revocation-response)
-and [RFC-AITP-0001 §5.4.1](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0001-core.md#541-signing-input-jcs-profile)
-— and verifying it with the SDK is covered in the
-[aitp-rs Node SDK guide](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008).
-What is specific to this service:
+a list is valid only from the issuer of the tokens it names, so each issuing
+agent pulls its entries, signs them with its own key and serves them. The
+contract is in [api.md § Revocation](api.md#revocation); this is what
+operating it involves.
 
-- **Re-signed at most every 60 s per process.** The producer caches the signed
-  envelope for 60 s, and the response carries `Cache-Control: max-age=60`.
-  Recording a revocation (`POST /api/revocation/entries`) drops the cache on
-  the replica that handled it only; other replicas pick the entry up within
-  60 s.
-- **`REVOCATION_LIST_TTL_SECS`** (default 3600) is the validity of each signed
-  list (`expires_at`), not how often it is rebuilt.
-- **Fails closed.** If `revocation_entries` cannot be read, the endpoint answers
-  `503 REVOCATION_UNAVAILABLE` (`Cache-Control: no-store`, `Retry-After: 30`) and
-  never signs an empty list, which would assert that nothing is revoked.
-  `REVOCATION_FAIL_MODE=serve_stale` instead re-serves the last list that was
-  backed by a successful read, for at most `REVOCATION_MAX_STALENESS_SECS`
-  (default 300, clamped to `REVOCATION_LIST_TTL_SECS`), then `503`s; recording a
-  revocation discards that fallback. Both paths log a line containing
-  `revocation DB read failed` (warn when serving stale, error when refusing),
-  and the shipped-image harness asserts on that text — keep it.
-- **Every entry `jti` is a UUID v4.** aitp ≥ 0.14 verifiers reject the whole
-  list as malformed if any entry is not, and aitp ≥ 0.18 signers refuse to
-  sign one (0.17 signed it). `POST /api/revocation/entries` accepts only a
-  lowercase hyphenated v4 (an uppercase or braced spelling is `400
-  JTI_INVALID`; the `uuid` column would return it lowercase anyway, so this
-  only keeps the webhook and audit `jti` in the published form). If a non-v4 row is
-  in `revocation_entries` anyway (written before that check) the producer
-  refuses to sign: the endpoint answers `503 REVOCATION_UNAVAILABLE` and logs
-  `revocation list signing failed, refusing to publish a list` at error with
-  the offending `nonV4Jtis`. Nothing is dropped or rewritten automatically —
-  deciding what to do with such a row is an operator call. Count them with
+- **Give each issuing agent an issuer key.** `ISSUER_KEYS=label@aid=key,...`,
+  one entry per agent. The key reads only that AID's entries and opens no
+  other route, so it is safe to hand to the agent; never give an agent an
+  `API_KEYS` key for this. Boot warnings name any entry that was skipped
+  (malformed, label resembling a key, key reused from `API_KEYS`, duplicate).
+  Changing the list is a redeploy, like `API_KEYS`.
+- **Watch that issuers pull.** An entry takes effect only once its issuer has
+  pulled and republished, and an agent that stopped pulling fails silently.
+  `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>"}`
+  is the Unix time of each issuer key's last successful pull, per process
+  (absent until it first pulls, reset on restart; admin-key pulls are not
+  counted). Alert on `time() - max by (issuer) (…)` exceeding the pull
+  interval you expect, plus the restart case where a series is absent.
+- **No caching, no replica lag.** Every pull reads the database and answers
+  `Cache-Control: no-store`, so an entry is visible on the next pull from any
+  replica.
+- **Fails closed.** If `revocation_entries` cannot be read, the relay answers
+  `503 REVOCATION_UNAVAILABLE` (`Retry-After: 30`) and logs
+  `revocation relay read failed` at error. It never answers an empty `200`,
+  which the issuer would sign as "nothing is revoked". The shipped-image
+  harness asserts on that log text — keep it.
+- **Every entry needs an issuer.** `POST /api/revocation/entries` resolves
+  `iss` from `issued_tcts`, and refuses (`400 ISS_REQUIRED`) a `jti` it cannot
+  attribute unless the body names the issuer. Migration `0009` backfilled
+  existing entries the same way; any it could not attribute have `iss IS NULL`
+  and are relayed to nobody. Find them with
+  `select jti, revoked_at from revocation_entries where iss is null`, and
+  attribute each by re-posting it with `iss` (the stored `revoked_at` and
+  `reason` are kept).
+- **Every entry `jti` is a UUID v4.** aitp ≥ 0.18 signers refuse to sign a
+  list containing any other `jti`, so a non-v4 row would stop its issuer
+  publishing. `POST /api/revocation/entries` accepts only a lowercase
+  hyphenated v4; the relay passes stored rows through unchanged, so a row
+  written before that check must be dealt with by an operator. Count them with
   `select count(*) from revocation_entries where jti::text !~*
   '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
+- **Removed in CP1.1:** `/.well-known/aitp-revocation-list` (now `404`) and
+  `REVOCATION_LIST_TTL_SECS`, `REVOCATION_FAIL_MODE` and
+  `REVOCATION_MAX_STALENESS_SECS` (now ignored; delete them from deployed
+  environments). Rolling back the schema change is
+  `drizzle/manual/0009_revocation_iss.down.sql`; rolling back the code means
+  redeploying the previous image, which serves the CP-signed list again.
 
 ## aitp/0.3 cutover (aitp 0.17)
 
 aitp 0.17 moves the wire protocol from `aitp/0.2` to `aitp/0.3` with **no
 dual-accept**: a 0.17 verifier rejects every `aitp/0.2` artifact, and a 0.13
 verifier rejects every `aitp/0.3` one. The CP is an issuer (its own Manifest,
-the revocation list, enrollment), so it must be deployed **together with** the
+enrollment; until CP1.1 also the revocation list), so it must be deployed **together with** the
 playground and the UI console, never ahead of or behind them. Rolling the CP
 back after cutover breaks the same way in the other direction.
 
@@ -244,7 +258,8 @@ the gate's matcher set, the compiled gate and its load path, and the compiled
 routing tables equal a committed baseline in
 `scripts/image-artifact-baseline.json`), then runs the image against an
 ephemeral Postgres with the repo's migrations and checks gate attachment, the
-revocation-list signature (verified independently of the signer), that
+that the image's native binding signs a revocation list that verifies
+independently of the signer (and that the CP serves none), that
 `CORS_ORIGIN` is read at runtime rather than baked at build time, and — in a
 second container — the `OTEL_ENABLED=true` path. 27 checks in all; it needs the
 dev dependencies installed (`npm ci`), because migrations run from the host.
@@ -295,12 +310,12 @@ In-memory, per-process token buckets on every `/api/*` route except the probes
 (`/api/health`, `/api/readyz`, `/api/metrics`). Over-limit → `429 RATE_LIMITED`
 with `Retry-After` and `X-RateLimit-*` headers.
 
-**`/.well-known/*` is not rate-limited.** `/.well-known/aitp-manifest` and
-`/.well-known/aitp-revocation-list` are rewrites to `/api/well-known/*`, and the
-request gate (`src/proxy.ts`, matcher `/api/:path*`) sees the incoming path, not
-the rewrite destination — so those two URLs bypass the gate entirely: no rate
-limit, no CORS headers, no `x-request-id`. Both are public anyway; the same
-handlers reached at `/api/well-known/*` do go through the gate. Any future
+**`/.well-known/*` is not rate-limited.** `/.well-known/aitp-manifest` is a
+rewrite to `/api/well-known/aitp-manifest`, and the request gate
+(`src/proxy.ts`, matcher `/api/:path*`) sees the incoming path, not the rewrite
+destination — so that URL bypasses the gate entirely: no rate limit, no CORS
+headers, no `x-request-id`. It is public anyway; the same handler reached at
+`/api/well-known/aitp-manifest` does go through the gate. Any future
 rewrite to a public path would carry the same cost. If you need a limit on the
 discovery paths, apply it at the edge.
 
@@ -856,7 +871,7 @@ oversight (issue #99 asked for exactly that and it was answered at boot instead)
   only ever mean "this process should never have started" — so the honest place
   to say that is startup, which is where it is now said.
 - **The blast radius is wrong.** A `503` from `/api/readyz` removes the replica
-  from rotation for *every* route — discovery, the revocation list, sessions,
+  from rotation for *every* route — discovery, the revocation relay, sessions,
   audit — over a fault that affects two POSTs, and nothing the replica can do
   will clear it. The two routes' own `503 SERVER_MISCONFIGURED` is the
   proportionate answer, and `POST` callers get a `code` that names the fault.

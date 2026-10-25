@@ -1,6 +1,6 @@
 # AITP Control Plane
 
-A backend service that hosts the registry, audit log, revocation list, and webhook fan-out for an [AITP (Agent Identity & Trust Protocol)](https://agentidentitytrustprotocol.io/spec) deployment ([spec repo](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol)).
+A backend service that hosts the registry, audit log, revocation relay, and webhook fan-out for an [AITP (Agent Identity & Trust Protocol)](https://agentidentitytrustprotocol.io/spec) deployment ([spec repo](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol)).
 
 This service is **API-only**. It ships no UI. Operators consume the JSON endpoints directly or front them with a separate UI app.
 
@@ -10,7 +10,7 @@ A coordination surface for AITP agents. It **observes and audits**; it does not 
 
 - **Agent registry** — agents self-enroll with a short-lived token; the CP caches their manifest and offered capabilities so peers can discover them.
 - **Audit event store** — every handshake, delegation, and revocation reported by agents is persisted and streamed live over SSE.
-- **Revocation list** — operators record revoked TCT JTIs; the CP signs and serves a periodically-refreshed revocation snapshot at `/.well-known/aitp-revocation-list` per [RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation).
+- **Revocation relay** — operators record revoked TCT JTIs; each issuing agent pulls its own entries from `GET /api/revocations?iss=<aid>`, then signs and serves them as its own list. The CP signs no revocation list: under [RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation) §1.5 a list is valid only from the issuer of the tokens it names.
 - **Webhook outbox** — subscribers receive HMAC-signed deliveries for selected event types, with retries.
 - **Telemetry sink** — `POST /api/events` accepts batched run telemetry from the [aitp-playground](https://github.com/agentidentitytrustprotocol/aitp-playground) and any other AITP runner.
 
@@ -67,9 +67,7 @@ rate-limit, retention, and telemetry subsystems behave.
 | `API_KEYS` | **prod** | empty | Comma-separated allowlist of `label:key` or bare `key` entries; the label is recorded as `key:<label>` on admin audit rows ([docs/api.md](docs/api.md#api-keys-per-consumer-labels)). Empty in prod returns 503 on gated routes (fail-safe). Empty in dev disables auth. |
 | `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret (**≥ 32 chars**) for minting/verifying one-time enrollment tokens (callers never present it). **Checked at boot: with `NODE_ENV=production` an unset or too-short value makes the process print one fatal line and exit 1** — so a bad value fails the deploy instead of deploying green. Outside production it warns once at boot and starts, and both `POST /api/registry/enroll` and `POST /api/registry/agents` then return 503 for every request. Deliberately not checked by `/api/readyz` — see [operations.md](docs/operations.md#health-readiness--graceful-shutdown). |
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Defaults to `http://localhost:3000` if unset (including in prod) — set it to the UI plane origin. |
-| `REVOCATION_LIST_TTL_SECS` | no | `3600` | Validity window (`expires_at`) of each signed revocation list. Independent of how often the list is rebuilt: each process re-reads the DB at most every 60 s (sooner on that replica after a revocation is recorded) — see [operations.md](docs/operations.md#revocation-list). |
-| `REVOCATION_FAIL_MODE` | no | `fail_closed` | What the revocation list does when the DB read fails. `fail_closed` answers `503 REVOCATION_UNAVAILABLE`; `serve_stale` re-serves the last successfully-read list for up to `REVOCATION_MAX_STALENESS_SECS`, then `503`. It never signs an empty list. Unrecognised values mean `fail_closed`. |
-| `REVOCATION_MAX_STALENESS_SECS` | no | `300` | `serve_stale` only: max age of the re-served list, clamped to `REVOCATION_LIST_TTL_SECS`. |
+| `ISSUER_KEYS` | no | empty | Comma-separated `label@aid=key` entries: one key per issuing agent, which opens **only** `GET /api/revocations?iss=<that aid>` (any other `iss` is `403`, any other route `401`). A key that is also in `API_KEYS` is refused. The label names the agent's series in the last-pull metric — see [operations.md](docs/operations.md#revocation-relay). |
 | `LOG_LEVEL` | no | `info` in production, `debug` otherwise | Pino log level: trace / debug / info / warn / error / fatal. Outside production logs go through `pino-pretty`; in production they are JSON. |
 | `NODE_ENV` | **prod** | unset (`next start` and the image set `production`) | Every production safeguard keys on the exact (trimmed) value `production`: `API_KEYS` fail-closed, fatal `ENROLLMENT_SECRET` and `CP_AID_SEED_HEX` boot checks, https-only webhook URLs, JSON logs. Any value other than `production`, `development` or `test` logs an error at boot naming what is inactive — set `production` for staging too. See [operations.md](docs/operations.md#authentication--exposure). |
 
@@ -138,13 +136,13 @@ rate-limit, retention, and telemetry subsystems behave.
 
 See [`docs/`](docs/README.md) for the full documentation set — [`docs/api.md`](docs/api.md) (prose API reference), [`docs/events.md`](docs/events.md) (event types & projections), [`docs/data-model.md`](docs/data-model.md) (Postgres schema), and [`docs/operations.md`](docs/operations.md) (runbook) — plus [`openapi.yaml`](openapi.yaml) for the machine-readable schema. High-level groups:
 
-- Public discovery: `/api/health`, `/api/readyz`, `/api/metrics`, `/.well-known/aitp-manifest`, `/.well-known/aitp-revocation-list`
+- Public discovery: `/api/health`, `/api/readyz`, `/api/metrics`, `/.well-known/aitp-manifest`
+- Revocation: `POST /api/revocation/entries` (admin), `GET /api/revocations?iss=<aid>` (admin, or that issuer's `ISSUER_KEYS` key)
 - Registry: `/api/registry/enroll`, `/api/registry/agents`, `/api/registry/agents/:aid`, `/api/registry/agents/:aid/manifest`, `/api/registry/agents/:aid/export`
 - Sessions: `/api/sessions`, `/api/sessions/:sessionId`, `/api/sessions/:sessionId/export`, `/api/sessions/:sessionId/replay`
 - Events: `POST /api/events`, `GET /api/events/history`, `GET /api/events/stream` (SSE)
 - Audit: `/api/audit`
 - Webhooks: `/api/webhooks`, `/api/webhooks/:id`, `/api/webhooks/:id/circuit-breaker`, `/api/webhooks/:id/circuit-breaker/reset`
-- Revocation: `/api/revocation/entries`
 - Dashboard JSON: `/api/dashboard/overview`, `/api/dashboard/agents`
 - TCT lifecycle: `/api/tcts` (observed; CP does not issue)
 - Delegation chains: `/api/delegations`
@@ -162,7 +160,7 @@ See [`docs/`](docs/README.md) for the full documentation set — [`docs/api.md`]
 │  └──────────┘  └────────────┘  └────────────────┘   │
 │  ┌──────────────┐  ┌──────────────────────────┐     │
 │  │ Revocation   │  │ /.well-known + CP AITP   │     │
-│  │  list        │  │  identity (Ed25519)      │     │
+│  │  relay       │  │  identity (Ed25519)      │     │
 │  └──────────────┘  └──────────────────────────┘     │
 └────────────────┬────────────────────────────────────┘
                  │ JSON over HTTP
@@ -211,8 +209,8 @@ native NAPI and traced-external paths resolve inside it, that the request gate i
 really **attached** (the one thing `next start` cannot show for a standalone build),
 that **the image's compiled gate is byte-identical to the reviewed one** (an equality
 pin, after five successive attempts to establish the same thing by probing the gate's
-behaviour were each defeated), that the revocation list's signature verifies
-two independent ways, that CORS comes from the runtime environment rather than the
+behaviour were each defeated), that the image's native binding signs a revocation
+list that verifies two independent ways (and that the CP itself serves none), that CORS comes from the runtime environment rather than the
 value baked at build time, and that the `OTEL_ENABLED=true` path loads and
 instruments. **Publishing to GHCR is gated on it**, so an unverified image cannot
 ship. An arm64 arm of the same harness is opt-in from the Actions tab. A summary is
@@ -254,7 +252,7 @@ src/
     http/         Request-body reading helpers
     identity/     CP's own AITP keypair + manifest
     registry/     Agent CRUD, enrollment tokens, expiry job
-    revocation/   Signed revocation snapshot producer
+    revocation/   Per-issuer revocation relay metrics (the CP signs no list)
     sessions/     Handshake-session monitor (from audit events)
     tcts/         Observed-TCT / delegation projection from audit events
     trust-anchors/  Background JWKS refresher for OIDC trust anchors

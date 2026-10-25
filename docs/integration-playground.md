@@ -129,8 +129,8 @@ record of what those calls depend on.
 |---|---|---|
 | `GET /api/registry/agents?capability=` | **yes** | public; `agents[]` with a handshake endpoint (see above) |
 | `POST /api/events` | **yes** | flat events, normalization above; 2xx quickly |
-| `POST /api/revocation/entries` | no | body `{jti, reason?}`; `jti` must be a UUID. Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
-| `GET /.well-known/aitp-revocation-list` | no | fetched by the playground's **agents**, not its service; see [Revocation list](#revocation-list) |
+| `POST /api/revocation/entries` | no | body `{jti, reason?, iss?}`; `jti` must be a UUID v4; `iss` is needed only when the CP has no `tct.issued` report for the `jti` (else `400 ISS_REQUIRED`). Re-posting an already revoked `jti` returns `201` again (the deny-list entry is unchanged, but a new `tct.revoked` event is emitted) |
+| `GET /api/revocations?iss=` | no | pulled by the playground's issuing **agents**, not its service; see [Revocation](#revocation) |
 | `GET /api/events/history` | no | params `run_id`, `aid`, `type`, `limit`; reads `events` |
 | `GET /api/sessions` | no | params `run_id`, `aid`, `status`; reads `sessions`. Honours `limit` (default 200, max 1000) and `offset`; the playground sends `limit` |
 | `GET /api/sessions/{id}/replay` | no | params `since`, `until`, `limit`; reads `events` |
@@ -154,18 +154,17 @@ Enrollment (`POST /api/registry/enroll` → `POST /api/registry/agents`) is **no
 called by the playground service — agents enroll themselves; the playground only
 discovers them.
 
-### Revocation list
+### Revocation
 
-`GET /.well-known/aitp-revocation-list` is public; the CP ignores any
-`Authorization` header on it (the playground's agents send their configured CP
-API key as a Bearer token when one is set). The response is the signed envelope
-defined by [RFC-AITP-0008 §1.5][rfc8-15], signed with the CP's own identity.
-The playground's agents verify that signature against the AID pinned in their
-`CP_AID` setting and discard any snapshot that does not verify — there is no
-unsigned or alternative-shape fallback. So the CP **must** keep serving exactly
-the RFC-AITP-0008 §1.5 envelope, and its signing identity (`CP_AID_SEED_HEX`,
-see [`operations.md` § Identity](operations.md#identity)) must stay stable for
-pinned agents to keep accepting it.
+The CP no longer serves a revocation list (`/.well-known/aitp-revocation-list`
+answers `404` since CP1.1). Under [RFC-AITP-0008 §1.5][rfc8-15] a list is valid
+only when signed by the issuer of the tokens it names, so each issuing agent
+pulls `GET /api/revocations?iss=<its aid>` with its own key from the CP's
+`ISSUER_KEYS` (an issuer key reads only its own AID's entries), signs the
+entries with its own identity and serves the list itself. Verifiers pin the
+TCT's issuer, not the CP. The contract is in
+[`api.md` § Revocation](api.md#revocation). Until the playground adopts this
+(PG1.1), its `revocation-via-cp` scenarios fail.
 
 [rfc8-15]: https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md
 
@@ -192,7 +191,7 @@ owns the field:
 |---|---|---|
 | `CP_BASE_URL` | the CP's base URL | Empty ⇒ the playground's CP integration is disabled. |
 | `CP_API_KEY` | one of `API_KEYS` | Sent as `Authorization: Bearer` when set. If unset on the playground but `API_KEYS` is set on the CP, the gated calls get `401` (and degrade). With `API_KEYS` empty outside production the CP accepts unauthenticated calls (see [`api.md` § Authentication](api.md#authentication)). |
-| `CP_AID` | the CP's own AID | Must equal the CP's AID — `manifest.aid` in the envelope served at `/.well-known/aitp-manifest` (derived from `CP_AID_SEED_HEX`). Empty or wrong ⇒ the playground's agents discard every revocation snapshot. |
+| `CP_AID` | the CP's own AID | Must equal the CP's AID — `manifest.aid` in the envelope served at `/.well-known/aitp-manifest` (derived from `CP_AID_SEED_HEX`). Before PG1.1 the playground's agents verified the CP-signed revocation list against it, and with no list served (CP1.1) those checks now fail; after PG1.1 it no longer gates revocation. |
 
 Timeouts and other client tuning are playground-owned; see
 [`control-plane.md`][pg-cp] and the playground's
@@ -209,8 +208,8 @@ allowed, breaking changes need coordination.
   `session_id`, `run_id`, numeric `ts`, raw event as `payload`): **breaking**
   (load-bearing).
 - Changing auth on discovery or `/api/events`: **breaking**.
-- Changing the revocation-list envelope or rotating the CP identity: breaks
-  revocation propagation for agents pinned to the old `CP_AID`.
+- Changing the `GET /api/revocations` response shape or the issuer-key rule:
+  breaks revocation propagation for every issuing agent.
 - Renaming response keys the client reads (`agents`, `events`, `sessions`, `tcts`, `delegations`, `trustAnchors`, `pinnedKeys`) or request keys it sends (`issuerUrl`, `jwksUrl`, `pubkey`, `sessionId`, `jti`): breaking for that feature — coordinate.
 
 ## Verifying locally

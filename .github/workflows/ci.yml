@@ -266,14 +266,15 @@ jobs:
   # `ENV NODE_OPTIONS=--require=/app/lie.js` was measured preloading its own code into
   # every probe run from it.
   #
-  # It then verifies the SIGNING PATH — the revocation list's Ed25519 signature
-  # checked two independent ways over the raw served bytes, plus the assertion that
-  # the container did NOT log `revocation DB read failed` (the producer fails
-  # closed by default, but serve_stale mode re-serves a signed list on a failed DB
-  # read and every other assertion in that group passes against it) — the CORS BUILD-FREEZE (the served
+  # It then verifies the REVOCATION PATH — the CP-signed list at
+  # /.well-known/aitp-revocation-list is gone (404, RFC-AITP-0008 §1.5); an issuer
+  # list signed by the image's own NAPI binary verifies two independent ways (the
+  # in-image SDK, and node:crypto on the host over the raw bytes); and the gated
+  # relay GET /api/revocations answers 401 anonymous, 200 {iss, entries:[]} with the
+  # admin key, and did NOT log `revocation relay read failed` — the CORS BUILD-FREEZE (the served
   # origin must equal the runtime value and differ from the one the Dockerfile bakes,
   # parsed out of the Dockerfile rather than hardcoded), and the OTEL_ENABLED=true
-  # PATH in a second container, where the gate/signing/CORS assertions are all re-run
+  # PATH in a second container, where the gate/revocation/CORS assertions are re-run
   # and the SDK is proven to have actually started. Span EXPORT is out of scope.
   #
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
@@ -323,8 +324,8 @@ jobs:
 
       # Needed for drizzle-kit only. The harness applies the repo's own migrations
       # from the HOST, because the runtime image bundles no drizzle-kit — without
-      # them src/lib/revocation/producer.ts publishes an empty-but-validly-signed
-      # list and the live checks would pass against a broken database.
+      # them the revocation relay (GET /api/revocations) answers 503 and /api/audit
+      # 500, and the live checks could not tell a broken database from a gate fault.
       - name: Install dependencies
         run: npm ci
 

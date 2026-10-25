@@ -148,7 +148,7 @@ describe('register', () => {
 
   it('validates CP_AID_SEED_HEX at boot, right after ENROLLMENT_SECRET', async () => {
     // Without this call a production deploy with no (or a malformed) seed boots
-    // green and fails the manifest, revocation list and /api/health on first
+    // green and fails the manifest and /api/health on first
     // use — every CI path supplies a valid seed, so nothing else would notice.
     await register();
     expect(enforceCpSeedAtBootMock).toHaveBeenCalledTimes(1);

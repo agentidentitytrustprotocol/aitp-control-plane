@@ -222,7 +222,7 @@ The CP emits these itself (`source: "cp"`) as a side effect of registry/revocati
 | `agent.registered` | `POST /api/registry/agents` | `aidA` = agent AID; `payload.displayName`, `payload.namespace` |
 | `agent.expired` | periodic expiry sweep, when a manifest TTL lapses, or when an active agent's stored Manifest is not `aitp/0.3` | `aidA` = agent AID; `payload.reason="manifest_expired"` or `"manifest_version_unsupported"`, `payload.displayName`, `payload.namespace` |
 | `agent.deregistered` | `DELETE /api/registry/agents/:aid` | `aidA` = agent AID; `payload.reason="admin_deregister"` |
-| `tct.revoked` | `POST /api/revocation/entries` | no `aidA`; `payload.jti`, `payload.reason` (may be `null`). Also drives the projection above. |
+| `tct.revoked` | `POST /api/revocation/entries` | no `aidA`; `payload.jti`, `payload.reason` (may be `null`), `payload.iss` (the TCT's issuer, the agent the entry is relayed to). Also drives the projection above. |
 
 ## Webhook-deliverable events
 

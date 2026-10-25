@@ -72,7 +72,7 @@ async function throughGate(proxy: Proxy, token: string): Promise<{ status: numbe
     new NextRequest('http://localhost/api/revocation/entries', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ jti, reason: 'cp0.1 integration' }),
+      body: JSON.stringify({ jti, reason: 'cp0.1 integration', iss: 'aid:test:key-labels' }),
     }),
   );
   return { status: res.status, requestId };

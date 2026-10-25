@@ -4,11 +4,13 @@
 // deterministically without env juggling or a real bucket store.
 import { jest } from '@jest/globals';
 import { NextRequest } from 'next/server';
-import { parseApiKeys, type ApiKeyEntry } from './lib/api-keys';
+import { parseApiKeys, parseIssuerKeys, type ApiKeyEntry } from './lib/api-keys';
 
 interface MockConfig {
   /** Raw API_KEYS entries (`key` or `label:key`), parsed like config.ts does. */
   apiKeys: string[];
+  /** Raw ISSUER_KEYS entries (`label@aid=key`). */
+  issuerKeys: string[];
   isProduction: boolean;
   rateLimitEnabled: boolean;
   rateLimitWindowMs: number;
@@ -22,6 +24,7 @@ interface MockConfig {
 
 const DEFAULTS: MockConfig = {
   apiKeys: [],
+  issuerKeys: [],
   isProduction: false,
   rateLimitEnabled: true,
   rateLimitWindowMs: 60_000,
@@ -56,6 +59,10 @@ function load(
     ...merged,
     apiKeys: apiKeyEntries.map((e) => e.key),
     apiKeyEntries,
+    issuerKeyEntries: parseIssuerKeys(
+      merged.issuerKeys.join(','),
+      apiKeyEntries.map((e) => e.key),
+    ).entries,
   };
   const check =
     jest.fn<(b: string, k: string, l: number, w: number) => Decision>(
@@ -375,5 +382,74 @@ describe('proxy — client IP resolution', () => {
     const { proxy, check } = load();
     proxy(req('/api/registry/enroll', { method: 'POST' }));
     expect(check).toHaveBeenCalledWith('enroll-ip', 'unknown', 5, 60_000);
+  });
+});
+
+// Issuer keys (ISSUER_KEYS, CP1.1) open exactly one door, GET
+// /api/revocations, and the gate tells the route which AID the key is bound
+// to. Everywhere else such a key is an unknown key.
+describe('proxy — issuer keys', () => {
+  const ISSUER_AID = 'aid:pubkey:O4nSX0IWKDbZqISunQN2NnEba2AnDIlxY2jjSmqMCMs';
+  const ADMIN_KEY = 'admin-key-0123456789abcdef';
+  const ISSUER_KEY = 'issuer-key-0123456789abcdef';
+  const ROUTE = `/api/revocations?iss=${encodeURIComponent(ISSUER_AID)}`;
+  const cfg = {
+    apiKeys: [`ops:${ADMIN_KEY}`],
+    issuerKeys: [`researcher@${ISSUER_AID}=${ISSUER_KEY}`],
+  };
+  const bearer = (key: string) => ({ authorization: `Bearer ${key}` });
+  /** A request header the gate forwards to the handler. */
+  const forwarded = (res: Response, name: string) =>
+    res.headers.get(`x-middleware-request-${name}`);
+
+  it('admits an issuer key on GET /api/revocations and forwards its AID and label', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(req(ROUTE, { headers: bearer(ISSUER_KEY) }));
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-issuer')).toBe(ISSUER_AID);
+    expect(forwarded(res, 'x-aitp-key-label')).toBe('researcher');
+  });
+
+  it.each([
+    ['/api/revocation/entries', 'POST'],
+    ['/api/revocation/entries', 'GET'],
+    ['/api/registry/agents/aid:abc/export', 'GET'],
+    ['/api/revocations', 'POST'],
+  ])('is an unknown key on %s %s (401)', (path, method) => {
+    const { proxy } = load(cfg);
+    expect(proxy(req(path, { method, headers: bearer(ISSUER_KEY) })).status).toBe(401);
+  });
+
+  it('admits an admin key on the route without binding an issuer', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(req(ROUTE, { headers: bearer(ADMIN_KEY) }));
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-issuer')).toBeNull();
+    expect(forwarded(res, 'x-aitp-key-label')).toBe('ops');
+  });
+
+  it('refuses the route with no key', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req(ROUTE)).status).toBe(401);
+  });
+
+  it('strips a client-supplied issuer header', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(
+      req(ROUTE, { headers: { ...bearer(ADMIN_KEY), 'x-aitp-key-issuer': 'aid:pubkey:forged' } }),
+    );
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-issuer')).toBeNull();
+  });
+
+  it('rate-limits an issuer key in its own per-key bucket', () => {
+    const { proxy, check } = load(cfg);
+    proxy(req(ROUTE, { headers: bearer(ISSUER_KEY) }));
+    expect(check).toHaveBeenCalledWith('api-key', ISSUER_KEY.slice(0, 24), 600, 60_000);
+  });
+
+  it('no longer treats the removed CP-signed list path as public', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req('/api/well-known/aitp-revocation-list')).status).toBe(401);
   });
 });

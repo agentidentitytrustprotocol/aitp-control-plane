@@ -45,7 +45,7 @@ Find them by their capitalised titles (line numbers move):
 | `WHAT IS OUT OF SCOPE` | the dependency tree (a deliberate decision, not deferred work), route-handler chunks, the `node` binary/libc/base OS |
 | `THE ACCEPTED COST` | why a Next/Turbopack upgrade fails check 13 and must not be "fixed" by normalising |
 | `CHECKS 8-12 — DOES THAT CODE ACTUALLY RUN?` | why the behavioural probes stay alongside the pins |
-| `THE SIGNING PATH (checks 14-18)` | revocation-list signature verified two ways over the raw served bytes |
+| `THE REVOCATION PATH (checks 14-18)` | the CP-signed list is gone (404); an in-image issuer list verifies two ways over its raw bytes; the gated relay answers from a real DB read |
 | `THE CORS BUILD-FREEZE (check 19)` | runtime vs Dockerfile-baked `CORS_ORIGIN` |
 | `THE OTEL_ENABLED=true PASS (checks 20-23)` | the second container; span export explicitly not verified |
 | `THE COMPILED REWRITE TABLE (check 24)` | why a rewrite is a gate-bypass question |
@@ -81,13 +81,13 @@ order (24–27 run in the static half). Each row's detail is at
 | 11 | live | matcher set (compiled `regexp` included) and `apiRoutes` equal the pin | satisfaction tests fell to one-line matcher edits four times |
 | 12 | live | the gate runs on a second gated route, a public route, and one anonymous `POST` | the gate's decision takes the method |
 | 13 | live | the compiled gate and its whole load path are byte-identical to the pin | sampled probes were defeated five times; an equality has no dimensions to miss |
-| 14 | live | revocation list served; signature verifies host-side (no SDK) | cross-implementation check over the raw bytes |
-| 15 | live | the image's own SDK verifies its own signature | exercises the shipped binary where it runs |
-| 16 | live | envelope issuer equals the seed-derived AID | a wrong seed leaves 14 and 15 green |
-| 17 | live | no `revocation DB read failed` in the logs | `REVOCATION_FAIL_MODE=serve_stale` still answers 200 on a failed read |
-| 18 | live | a tampered envelope is rejected | without the negative half a verifier returning `true` passes everything |
+| 14 | live | `GET /.well-known/aitp-revocation-list` answers 404 | RFC-AITP-0008 §1.5: a CP-signed list is one every compliant verifier discards; a stale rewrite or route must not survive a build |
+| 15 | live | an ephemeral `AitpAgent` in the image signs a list; the image's own `verifyRevocationList` accepts it and rejects a tamper | issuers sign with this SDK; exercises the shipped binary where it runs |
+| 16 | live | those raw bytes verify host-side (node:crypto, no SDK), issuer = `agent.aid` | cross-implementation check over the raw bytes |
+| 17 | live | `GET /api/revocations`: 401 anonymous; 200 `{iss, entries:[]}` + `no-store` with the admin key; no `revocation relay read failed` in the logs | an empty answer is also what a silently failed read would say |
+| 18 | live | tampered envelopes and the pre-0.5.0 wrapped form are rejected | without the negative half a verifier returning `true` passes everything |
 | 19 | live | served CORS origin = runtime value ≠ Dockerfile-baked value | presence alone passes on a build-frozen artifact |
-| 20 | OTel | gate, signing and CORS assertions re-run with `OTEL_ENABLED=true` | loading the OTel tree was measured to turn a 401 into a 500 |
+| 20 | OTel | gate, revocation-route (14, 17) and CORS assertions re-run with `OTEL_ENABLED=true` | loading the OTel tree was measured to turn a 401 into a 500 |
 | 21 | OTel | the SDK started and patched `pg.Client.prototype.query` | an absence-of-errors scan passes when OTel never started |
 | 22 | OTel | no `native module` / `createContextKey` / `Cannot find module` in logs | the three ways the OTel tree fails to load in standalone builds |
 | 23 | OTel | the OTel container is still running at the end | a post-boot crash would leave earlier checks green on a dead process |
