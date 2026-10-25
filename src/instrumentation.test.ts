@@ -82,6 +82,24 @@ jest.mock('./lib/trust-anchors/jwks-refresher', () => ({
   },
 }));
 
+jest.mock('./lib/webhooks/service', () => ({
+  startWebhookReaper: () => {
+    calls.push('startWebhookReaper');
+  },
+}));
+
+jest.mock('./lib/registry/expiry-job', () => ({
+  startExpiryJob: () => {
+    calls.push('startExpiryJob');
+  },
+}));
+
+jest.mock('./lib/retention', () => ({
+  startRetentionJob: () => {
+    calls.push('startRetentionJob');
+  },
+}));
+
 const reportRequestErrorMock = jest.fn((..._args: unknown[]): unknown => undefined);
 jest.mock('./lib/request-error', () => ({
   reportRequestError: (...args: unknown[]) => reportRequestErrorMock(...args),
@@ -166,6 +184,9 @@ describe('register', () => {
       'enforceCpSeedAtBoot',
       'registerShutdownHooks',
       'startJwksRefresher',
+      'startWebhookReaper',
+      'startExpiryJob',
+      'startRetentionJob',
     ]);
   });
 
@@ -184,6 +205,9 @@ describe('register', () => {
       'sdk.start',
       'registerShutdownHooks',
       'startJwksRefresher',
+      'startWebhookReaper',
+      'startExpiryJob',
+      'startRetentionJob',
     ]);
   });
 

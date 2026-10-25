@@ -17,10 +17,18 @@ export interface AdminAuditEntry {
 // Failures here never abort the caller (audit must not gate the request
 // path), but silent loss is dangerous — surface a counter on /api/metrics
 // so operators notice if the audit trail is degrading.
-let adminAuditInsertFailures = 0;
+//
+// On `globalThis`, not module scope: Next gives instrumentation.ts and the
+// routes separate instances of this module, and the boot-started webhook
+// reaper (instrumentation's instance) writes `webhook.unsubscribed` rows.
+// A module-level counter there would be one /api/metrics never reads.
+declare global {
+  // eslint-disable-next-line no-var
+  var __adminAuditInsertFailures: number | undefined;
+}
 
 export function getAdminAuditInsertFailures(): number {
-  return adminAuditInsertFailures;
+  return globalThis.__adminAuditInsertFailures ?? 0;
 }
 
 export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
@@ -36,7 +44,7 @@ export async function writeAdminAudit(entry: AdminAuditEntry): Promise<void> {
       requestId: entry.requestId ?? null,
     });
   } catch (err) {
-    adminAuditInsertFailures += 1;
+    globalThis.__adminAuditInsertFailures = getAdminAuditInsertFailures() + 1;
     logger.warn({ err, action: entry.action }, 'admin-audit insert failed');
   }
 }
