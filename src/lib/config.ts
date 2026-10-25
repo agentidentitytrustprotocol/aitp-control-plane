@@ -116,6 +116,9 @@ export const config = {
   // One key per issuing agent, bound to that agent's AID. Accepted ONLY by
   // `GET /api/revocations`, and only for `iss=<its aid>` (src/proxy.ts).
   issuerKeyEntries: parsedIssuerKeys.entries,
+  // Label problems that refuse boot (a label used twice in either list); see
+  // src/lib/key-labels-config.ts. Labels and positions only, never a key.
+  keyLabelErrors: [...parsedApiKeys.errors, ...parsedIssuerKeys.errors],
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
   maxAuditEventsInMemory: readNumber('MAX_AUDIT_EVENTS_MEMORY', 500),
   // Per-process cap on concurrent /api/events/stream connections.
@@ -220,7 +223,8 @@ if (!config.isProduction && config.apiKeys.length === 0 && !process.env.JEST_WOR
   );
 }
 
-// Label problems (a duplicate, or a label refused for containing a secret).
+// Label problems that only warn (a duplicate key, a malformed issuer entry, a
+// label refused for containing a secret); a duplicate LABEL refuses boot instead.
 // The messages name entry positions and labels only, never a key.
 if (!process.env.JEST_WORKER_ID) {
   for (const w of [...parsedApiKeys.warnings, ...parsedIssuerKeys.warnings]) {
