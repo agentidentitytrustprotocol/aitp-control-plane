@@ -31,7 +31,7 @@ function handshake(): Handshake {
   const i = a.newSession(null, { pinnedKeys: [b.aid] });
   const r = b.newResponder(null, { pinnedKeys: [a.aid] });
   const hello = r.processHello(i.buildHello(manifestB, ['demo.echo']));
-  const done = i.complete(r.processCommit(i.processHelloAck(hello.ackJson, hello.sessionId)).ackJson);
+  const done = i.complete(r.processCommit(i.processHelloAck(hello.ackJson, hello.sessionId), []).ackJson, []);
   if (!done.grantVoucher) throw new Error('handshake returned no grant voucher');
   return {
     a,

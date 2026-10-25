@@ -16,6 +16,8 @@
  *   - the spec rule the relay exists for: a list for B's tokens signed by
  *     anyone but B (here: a stand-in for the CP) fails verification, and a
  *     fail_closed verifier then refuses the TCT rather than trusting it
+ *   - the aitp 0.20 SDK default: with no verified list, verifyTct refuses
+ *     every TCT with TCT_REVOKED
  *   - authorisation: B's issuer key reads only `iss=B` (another iss is 403),
  *     a malformed iss is 400, and only an issuer-key pull moves the
  *     last-pull gauge
@@ -111,19 +113,26 @@ function signAs(signer: Agent, entries: RelayedEntry[]): string {
 }
 
 /**
- * A fail_closed verifier (RFC-AITP-0008): it trusts a TCT only with a
- * revocation list that verifies under the TCT's own issuer, and refuses the
- * TCT when the list does not verify. Throws on refusal.
+ * A fail_closed verifier (RFC-AITP-0008), as aitp 0.20 makes the default: it
+ * hands `verifyTct` the deny list only when the list verifies under the TCT's
+ * own issuer. An unverifiable list is treated as no list at all, and the SDK
+ * then refuses every TCT with `TCT_REVOKED` ("revocation source
+ * unavailable") -- never "nothing revoked". Throws on refusal.
  */
 function failClosedVerify(
   verifier: Agent,
   tct: { token: string; claims: { iss: string; aud: string } },
   listEnvelope: string,
 ): void {
-  verifyRevocationList(listEnvelope, tct.claims.iss);
-  const revoked = (
-    JSON.parse(listEnvelope) as { revocation_list: { entries: { jti: string }[] } }
-  ).revocation_list.entries.map((e) => e.jti);
+  let revoked: string[] | null = null;
+  try {
+    verifyRevocationList(listEnvelope, tct.claims.iss);
+    revoked = (
+      JSON.parse(listEnvelope) as { revocation_list: { entries: { jti: string }[] } }
+    ).revocation_list.entries.map((e) => e.jti);
+  } catch {
+    // Unverifiable: fall through with no list and let the SDK fail closed.
+  }
   verifier.verifyTct(tct.token, 'demo.echo', tct.claims.aud, revoked);
 }
 
@@ -141,7 +150,8 @@ function handshake(holder: Agent, issuer: Agent) {
   const r = issuer.newResponder(null, { pinnedKeys: [holder.aid] });
   const hello = r.processHello(i.buildHello(issuerManifest, ['demo.echo']));
   const done = i.complete(
-    r.processCommit(i.processHelloAck(hello.ackJson, hello.sessionId)).ackJson,
+    r.processCommit(i.processHelloAck(hello.ackJson, hello.sessionId), []).ackJson,
+    [],
   );
   const claims = done.claims as unknown as {
     iss: string;
@@ -277,15 +287,27 @@ describe('integration: revocation relay → issuer-signed list → fail_closed v
     expect(() => verifyRevocationList(signed, issuerB.aid)).not.toThrow();
 
     // The same verifier now refuses the TCT.
-    expect(() => failClosedVerify(verifier, tct, signed)).toThrow(/revoked/);
+    expectVerifyCode(() => failClosedVerify(verifier, tct, signed), 'TCT_REVOKED');
   });
 
   it('a list for B tokens signed by anyone but B is refused (rev-011), and so is the TCT', async () => {
     const entries = await pullEntries(issuerB);
     const thirdParty = signAs(notTheIssuer, entries);
     expectVerifyCode(() => verifyRevocationList(thirdParty, issuerB.aid), 'issuer_mismatch');
-    // fail_closed: an unverifiable list is not "nothing revoked".
-    expectVerifyCode(() => failClosedVerify(verifier, tct, thirdParty), 'issuer_mismatch');
+    // fail_closed: an unverifiable list is not "nothing revoked". The SDK
+    // refuses the TCT even though this list does not name it.
+    const unrevoked = signAs(
+      notTheIssuer,
+      entries.filter((e) => e.jti !== tct.claims.jti),
+    );
+    expectVerifyCode(() => failClosedVerify(verifier, tct, unrevoked), 'TCT_REVOKED');
+  });
+
+  it('with no revocation list at all, the aitp 0.20 verifier refuses the TCT', () => {
+    expectVerifyCode(
+      () => verifier.verifyTct(tct.token, 'demo.echo', tct.claims.aud),
+      'TCT_REVOKED',
+    );
   });
 
   it("an issuer key reads only its own issuer's entries", async () => {
