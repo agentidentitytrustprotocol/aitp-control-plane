@@ -45,6 +45,20 @@ export function signPayload(secret: string, body: string): string {
   return createHmac('sha256', secret).update(body).digest('hex');
 }
 
+/** HMAC over `<timestamp>.<body>`, sent as `X-Aitp-Timestamp-Signature`.
+ * `X-Aitp-Signature` covers the body only and is identical on every retry,
+ * so the only time a receiver can bound a replay by is the body's
+ * `enqueuedAt` -- which a retry hours later legitimately carries. This
+ * signature binds the per-attempt `X-Aitp-Timestamp` (Unix seconds) to the
+ * body, so a receiver can bound the replay window by send time instead. */
+export function signTimestampedPayload(
+  secret: string,
+  timestamp: string,
+  body: string,
+): string {
+  return createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+}
+
 export async function listWebhooks(): Promise<Webhook[]> {
   return db.select().from(webhooks);
 }
@@ -289,6 +303,8 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
   let error: string | null = null;
   let ok = false;
 
+  // Fixed per attempt, not per delivery: see signTimestampedPayload.
+  const timestamp = String(Math.floor(Date.now() / 1000));
   try {
     const res = await fetch(webhook.url, {
       method: 'POST',
@@ -297,6 +313,8 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
         'X-Aitp-Event': delivery.eventType,
         'X-Aitp-Delivery': delivery.id,
         'X-Aitp-Signature': `sha256=${signature}`,
+        'X-Aitp-Timestamp': timestamp,
+        'X-Aitp-Timestamp-Signature': `sha256=${signTimestampedPayload(webhook.secret, timestamp, body)}`,
       },
       body,
       signal: AbortSignal.timeout(10_000),

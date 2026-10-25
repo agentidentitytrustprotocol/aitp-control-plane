@@ -23,7 +23,8 @@
 # SECRETS
 #   Values come from Doppler (`doppler secrets get --plain`) and from Railway's
 #   current API_KEYS, are held in shell variables only, and reach other tools on
-#   stdin (railway --stdin, vercel env update via stdin, curl -H @-). Nothing is
+#   stdin (railway --stdin, the Vercel REST API via curl --data-binary @-,
+#   curl -H @-). Nothing is
 #   written to disk and no value is printed: keys are shown as
 #   `apikey:<sha256[:16]>`, the same fingerprint the CP used as actor id before
 #   labels. If CP_API_KEY_NEW is missing, --apply generates N in memory and
@@ -192,13 +193,50 @@ console_check() { # logs in with CONSOLE_PASSWORD and calls a CP-backed route
   log "ok: console $CONSOLE_PROBE_PATH -> 200"
 }
 
+# Vercel REST call; JSON body (if any) on stdin. The token is the CLI's own
+# (refreshed by `vercel whoami` below) and reaches curl on a pipe, never argv.
+vercel_api() { # method path
+  curl -sS --fail-with-body --max-time 30 -X "$1" -H 'content-type: application/json' \
+    -H @<(printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN_VALUE") \
+    "https://api.vercel.com$2?teamId=$VC_ORG_ID" \
+    --data-binary @-
+}
+# The CLI's OAuth token is short-lived, and a rotation can run for 10+ minutes
+# between preflight and the first Vercel write. `vercel whoami` refreshes it
+# when needed; re-read it before every batch of REST calls and refuse one that
+# expires within 2 minutes. A VERCEL_TOKEN from the environment is used as is.
+vercel_refresh_token() {
+  [ -n "${VERCEL_TOKEN:-}" ] && { VERCEL_TOKEN_VALUE="$VERCEL_TOKEN"; return; }
+  vercel whoami >/dev/null 2>&1 || die "vercel CLI is not logged in"
+  local exp
+  VERCEL_TOKEN_VALUE="$(jq -r '.token // empty' "$VERCEL_AUTH_FILE" 2>/dev/null || true)"
+  exp="$(jq -r '.expiresAt // 0' "$VERCEL_AUTH_FILE" 2>/dev/null || true)"
+  [ -n "$VERCEL_TOKEN_VALUE" ] || die "no Vercel token (set VERCEL_TOKEN, or log in with the vercel CLI)"
+  [ -z "$exp" ] || [ "$exp" = 0 ] || [ "$exp" -gt $(( $(date +%s) + 120 )) ] ||
+    die "the Vercel CLI token expires within 2 minutes and was not refreshed; run \`vercel login\` or set VERCEL_TOKEN"
+}
+# `vercel env update ... preview` cannot run non-interactively: the CLI asks
+# which git branch the preview value applies to. The REST API sets the
+# all-branches preview entry directly: PATCH the existing entry for a target,
+# or create one (sensitive) if that target has none.
 vercel_set_cp_key() { # value on $1
-  local target
+  local target id envs
+  vercel_refresh_token
+  envs="$(vercel_api GET "/v10/projects/$VC_PROJECT_ID/env" </dev/null)" ||
+    die "could not list the console's env vars: $(printf '%s' "$envs" | jq -r '.error.message // .' 2>/dev/null)"
   for target in production preview; do
-    printf '%s' "$1" |
-      vercel env update CP_API_KEY "$target" --yes --scope "$VERCEL_SCOPE" --cwd "$VC_DIR" >/dev/null 2>&1 ||
-      printf '%s' "$1" |
-      vercel env add CP_API_KEY "$target" --force --sensitive --scope "$VERCEL_SCOPE" --cwd "$VC_DIR" >/dev/null
+    id="$(printf '%s' "$envs" | jq -r --arg t "$target" \
+      '[.envs[] | select(.key == "CP_API_KEY" and (.target | index($t)) and .gitBranch == null)][0].id // empty')"
+    if [ -n "$id" ]; then
+      printf '%s' "$1" | jq -Rs '{value: .}' |
+        vercel_api PATCH "/v9/projects/$VC_PROJECT_ID/env/$id" >/dev/null ||
+        die "updating console CP_API_KEY ($target) failed"
+    else
+      printf '%s' "$1" | jq -Rs --arg t "$target" \
+        '{key: "CP_API_KEY", value: ., type: "sensitive", target: [$t]}' |
+        vercel_api POST "/v10/projects/$VC_PROJECT_ID/env" >/dev/null ||
+        die "creating console CP_API_KEY ($target) failed"
+    fi
     log "console CP_API_KEY ($target) set to $(fp "$1")"
   done
 }
@@ -214,6 +252,12 @@ VC_DIR="$(mktemp -d)"
 trap 'rm -rf "$RW_DIR" "$VC_DIR"' EXIT
 (cd "$VC_DIR" && vercel link --yes --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" >/dev/null 2>&1) ||
   die "vercel link failed for $VERCEL_SCOPE/$VERCEL_PROJECT"
+VC_PROJECT_ID="$(jq -r '.projectId // empty' "$VC_DIR/.vercel/project.json")"
+VC_ORG_ID="$(jq -r '.orgId // empty' "$VC_DIR/.vercel/project.json")"
+[ -n "$VC_PROJECT_ID" ] && [ -n "$VC_ORG_ID" ] || die "vercel link wrote no project/org id"
+VERCEL_AUTH_FILE="${VERCEL_AUTH_FILE:-$HOME/Library/Application Support/com.vercel.cli/auth.json}"
+[ -r "$VERCEL_AUTH_FILE" ] || VERCEL_AUTH_FILE="$HOME/.local/share/com.vercel.cli/auth.json"
+vercel_refresh_token
 
 OLD="$(doppler_get CP_API_KEY_OLD)"
 NEW="$(doppler_get CP_API_KEY_NEW)"

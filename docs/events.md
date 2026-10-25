@@ -243,8 +243,11 @@ webhooks.
 
 Each delivery is a `POST` with `Content-Type: application/json` and the headers
 `X-Aitp-Event: <type>`, `X-Aitp-Delivery: <delivery id>` and
-`X-Aitp-Signature: sha256=<hex HMAC-SHA256 of the body under the webhook secret>`.
-The body is:
+`X-Aitp-Signature: sha256=<hex HMAC-SHA256 of the body under the webhook secret>`
+(identical on every retry), plus `X-Aitp-Timestamp: <Unix seconds of this attempt>`
+and `X-Aitp-Timestamp-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
+Receivers bound replay with the timestamped pair, not `enqueuedAt` (see
+[`api.md`](api.md)). The body is:
 
 ```json
 { "deliveryId": "uuid", "eventType": "tct.revoked", "payload": { "...full event envelope..." }, "enqueuedAt": "ISO-8601" }
