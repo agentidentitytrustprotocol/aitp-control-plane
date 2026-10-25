@@ -69,8 +69,10 @@ operating it involves.
   one entry per agent. The key reads only that AID's entries and opens no
   other route, so it is safe to hand to the agent; never give an agent an
   `API_KEYS` key for this. Boot warnings name any entry that was skipped
-  (malformed, label resembling a key, key reused from `API_KEYS`, duplicate).
-  Changing the list is a redeploy, like `API_KEYS`.
+  (malformed, label resembling a key, key reused from `API_KEYS`, duplicate
+  key). A label used twice, in either list, exits 1 at boot. Changing the list
+  is a redeploy, like `API_KEYS`; rotate an issuer's key under a new label for
+  the same AID ([api.md](api.md#api-keys-per-consumer-labels)).
 - **Watch that issuers pull.** An entry takes effect only once its issuer has
   pulled and republished, and an agent that stopped pulling fails silently.
   `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>",aid="<aid>"}`

@@ -20,6 +20,11 @@
  * or is a substring of one and at least SECRET_FRAGMENT_MIN chars long, is
  * refused and the entry falls back to `unlabelled-<n>` with a boot warning, so a reversed `key:label` typo cannot
  * write a secret into the audit log.
+ *
+ * Labels must be unique. A label used by two keys makes their audit rows
+ * indistinguishable, so it is a boot ERROR, not a warning: the process refuses
+ * to start (src/lib/key-labels-config.ts). Rotate by adding the new key under a
+ * NEW label (`console-20261024` -> `console-20261124`).
  */
 
 export interface ApiKeyEntry {
@@ -33,6 +38,8 @@ export interface ParsedApiKeys {
   entries: ApiKeyEntry[];
   /** Problems worth a boot warning. They never contain a secret. */
   warnings: string[];
+  /** Problems that refuse boot. They never contain a secret. */
+  errors: string[];
 }
 
 /** 1 to 40 chars, starting alphanumeric; `.`, `_` and `-` allowed after that. */
@@ -73,6 +80,7 @@ export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
 
   const allKeys = split.map((s) => s.key);
   const warnings: string[] = [];
+  const errors: string[] = [];
   const entries: ApiKeyEntry[] = [];
   const seenKeys = new Set<string>();
   const seenLabels = new Set<string>();
@@ -96,9 +104,9 @@ export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
       return;
     }
     if (seenLabels.has(label)) {
-      warnings.push(
-        `API_KEYS entry ${position}: label "${label}" is used more than once, so its ` +
-          `traffic is not distinguishable from the other key with that label`,
+      errors.push(
+        `API_KEYS entry ${position}: label "${label}" is already used by an earlier entry; ` +
+          'labels must be unique, or their audit rows cannot be told apart',
       );
     }
     seenKeys.add(s.key);
@@ -106,7 +114,7 @@ export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
     entries.push({ label, key: s.key });
   });
 
-  return { entries, warnings };
+  return { entries, warnings, errors };
 }
 
 /** Build a key -> label lookup. The first entry for a key wins. */
@@ -128,6 +136,11 @@ export function labelIndex(entries: readonly ApiKeyEntry[]): Map<string, string>
  * this key. An AID (`aid:pubkey:...`) contains neither `@` nor `=`, so the
  * entry splits on the first of each. A malformed entry, or one whose key is
  * also an `API_KEYS` key, is skipped with a boot warning (never a secret).
+ *
+ * Labels are unique, so each label (one metric series) has exactly one AID. A
+ * label used twice, for the same AID or a different one, is a boot ERROR. One
+ * AID may have several labels: that is the rotation overlap (`r-1@aid=old`,
+ * `r-2@aid=new`, then drop `r-1`).
  */
 
 export interface IssuerKeyEntry extends ApiKeyEntry {
@@ -138,6 +151,7 @@ export interface IssuerKeyEntry extends ApiKeyEntry {
 export interface ParsedIssuerKeys {
   entries: IssuerKeyEntry[];
   warnings: string[];
+  errors: string[];
 }
 
 /** The AID shapes the SDK mints (`aid:pubkey:<b64url>`, `aid:pubkey:p256:<b64url>`). */
@@ -153,7 +167,9 @@ export function parseIssuerKeys(
     .filter(Boolean);
   const entries: IssuerKeyEntry[] = [];
   const warnings: string[] = [];
+  const errors: string[] = [];
   const seenKeys = new Set<string>();
+  const seenLabels = new Set<string>();
 
   items.forEach((item, i) => {
     const position = i + 1;
@@ -185,11 +201,18 @@ export function parseIssuerKeys(
       warnings.push(`ISSUER_KEYS entry ${position} (${label}): duplicate key; skipped`);
       return;
     }
+    if (seenLabels.has(label)) {
+      errors.push(
+        `ISSUER_KEYS entry ${position}: label "${label}" is already used by an earlier entry; ` +
+          'labels must be unique (rotate an AID\'s key under a new label)',
+      );
+    }
     seenKeys.add(key);
+    seenLabels.add(label);
     entries.push({ label, aid, key });
   });
 
-  return { entries, warnings };
+  return { entries, warnings, errors };
 }
 
 /** Build a key -> entry lookup for issuer keys. */

@@ -47,6 +47,13 @@ jest.mock('./lib/identity/cp-seed-config', () => ({
     enforceCpSeedAtBootMock();
   },
 }));
+const enforceKeyLabelsAtBootMock = jest.fn(() => {});
+jest.mock('./lib/key-labels-config', () => ({
+  enforceKeyLabelsAtBoot: () => {
+    calls.push('enforceKeyLabelsAtBoot');
+    enforceKeyLabelsAtBootMock();
+  },
+}));
 jest.mock('./lib/shutdown', () => ({
   registerShutdownHooks: (hooks?: unknown) => {
     calls.push('registerShutdownHooks');
@@ -121,6 +128,7 @@ beforeEach(() => {
   calls.length = 0;
   enforceEnrollmentSecretAtBootMock.mockClear();
   enforceCpSeedAtBootMock.mockClear();
+  enforceKeyLabelsAtBootMock.mockClear();
   registerShutdownHooksMock.mockClear();
   reportRequestErrorMock.mockReset();
   reportRequestErrorMock.mockImplementation(() => undefined);
@@ -174,6 +182,15 @@ describe('register', () => {
     expect(calls[i + 1]).toBe('enforceCpSeedAtBoot');
   });
 
+  it('validates key labels at boot, right after CP_AID_SEED_HEX', async () => {
+    // Without this call a duplicate label in API_KEYS or ISSUER_KEYS boots
+    // green and attributes two keys' audit rows to one actor.
+    await register();
+    expect(enforceKeyLabelsAtBootMock).toHaveBeenCalledTimes(1);
+    const i = calls.indexOf('enforceCpSeedAtBoot');
+    expect(calls[i + 1]).toBe('enforceKeyLabelsAtBoot');
+  });
+
   it('validates the config BEFORE registering shutdown hooks', async () => {
     // A process that is about to exit should not first install signal handlers,
     // and the operator should read the fatal line first rather than third.
@@ -182,6 +199,7 @@ describe('register', () => {
       'warnOnUnrecognisedNodeEnv',
       'enforceEnrollmentSecretAtBoot',
       'enforceCpSeedAtBoot',
+      'enforceKeyLabelsAtBoot',
       'registerShutdownHooks',
       'startJwksRefresher',
       'startWebhookReaper',
@@ -202,6 +220,7 @@ describe('register', () => {
       'warnOnUnrecognisedNodeEnv',
       'enforceEnrollmentSecretAtBoot',
       'enforceCpSeedAtBoot',
+      'enforceKeyLabelsAtBoot',
       'sdk.start',
       'registerShutdownHooks',
       'startJwksRefresher',

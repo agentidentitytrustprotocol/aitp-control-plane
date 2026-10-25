@@ -61,15 +61,30 @@ describe('parseApiKeys', () => {
     expect(parseApiKeys('ops:xxopsxx').entries).toEqual([{ label: 'ops', key: 'xxopsxx' }]);
   });
 
-  it('drops a duplicate key (first label wins) and warns on a duplicate label', () => {
+  it('drops a duplicate key (first label wins) with a warning', () => {
     const dupKey = parseApiKeys('a:k1,b:k1');
     expect(dupKey.entries).toEqual([{ label: 'a', key: 'k1' }]);
     expect(dupKey.warnings).toHaveLength(1);
+    expect(dupKey.errors).toEqual([]);
+  });
 
+  it('reports a duplicate label as an error that does not echo a key', () => {
     const dupLabel = parseApiKeys('console:k1,console:k2');
-    expect(dupLabel.entries).toHaveLength(2);
-    expect(dupLabel.warnings).toHaveLength(1);
-    expect(dupLabel.warnings.join('\n')).not.toMatch(/k1|k2/);
+    expect(dupLabel.warnings).toEqual([]);
+    expect(dupLabel.errors).toHaveLength(1);
+    expect(dupLabel.errors[0]).toMatch(/entry 2: label "console"/);
+    expect(dupLabel.errors[0]).not.toMatch(/k1|k2/);
+  });
+
+  it('reports an explicit label that collides with a bare key\'s unlabelled-<n>', () => {
+    expect(parseApiKeys('bare-key-1,unlabelled-1:k2').errors).toHaveLength(1);
+  });
+
+  it('accepts the rotation overlap: old and new key under distinct labels', () => {
+    const { entries, warnings, errors } = parseApiKeys('console-1:old,console-2:new');
+    expect(entries.map((e) => e.label)).toEqual(['console-1', 'console-2']);
+    expect(warnings).toEqual([]);
+    expect(errors).toEqual([]);
   });
 
   it('labelIndex maps each key to its label', () => {
@@ -119,6 +134,31 @@ describe('parseIssuerKeys', () => {
     const { entries, warnings } = parseIssuerKeys(`a@${AID}=k,b@${AID}=k`);
     expect(entries.map((e) => e.label)).toEqual(['a']);
     expect(warnings[0]).toMatch(/duplicate key/);
+  });
+
+  it.each([
+    ['the same AID', `r@${AID}=k1,r@${AID}=k2`],
+    ['a different AID', `r@${AID}=k1,r@aid:pubkey:other=k2`],
+  ])('reports a label used twice (%s) as an error that does not echo a key', (_why, raw) => {
+    const { errors } = parseIssuerKeys(raw);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/entry 2: label "r"/);
+    expect(errors[0]).not.toMatch(/k1|k2/);
+  });
+
+  it('accepts one AID under two labels: the rotation overlap', () => {
+    const { entries, warnings, errors } = parseIssuerKeys(`r-1@${AID}=old,r-2@${AID}=new`);
+    expect(entries).toEqual([
+      { label: 'r-1', aid: AID, key: 'old' },
+      { label: 'r-2', aid: AID, key: 'new' },
+    ]);
+    expect(warnings).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it('does not count a skipped entry\'s label', () => {
+    expect(parseIssuerKeys(`r@${AID}=k,r@${AID}=k`).errors).toEqual([]);
+    expect(parseIssuerKeys(`r@did:web:x=k1,r@${AID}=k2`).errors).toEqual([]);
   });
 
   it('indexes by key', () => {
