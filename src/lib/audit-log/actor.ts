@@ -27,11 +27,15 @@ export function actorIdFromAuthHeader(authHeader: string | null): string | null 
  * - KEY_LABEL_HEADER: the non-secret label of the API key that authenticated
  *   the request (src/lib/api-keys.ts). Absent on public routes and in dev with
  *   no API_KEYS.
+ * - KEY_ISSUER_HEADER: set only when an issuer key (ISSUER_KEYS) authenticated
+ *   the request: the AID that key is bound to. A handler that sees it MUST
+ *   restrict its answer to that issuer.
  * - CLIENT_IP_FORWARD_HEADER: the client IP as the gate resolved it for rate
  *   limiting. Only as trustworthy as CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS
  *   make it (see src/lib/config.ts); `unknown` is not forwarded.
  */
 export const KEY_LABEL_HEADER = 'x-aitp-key-label';
+export const KEY_ISSUER_HEADER = 'x-aitp-key-issuer';
 export const CLIENT_IP_FORWARD_HEADER = 'x-aitp-client-ip';
 
 /** Admin-audit actor for a request authenticated with the key labelled `label`. */

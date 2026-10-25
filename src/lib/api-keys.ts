@@ -115,3 +115,86 @@ export function labelIndex(entries: readonly ApiKeyEntry[]): Map<string, string>
   for (const e of entries) if (!m.has(e.key)) m.set(e.key, e.label);
   return m;
 }
+
+/**
+ * Issuer-bound keys (`ISSUER_KEYS`): one per issuing agent, for the revocation
+ * relay (`GET /api/revocations?iss=`). Comma-separated `label@aid=key` entries.
+ *
+ * Kept in a list SEPARATE from `API_KEYS` on purpose: an issuer key is not an
+ * admin key, and the gate (src/proxy.ts) accepts it on that one route only, so
+ * no entry here can ever open an admin route by mistake.
+ *
+ * The AID is the bound identity: the route answers only `iss=<that aid>` for
+ * this key. An AID (`aid:pubkey:...`) contains neither `@` nor `=`, so the
+ * entry splits on the first of each. A malformed entry, or one whose key is
+ * also an `API_KEYS` key, is skipped with a boot warning (never a secret).
+ */
+
+export interface IssuerKeyEntry extends ApiKeyEntry {
+  /** The issuer AID this key may pull revocations for. */
+  aid: string;
+}
+
+export interface ParsedIssuerKeys {
+  entries: IssuerKeyEntry[];
+  warnings: string[];
+}
+
+/** The AID shapes the SDK mints (`aid:pubkey:<b64url>`, `aid:pubkey:p256:<b64url>`). */
+export const AID_RE = /^aid:[A-Za-z0-9:._-]{1,500}$/;
+
+export function parseIssuerKeys(
+  raw: string | undefined,
+  adminKeys: readonly string[] = [],
+): ParsedIssuerKeys {
+  const items = (raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const entries: IssuerKeyEntry[] = [];
+  const warnings: string[] = [];
+  const seenKeys = new Set<string>();
+
+  items.forEach((item, i) => {
+    const position = i + 1;
+    const at = item.indexOf('@');
+    const eq = at > 0 ? item.indexOf('=', at) : -1;
+    const label = at > 0 ? item.slice(0, at) : '';
+    const aid = eq > at ? item.slice(at + 1, eq) : '';
+    const key = eq > at ? item.slice(eq + 1).trim() : '';
+    if (!LABEL_RE.test(label) || !AID_RE.test(aid) || key.length === 0) {
+      warnings.push(
+        `ISSUER_KEYS entry ${position}: not of the form label@aid=key; skipped`,
+      );
+      return;
+    }
+    if (looksLikeSecret(label, [key, ...adminKeys])) {
+      warnings.push(
+        `ISSUER_KEYS entry ${position}: its label is part of a configured key; skipped`,
+      );
+      return;
+    }
+    if (adminKeys.includes(key)) {
+      warnings.push(
+        `ISSUER_KEYS entry ${position} (${label}): its key is also an API_KEYS key; ` +
+          'skipped (an issuer key must not be an admin key)',
+      );
+      return;
+    }
+    if (seenKeys.has(key)) {
+      warnings.push(`ISSUER_KEYS entry ${position} (${label}): duplicate key; skipped`);
+      return;
+    }
+    seenKeys.add(key);
+    entries.push({ label, aid, key });
+  });
+
+  return { entries, warnings };
+}
+
+/** Build a key -> entry lookup for issuer keys. */
+export function issuerKeyIndex(
+  entries: readonly IssuerKeyEntry[],
+): Map<string, IssuerKeyEntry> {
+  return new Map(entries.map((e) => [e.key, e]));
+}

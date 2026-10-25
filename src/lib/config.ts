@@ -1,5 +1,5 @@
 import { isProductionNodeEnv } from './node-env';
-import { parseApiKeys } from './api-keys';
+import { parseApiKeys, parseIssuerKeys } from './api-keys';
 
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
@@ -92,6 +92,11 @@ function readHeartbeatMs(): number {
 
 // Parsed once: `label:key` or bare `key` entries (see src/lib/api-keys.ts).
 const parsedApiKeys = parseApiKeys(process.env.API_KEYS);
+// `label@aid=key` entries, accepted only by the revocation relay route.
+const parsedIssuerKeys = parseIssuerKeys(
+  process.env.ISSUER_KEYS,
+  parsedApiKeys.entries.map((e) => e.key),
+);
 
 export const config = {
   isProduction: isProductionNodeEnv(),
@@ -108,6 +113,9 @@ export const config = {
   // One entry per consumer, each with a non-secret label recorded as the actor
   // on admin audit rows. Rate limits stay per KEY, not per label.
   apiKeyEntries: parsedApiKeys.entries,
+  // One key per issuing agent, bound to that agent's AID. Accepted ONLY by
+  // `GET /api/revocations`, and only for `iss=<its aid>` (src/proxy.ts).
+  issuerKeyEntries: parsedIssuerKeys.entries,
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
   maxAuditEventsInMemory: readNumber('MAX_AUDIT_EVENTS_MEMORY', 500),
   // Per-process cap on concurrent /api/events/stream connections.
@@ -126,29 +134,6 @@ export const config = {
   // configurable is the point: if an edge turns out to idle-close at 10 s that
   // becomes an env var, not a deploy. Clamped — see readHeartbeatMs above.
   sseHeartbeatMs: readHeartbeatMs(),
-  revocationListTtlSecs: readNumber('REVOCATION_LIST_TTL_SECS', 3600),
-  // What the revocation producer does when the DB read fails. A signed list
-  // asserts "these and ONLY these JTIs are revoked", so the CP never signs a
-  // fresh list from a failed read (that would assert "nothing is revoked").
-  //   fail_closed (default) -- answer 503 REVOCATION_UNAVAILABLE.
-  //   serve_stale           -- re-serve the last list that WAS backed by a
-  //                            successful read, but only while younger than
-  //                            REVOCATION_MAX_STALENESS_SECS; else 503.
-  // Anything unrecognised is fail_closed: a typo must never loosen the policy.
-  revocationFailMode: (
-    (process.env.REVOCATION_FAIL_MODE ?? '').trim().toLowerCase() ===
-    'serve_stale'
-      ? 'serve_stale'
-      : 'fail_closed'
-  ) as 'fail_closed' | 'serve_stale',
-  // Max age of a served-stale snapshot, measured from the successful read that
-  // backed it. Only meaningful in serve_stale mode. The producer additionally
-  // clamps it to REVOCATION_LIST_TTL_SECS so it never serves an envelope whose
-  // signed `expires_at` has already passed.
-  revocationMaxStalenessSecs: Math.max(
-    0,
-    readNumber('REVOCATION_MAX_STALENESS_SECS', 300),
-  ),
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
   webhookRetryAttempts: readNumber('WEBHOOK_RETRY_ATTEMPTS', 3),
   // Optional allowlist of webhook target hosts. Empty = allow any public
@@ -238,7 +223,7 @@ if (!config.isProduction && config.apiKeys.length === 0 && !process.env.JEST_WOR
 // Label problems (a duplicate, or a label refused for containing a secret).
 // The messages name entry positions and labels only, never a key.
 if (!process.env.JEST_WORKER_ID) {
-  for (const w of parsedApiKeys.warnings) {
+  for (const w of [...parsedApiKeys.warnings, ...parsedIssuerKeys.warnings]) {
     // eslint-disable-next-line no-console
     console.warn(`[aitp-cp] ${w}`);
   }

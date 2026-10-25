@@ -3,7 +3,7 @@ info:
   title: AITP Control Plane API
   version: 0.1.0
   description: |
-    Registry, audit log, revocation list, and webhook fan-out for an AITP
+    Registry, audit log, revocation relay, and webhook fan-out for an AITP
     (Agent Identity Trust Protocol) deployment. See README.md and
     docs/api.md for the prose reference.
 
@@ -33,7 +33,7 @@ servers:
 
 tags:
   - name: discovery
-    description: Public unauth endpoints (manifest, revocation list, health, metrics)
+    description: Public unauth endpoints (manifest, health, metrics)
   - name: registry
     description: Agent enrollment and discovery
   - name: events
@@ -41,7 +41,9 @@ tags:
   - name: sessions
     description: Handshake session records
   - name: revocation
-    description: TCT revocation
+    description: >-
+      TCT revocation registry and per-issuer relay. The CP signs no revocation
+      list: each issuer pulls its own entries and signs them (RFC-AITP-0008 §1.5).
   - name: webhooks
     description: Outbound delivery subscriptions
   - name: audit
@@ -68,6 +70,14 @@ components:
         does not override `security`. In non-production an empty `API_KEYS`
         disables the check; in production it makes gated routes answer `503
         SERVER_MISCONFIGURED`.
+    issuerKey:
+      type: http
+      scheme: bearer
+      description: >-
+        Per-issuer key from the `ISSUER_KEYS` env (`label@aid=key`). Accepted
+        ONLY on `GET /api/revocations`, and only for `iss` equal to the AID it
+        is bound to (else `403 ISSUER_MISMATCH`); on any other route it is an
+        unknown key (`401`). Never carries admin rights.
     enrollmentToken:
       type: http
       scheme: bearer
@@ -614,6 +624,17 @@ components:
           type: string
           format: uuid
           description: Lowercase, hyphenated RFC 4122 UUID **version 4** only; any other version, and an uppercase, braced, `urn:uuid:` or unhyphenated spelling, is `400 JTI_INVALID` (rejected, never normalized). aitp ≥ 0.14 verifiers reject a whole revocation list carrying any other form, and aitp ≥ 0.18 signers refuse to sign one.
+        iss:
+          type: string
+          maxLength: 512
+          pattern: "^aid:[A-Za-z0-9:._-]{1,500}$"
+          description: >-
+            AID of the TCT's issuer — the agent this entry is relayed to.
+            Needed only when the CP knows no issuer for this `jti` (no
+            `issued_tcts` row and no earlier entry); otherwise it may be
+            omitted, and if sent must match (`409 ISS_MISMATCH`). Not an AID →
+            `400 ISS_INVALID`. Re-posting with `iss` attributes an entry that has
+            none; an entry's `iss` is never changed.
         reason:
           type: string
           maxLength: 500
@@ -632,7 +653,7 @@ components:
             `9999-12-31T23:59:59.999Z`, or `400 BODY_INVALID`. The two ends have
             different reasons: above the upper bound the value is not a writable
             `timestamp with time zone` at all, while below the epoch it is
-            storable but cannot be republished faithfully, since the signed
+            storable but cannot be republished faithfully, since a signed
             revocation list carries `revoked_at` as seconds since that epoch. The
             bound applies to the UTC instant, not to the digits sent, so
             `1970-01-01T00:00:00+01:00` is `1969-12-31T23:00Z` and is rejected.
@@ -646,11 +667,31 @@ components:
         the stored entry keeps its original `revoked_at` and `reason`; this
         body still reports the values just sent.
       type: object
-      required: [jti, revokedAt, reason]
+      required: [jti, revokedAt, reason, iss]
       properties:
         jti: { type: string, format: uuid }
         revokedAt: { type: string, format: date-time }
         reason: { type: string, nullable: true }
+        iss: { type: string, description: "The issuer the entry is relayed to, as resolved." }
+
+    IssuerRevocations:
+      type: object
+      required: [iss, entries]
+      properties:
+        iss: { type: string }
+        entries:
+          type: array
+          description: >-
+            Every entry recorded for `iss`, oldest first — the full set, not a
+            delta. RFC-AITP-0008 entry shape, ready to pass to the issuer's
+            `signRevocationList` (Node: `revoked_at` → `revokedAt`).
+          items:
+            type: object
+            required: [jti, revoked_at]
+            properties:
+              jti: { type: string, format: uuid }
+              revoked_at: { type: integer, description: Epoch seconds. }
+              reason: { type: string, description: Present only when set. }
 
     AdminAuditEntry:
       type: object
@@ -974,42 +1015,6 @@ paths:
           headers:
             Cache-Control:
               schema: { type: string, example: max-age=3600 }
-
-  /.well-known/aitp-revocation-list:
-    get:
-      tags: [discovery]
-      summary: Signed revocation snapshot (RFC-AITP-0008)
-      security: []
-      responses:
-        "200":
-          description: >-
-            Signed RevocationListEnvelope JSON, always backed by a successful
-            database read (or, only with `REVOCATION_FAIL_MODE=serve_stale`, the
-            last such list re-served byte-for-byte while younger than
-            `REVOCATION_MAX_STALENESS_SECS`). Carries `Cache-Control:
-            max-age=60`. The list is re-read and re-signed at most every 60
-            seconds per process; `REVOCATION_LIST_TTL_SECS` sets the signed
-            list's `expires_at`, not the refresh rate.
-          headers:
-            Cache-Control:
-              schema: { type: string, example: max-age=60 }
-        "503":
-          description: >-
-            `code` is `REVOCATION_UNAVAILABLE`: the database read failed and
-            policy forbids serving anything else. The CP **never** answers a
-            failed read with a signed empty list, because that would assert
-            "nothing is revoked". A relying party must treat this as "revocation
-            status unknown", not as "not revoked". Carries `Cache-Control:
-            no-store` and `Retry-After: 30`; the body is fixed and carries no
-            database detail.
-          headers:
-            Retry-After:
-              schema: { type: integer }
-            Cache-Control:
-              schema: { type: string, example: no-store }
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
 
   /api/registry/enroll:
     post:
@@ -1563,7 +1568,7 @@ paths:
   /api/revocation/entries:
     post:
       tags: [revocation]
-      summary: Add a JTI to the revocation list
+      summary: Record a revoked JTI against its issuer
       parameters:
         - $ref: "#/components/parameters/idempotencyKey"
       requestBody:
@@ -1582,8 +1587,11 @@ paths:
               schema: { $ref: "#/components/schemas/RevocationEntryResponse" }
         "400":
           description: >-
-            `code` is one of three values. `JTI_INVALID` when `jti` is missing or
-            not a version 1–5 UUID. `IDEMPOTENCY_KEY_INVALID` when an `Idempotency-Key` header
+            `code` is one of five values. `JTI_INVALID` when `jti` is missing or
+            not a lowercase UUID v4. `ISS_INVALID` when `iss` is sent but is not
+            an AID. `ISS_REQUIRED` when the CP knows no issuer for this `jti`
+            and none was sent — an unattributed entry would be relayed to
+            nobody. `IDEMPOTENCY_KEY_INVALID` when an `Idempotency-Key` header
             is present but empty, over 255 characters, or contains control
             characters — this one comes from the idempotency layer and so is
             common to every endpoint accepting that header, not specific to this
@@ -1596,6 +1604,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            `code` is `ISS_MISMATCH`: the `iss` sent contradicts the issuer the
+            CP already holds for this `jti` (its `issued_tcts` row or existing
+            entry), or the existing entry's `iss` disagrees with the
+            `issued_tcts` row.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: >-
             An internal fault — in practice a database one. This route rethrows
@@ -1605,6 +1622,52 @@ paths:
             shape, which is why no schema is declared here.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
+
+  /api/revocations:
+    get:
+      tags: [revocation]
+      summary: One issuer's revocation entries, for it to sign (RFC-AITP-0008)
+      description: >-
+        The CP relays; it does not sign. The issuer signs these entries with its
+        own key and serves the list; verifiers pin the TCT's issuer. Read
+        straight from the database on every call (no cache, no replica lag).
+      security:
+        - apiKey: []
+        - issuerKey: []
+      parameters:
+        - name: iss
+          in: query
+          required: true
+          schema: { type: string, pattern: "^aid:[A-Za-z0-9:._-]{1,500}$" }
+      responses:
+        "200":
+          description: "OK. `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuerRevocations" }
+        "400":
+          description: "`code` is `ISS_INVALID`: `iss` missing or not an AID."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "`code` is `ISSUER_MISMATCH`: an issuer key asked for another issuer's entries."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503":
+          description: >-
+            `code` is `REVOCATION_UNAVAILABLE` (database unreadable; `Retry-After:
+            30`, `Cache-Control: no-store`) — never an empty `200`, which the
+            issuer would sign as "nothing is revoked" — or the gate's
+            `SERVER_MISCONFIGURED`.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/webhooks:
     get:

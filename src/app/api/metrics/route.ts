@@ -11,6 +11,7 @@ import { rateLimiter } from '@/lib/rate-limit';
 import { webhookBreaker } from '@/lib/webhooks/circuit-breaker';
 import { getAdminAuditInsertFailures } from '@/lib/audit-log/service';
 import { getEnrollFailureTotals } from '@/lib/registry/enroll-metrics';
+import { getIssuerLastPulls } from '@/lib/revocation/relay-metrics';
 import { eventBus } from '@/lib/audit/stream';
 import { getSseMetrics } from '@/lib/audit/sse-metrics';
 import {
@@ -201,6 +202,19 @@ export async function GET() {
     const label = code.replace(/"/g, '\\"');
     lines.push(
       `aitp_control_plane_enroll_verification_failures{code="${label}"} ${total}`,
+    );
+  }
+
+  // The CP only relays revocations; an issuer that stops pulling enforces
+  // nothing new. Labels come from ISSUER_KEYS config, so cardinality is bounded.
+  lines.push(
+    '# HELP aitp_control_plane_revocation_last_pull_timestamp_seconds Unix time of the last successful GET /api/revocations by each issuer key, by key label (absent until that issuer first pulls)',
+  );
+  lines.push('# TYPE aitp_control_plane_revocation_last_pull_timestamp_seconds gauge');
+  for (const [issuer, secs] of getIssuerLastPulls()) {
+    const label = issuer.replace(/"/g, '\\"');
+    lines.push(
+      `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="${label}"} ${secs}`,
     );
   }
 

@@ -258,6 +258,36 @@ describe('GET /api/metrics — enrollment failures with a fresh counter', () => 
   });
 });
 
+describe('GET /api/metrics — revocation relay last pull (CP1.1)', () => {
+  // The REAL relay-metrics module, driven the way the route drives it.
+  const relay = jest.requireActual<typeof import('@/lib/revocation/relay-metrics')>(
+    '@/lib/revocation/relay-metrics',
+  );
+  afterEach(() => relay.resetIssuerPulls());
+
+  it('emits HELP/TYPE and no series before any issuer has pulled', async () => {
+    const text = await (await GET()).text();
+    expect(text).toContain(
+      '# TYPE aitp_control_plane_revocation_last_pull_timestamp_seconds gauge',
+    );
+    expect(sampleNames(text)).not.toContain(
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds',
+    );
+  });
+
+  it('emits one series per issuer key label, in epoch seconds', async () => {
+    relay.recordIssuerPull('researcher', 1_792_889_239_500);
+    relay.recordIssuerPull('writer', 1_792_889_300_000);
+    const text = await (await GET()).text();
+    expect(text).toContain(
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="researcher"} 1792889239',
+    );
+    expect(text).toContain(
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="writer"} 1792889300',
+    );
+  });
+});
+
 describe('GET /api/metrics — SSE stream lifecycle', () => {
   it('emits all three series with their HELP/TYPE when nothing has ever connected', async () => {
     // Zeros must be PRESENT, not omitted. A missing series reads as "no data"

@@ -30,6 +30,11 @@ in `meta/NNNN_snapshot.json`.
   replacing the secret with `secretRotated: true`. Idempotent (a re-run
   matches nothing) and irreversible by design. Operators should still
   rotate any webhook secret that was ever set via PATCH.
+- `0009_revocation_iss.sql` — adds `revocation_entries.iss` (the
+  issuer an entry is relayed to) + `revocation_entries_iss_idx`, and
+  backfills it from `issued_tcts.issuer_aid` where a row matches.
+  Unmatched rows stay `NULL` (see `docs/operations.md` § Revocation
+  relay). Idempotent.
 
 Column-level reference: [`docs/data-model.md`](../docs/data-model.md).
 
@@ -54,6 +59,10 @@ drizzle migrator.
   built with `CREATE INDEX CONCURRENTLY`. Procedure for applying it
   while still marking 0002 as "applied" in drizzle's tracking table
   is documented at the top of that file.
+- `manual/0009_revocation_iss.down.sql` — rollback of 0009: drops the
+  index and column and removes 0009's row from drizzle's tracking
+  table, in one transaction. Loses every `iss` attribution, including
+  ones operators added by hand.
 
 The header of each manual file explains its deploy procedure. The
 files are NOT executed by `npm run db:migrate`; they're a parallel

@@ -102,10 +102,6 @@ const nextConfig: NextConfig = {
         source: '/.well-known/aitp-manifest',
         destination: '/api/well-known/aitp-manifest',
       },
-      {
-        source: '/.well-known/aitp-revocation-list',
-        destination: '/api/well-known/aitp-revocation-list',
-      },
     ];
   },
   // NOTE: CORS headers are intentionally NOT set here. Next evaluates

@@ -22,6 +22,7 @@
     "/api/registry/agents/[aid]/manifest": "public",
     "/api/registry/enroll": "public",
     "/api/revocation/entries": "gated",
+    "/api/revocations": "gated",
     "/api/sessions": "gated",
     "/api/sessions/[sessionId]": "gated",
     "/api/sessions/[sessionId]/export": "gated",
@@ -34,7 +35,6 @@
     "/api/webhooks/[id]": "gated",
     "/api/webhooks/[id]/circuit-breaker": "gated",
     "/api/webhooks/[id]/circuit-breaker/reset": "gated",
-    "/api/well-known/aitp-manifest": "public",
-    "/api/well-known/aitp-revocation-list": "public"
+    "/api/well-known/aitp-manifest": "public"
   }
 }

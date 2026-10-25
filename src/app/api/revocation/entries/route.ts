@@ -1,8 +1,9 @@
 import { NextRequest } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { db } from '@/lib/db';
-import { revocationEntries } from '@/lib/db/schema';
-import { revocationProducer } from '@/lib/revocation/producer';
+import { eq, isNull } from 'drizzle-orm';
+import { issuedTcts, revocationEntries } from '@/lib/db/schema';
+import { AID_RE } from '@/lib/api-keys';
 import { writeAdminAudit } from '@/lib/audit-log/service';
 import { auditContext } from '@/lib/audit-log/actor';
 import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
@@ -28,18 +29,11 @@ export const dynamic = 'force-dynamic';
  * own 294276 AD ceiling — the constraint is our serialization, not the column.
  *
  * The LOWER bound is what the PUBLISHED LIST can carry, which binds tighter than
- * the column does. Postgres stores year 0001 happily, but the signed list at
- * /.well-known/aitp-revocation-list publishes `revoked_at` as seconds since the
- * Unix epoch (src/lib/revocation/producer.ts), and that producer re-parses the
- * driver's TIMESTAMPTZ text with `new Date(...)`. That text is space-separated
- * (`0001-01-01 00:00:00+00`), which V8 reads with its legacy two-digit-year rule:
- * year 0001 comes back as **2001**, 0099 as 1999. A revocation accepted at year
- * 0001 would therefore be SIGNED AND SERVED with a date ~2000 years wrong. The
- * epoch floor puts us clear of that window by a wide margin rather than by the one
- * year a "reject below 0100" bound would, and it is the right domain rule
- * independently: a revocation cannot predate the epoch its own published
- * representation counts from. (The producer's parse is fragile for any low-year
- * row already stored and is tracked separately; this bound stops new ones.)
+ * the column does. Postgres stores year 0001 happily, but the relay
+ * (`GET /api/revocations`) hands each entry to its issuer with `revoked_at` as
+ * seconds since the Unix epoch, which is what the issuer then signs
+ * (RFC-AITP-0008). The epoch floor is the domain rule: a revocation cannot
+ * predate the epoch its own published representation counts from.
  *
  * `new Date(...)` accepts everything outside both bounds happily — its own range
  * runs to ±275760 — so the `Number.isNaN` check below does NOT subsume this one.
@@ -63,6 +57,7 @@ interface RequestBody {
   jti?: unknown;
   reason?: unknown;
   revokedAt?: unknown;
+  iss?: unknown;
 }
 
 export async function POST(req: NextRequest) {
@@ -120,6 +115,14 @@ export async function POST(req: NextRequest) {
         };
       }
     }
+    if (body.iss !== undefined && body.iss !== null) {
+      if (typeof body.iss !== 'string' || !AID_RE.test(body.iss)) {
+        return {
+          status: 400,
+          body: { error: 'iss must be an issuer AID (aid:...)', code: 'ISS_INVALID' },
+        };
+      }
+    }
     const reason = typeof body.reason === 'string' ? body.reason : null;
     let revokedAt: string;
     if (typeof body.revokedAt === 'string') {
@@ -153,6 +156,58 @@ export async function POST(req: NextRequest) {
       revokedAt = parsed.toISOString();
     } else {
       revokedAt = new Date().toISOString();
+    }
+
+    // Who the entry is relayed to (RFC-AITP-0008 §1.5: only the TCT's issuer
+    // can publish its revocation). Already known, in order: the CP's TCT
+    // projection, then an existing entry for this jti. An explicit `iss` is
+    // needed only when neither knows, and must agree when one does. An entry
+    // with no issuer would be stored and enforced nowhere, so it is refused.
+    // Re-posting with `iss` is also how an operator attributes a row that
+    // migration 0009 could not (the upsert below fills a NULL `iss` only).
+    const [tct] = await db
+      .select({ iss: issuedTcts.issuerAid })
+      .from(issuedTcts)
+      .where(eq(issuedTcts.jti, body.jti));
+    const [existing] = await db
+      .select({ iss: revocationEntries.iss })
+      .from(revocationEntries)
+      .where(eq(revocationEntries.jti, body.jti));
+    // A projected issuer that is not an AID (an unverified `tct.issued` report)
+    // could never be pulled, so it counts as unknown.
+    const projectedIss = tct?.iss && AID_RE.test(tct.iss) ? tct.iss : null;
+    const storedIss = existing?.iss ?? null;
+    // The stored entry is what the relay serves, and the upsert never changes
+    // it, so a projection that disagrees must surface rather than be echoed.
+    if (projectedIss !== null && storedIss !== null && projectedIss !== storedIss) {
+      return {
+        status: 409,
+        body: {
+          error: 'the stored entry names a different issuer than the TCT recorded for this jti',
+          code: 'ISS_MISMATCH',
+        },
+      };
+    }
+    const knownIss = projectedIss ?? storedIss;
+    const givenIss = typeof body.iss === 'string' ? body.iss : null;
+    if (knownIss !== null && givenIss !== null && knownIss !== givenIss) {
+      return {
+        status: 409,
+        body: {
+          error: 'iss does not match the issuer recorded for this jti',
+          code: 'ISS_MISMATCH',
+        },
+      };
+    }
+    const iss = knownIss ?? givenIss;
+    if (iss === null) {
+      return {
+        status: 400,
+        body: {
+          error: 'iss is required: the CP has no TCT recorded for this jti',
+          code: 'ISS_REQUIRED',
+        },
+      };
     }
 
     // This catch OBSERVES and re-throws; it does not answer. It used to map any
@@ -202,20 +257,23 @@ export async function POST(req: NextRequest) {
           jti: body.jti,
           revokedAt,
           reason,
+          iss,
         })
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: revocationEntries.jti,
+          set: { iss },
+          where: isNull(revocationEntries.iss),
+        });
     } catch (err) {
       logger.error({ err, jti: body.jti }, 'revocation entry insert failed');
       throw err;
     }
 
-    revocationProducer.invalidate();
-
     const event: AuditEventRecord = {
       id: randomUUID(),
       type: 'tct.revoked',
       ts: revokedAt,
-      payload: { jti: body.jti, reason },
+      payload: { jti: body.jti, reason, iss },
       source: 'cp',
     };
     await ingestOneEvent(event);
@@ -227,13 +285,13 @@ export async function POST(req: NextRequest) {
     await writeAdminAudit({
       action: 'revocation.add',
       targetId: body.jti as string,
-      details: { reason },
+      details: { reason, iss },
       ...auditContext(req),
     });
 
     return {
       status: 201,
-      body: { jti: body.jti, revokedAt, reason },
+      body: { jti: body.jti, revokedAt, reason, iss },
     };
   });
 }

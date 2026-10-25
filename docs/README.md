@@ -1,7 +1,7 @@
 # AITP Control Plane — documentation
 
 The **control plane (CP)** is an API-only backend that hosts the registry, audit
-event store, revocation list, and webhook fan-out for an
+event store, revocation relay, and webhook fan-out for an
 [AITP](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol)
 deployment. It **observes and coordinates**; it never sits in the trust path.
 
@@ -35,7 +35,7 @@ Links for each RFC below are in [Protocol context](#protocol-context-dont-duplic
 |---|---|---|
 | **Agent registry** | Agents self-enroll with a one-time token; the CP caches their signed manifest and offered capabilities so peers can discover them | Manifest (RFC-AITP-0003); discovery is operational & [non-normative][disc] |
 | **Audit event store** | Persists every handshake/TCT/delegation/revocation an agent reports; streams them live over SSE | — (CP telemetry) |
-| **Revocation list** | Operators record revoked JTIs; the CP signs and serves a refreshed snapshot at `/.well-known/aitp-revocation-list` | Revocation (RFC-AITP-0008) |
+| **Revocation relay** | Operators record revoked JTIs; each issuing agent pulls its own from `GET /api/revocations?iss=`, signs them and serves its own list (the CP signs none) | Revocation (RFC-AITP-0008) |
 | **Webhook outbox** | HMAC-signed, retried fan-out of selected event types to subscribers | — (CP feature) |
 | **Trust store** | Org-scoped OIDC trust anchors and pinned-key allowlists agents can fetch at boot | Identity binding (RFC-AITP-0002) |
 | **Observation projections** | Derives sessions, observed TCTs, and delegation chains from reported events | TCT (RFC-AITP-0005), Delegation (RFC-AITP-0006 / 0011) |
@@ -79,7 +79,7 @@ it, happen **agent-to-agent** using the protocol — see `aitp-rs` and the RFCs.
 | [`api.md`](api.md) | HTTP API reference — every route, auth, filters, request/response shapes, error codes, rate limiting, idempotency. Companion to [`../openapi.yaml`](../openapi.yaml). |
 | [`events.md`](events.md) | Event reference — the envelope, which event types are recognized vs. merely stored, what each projects, and the webhook-deliverable set. |
 | [`data-model.md`](data-model.md) | Postgres schema — every table, column, index, and the migration history. |
-| [`operations.md`](operations.md) | Runbook — identity seed, revocation list, auth/exposure (and summaries of the request-gate, shipped-image and SSE harnesses), rate limiting, SSE capacity, webhook delivery, trust-anchor JWKS refresh, observed-artifact verification, data retention, observability/OTel, health & graceful shutdown, database, multi-tenancy. The per-check index of the shipped-image harness lives in [`internal_docs/IMAGE-HARNESS.md`](https://github.com/agentidentitytrustprotocol/aitp-control-plane/blob/main/internal_docs/IMAGE-HARNESS.md). |
+| [`operations.md`](operations.md) | Runbook — identity seed, revocation relay, auth/exposure (and summaries of the request-gate, shipped-image and SSE harnesses), rate limiting, SSE capacity, webhook delivery, trust-anchor JWKS refresh, observed-artifact verification, data retention, observability/OTel, health & graceful shutdown, database, multi-tenancy. The per-check index of the shipped-image harness lives in [`internal_docs/IMAGE-HARNESS.md`](https://github.com/agentidentitytrustprotocol/aitp-control-plane/blob/main/internal_docs/IMAGE-HARNESS.md). |
 | [`integration-playground.md`](integration-playground.md) | The stable integration contract with [`aitp-playground`](https://github.com/agentidentitytrustprotocol/aitp-playground). |
 
 > **Published pages:** the docs listed above (and the top-level `README.md`) are
@@ -108,7 +108,7 @@ semantics. Canonical sources:
 | Trust Context Token — issuer/subject/audience/`cnf` ([§3](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0005-tct.md#3-confirmation-claim-cnf)) (what `issued_tcts` mirrors) | [RFC-AITP-0005 TCT][rfc5] |
 | Single-hop delegation | [RFC-AITP-0006 Delegation][rfc6] |
 | Peer-key resolution | [RFC-AITP-0007 Key Resolution][rfc7] |
-| Revocation (the signed list the CP serves; envelope signing [§1.5](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#15-signed-revocation-response)) | [RFC-AITP-0008 Revocation][rfc8] |
+| Revocation (the signed list each issuer serves from the CP's relay; envelope signing [§1.5](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#15-signed-revocation-response)) | [RFC-AITP-0008 Revocation][rfc8] |
 | Threat model & required defenses | [RFC-AITP-0009 Security][rfc9] |
 | Session Trust Bundle (Draft, opt-in — not part of v0.2 core conformance; the CP has no specific handling for it) | [RFC-AITP-0010 Session Trust Bundle][rfc10] |
 | Multi-hop delegation (Draft, opt-in — not part of v0.2 core conformance) | [RFC-AITP-0011 Multi-hop][rfc11] |

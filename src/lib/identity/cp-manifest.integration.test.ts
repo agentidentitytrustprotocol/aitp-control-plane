@@ -43,10 +43,8 @@ describe('integration: CP self-manifest conformance', () => {
   // (verifies without throwing), which is a tautology whenever the SDK is
   // self-consistent — it cannot tell "the wire shape is what we expect"
   // apart from "the wire shape is whatever the SDK happens to produce", and
-  // it cannot tell a real signature check from a no-op. The revocation path
-  // (src/e2e/revocation-flow.integration.test.ts) has both a wire-shape
-  // assertion and a negative (broken-signature) assertion; the manifest path
-  // did not, until now.
+  // it cannot tell a real signature check from a no-op. The manifest path
+  // had no wire-shape or negative (broken-signature) assertion until now.
 
   it("CP's manifest has the exact top-level member set, and omits extensions", () => {
     const parsed = JSON.parse(getCpManifestJson()) as { manifest: Record<string, unknown> };

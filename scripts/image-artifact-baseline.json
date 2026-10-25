@@ -39,6 +39,7 @@
     "/api/registry/agents/[aid]/manifest",
     "/api/registry/enroll",
     "/api/revocation/entries",
+    "/api/revocations",
     "/api/sessions",
     "/api/sessions/[sessionId]",
     "/api/sessions/[sessionId]/export",
@@ -51,8 +52,7 @@
     "/api/webhooks/[id]",
     "/api/webhooks/[id]/circuit-breaker",
     "/api/webhooks/[id]/circuit-breaker/reset",
-    "/api/well-known/aitp-manifest",
-    "/api/well-known/aitp-revocation-list"
+    "/api/well-known/aitp-manifest"
   ],
   "apiRouteCount": 31,
   "rewrites": [
@@ -61,12 +61,6 @@
       "destination": "/api/well-known/aitp-manifest",
       "regex": "^/\\.well-known/aitp-manifest(?:/)?$",
       "source": "/.well-known/aitp-manifest"
-    },
-    {
-      "phase": "afterFiles",
-      "destination": "/api/well-known/aitp-revocation-list",
-      "regex": "^/\\.well-known/aitp-revocation-list(?:/)?$",
-      "source": "/.well-known/aitp-revocation-list"
     }
   ],
   "dataRoutes": [],
@@ -258,6 +252,12 @@
       "routeKeys": {}
     },
     {
+      "namedRegex": "^/api/revocations(?:/)?$",
+      "page": "/api/revocations",
+      "regex": "^/api/revocations(?:/)?$",
+      "routeKeys": {}
+    },
+    {
       "namedRegex": "^/api/sessions(?:/)?$",
       "page": "/api/sessions",
       "regex": "^/api/sessions(?:/)?$",
@@ -285,12 +285,6 @@
       "namedRegex": "^/api/well\\-known/aitp\\-manifest(?:/)?$",
       "page": "/api/well-known/aitp-manifest",
       "regex": "^/api/well\\-known/aitp\\-manifest(?:/)?$",
-      "routeKeys": {}
-    },
-    {
-      "namedRegex": "^/api/well\\-known/aitp\\-revocation\\-list(?:/)?$",
-      "page": "/api/well-known/aitp-revocation-list",
-      "regex": "^/api/well\\-known/aitp\\-revocation\\-list(?:/)?$",
       "routeKeys": {}
     }
   ],
@@ -353,8 +347,8 @@
     },
     {
       "path": "instrumentation/chunks/_0jazx56n52r0z._.js",
-      "bytes": 101822,
-      "sha256": "143ad4636e1f8b71681d13686c9917828f22984f81614c9f236f119377716e10"
+      "bytes": 101916,
+      "sha256": "bf5402329e4a7f24bb85a5870fcc04f3d63105110ab7d0312e6f3f04d92f7fd5"
     },
     {
       "path": "instrumentation/chunks/node_modules_@opentelemetry_api_build_esm_index_0oo58a7rymoxh.js",
@@ -368,13 +362,13 @@
     },
     {
       "path": "instrumentation/chunks/src_lib_config_ts_046tg8wb6vwch._.js",
-      "bytes": 4553,
-      "sha256": "5565132278638145ee3847ed31157c86612ce2037a2e00abba2914a9cca05d68"
+      "bytes": 5174,
+      "sha256": "11c4ee035eead4d92b526539e7cf97fa5b859e2a8a171c3e099a5a78f044dcdf"
     },
     {
       "path": "instrumentation/chunks/src_lib_identity_cp-seed-config_ts_1bksh9jjuo_hy._.js",
-      "bytes": 2738,
-      "sha256": "7fbfdf59e459bd56aacb9ee30eb2c74a4ff923090098b0b5fa96d2405cd93939"
+      "bytes": 2716,
+      "sha256": "aed37d62c581390b866995e641f9f1608c33d6f01751363c2df7852a56b24f98"
     },
     {
       "path": "instrumentation/chunks/src_lib_node-env_ts_0e6mdivqfy3he._.js",
@@ -403,8 +397,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__1rljp6ibfciql._.js",
-      "bytes": 218801,
-      "sha256": "468fa34aebe97a83a024ce7865c9240471b939468ee68fae00a4631bb011bc19"
+      "bytes": 219584,
+      "sha256": "75fcef6109b63f9b53bdb39cdc66ee4a24faac09b4dd0c7ba4c69d7f9621c210"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -418,8 +412,8 @@
     },
     {
       "path": "server.js",
-      "bytes": 8288,
-      "sha256": "d4398f6511a64086dfaf03ce5b21861c27cc42e34a2010b964c9a8d8cb824f81"
+      "bytes": 8188,
+      "sha256": "6ced003c711d599b87f9a0996c419c72242ae54bef0eab57c0137e9c33312946"
     }
   ],
   "nextTreeSha": "c9a882c56db51eea0cc7d8e502921f09cff91b07337956e57876618d686c7aba",
@@ -443,7 +437,7 @@
   },
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
-    "bytes": 2966,
-    "sha256": "344ea7ee3c138392b626ef643204855c2fe4f601eb736350c9d9354c712f0d45"
+    "bytes": 3047,
+    "sha256": "8c6b598053f0480e4eee7be0c262e1dfee6886acf51ddfb3cc0667b21fb6d67b"
   }
 }

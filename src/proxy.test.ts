@@ -16,7 +16,6 @@ describe('isPublicRequest', () => {
       ['/api/health', 'GET'],
       ['/api/readyz', 'GET'],
       ['/api/well-known/aitp-manifest', 'GET'],
-      ['/api/well-known/aitp-revocation-list', 'GET'],
       ['/api/registry/enroll', 'POST'],
       ['/api/registry/agents', 'GET'],
       ['/api/registry/agents', 'POST'], // enrollment-token gated inside handler
@@ -60,6 +59,11 @@ describe('isPublicRequest', () => {
     test.each(cases)('%s %s is gated', (path, method) => {
       expect(isPublicRequest(path, method)).toBe(false);
     });
+  });
+
+  it('the removed CP-signed revocation list is NOT public (CP1.1)', () => {
+    expect(isPublicRequest('/api/well-known/aitp-revocation-list', 'GET')).toBe(false);
+    expect(isPublicRequest('/api/revocations', 'GET')).toBe(false);
   });
 
   describe('admin collections are NOT public', () => {

@@ -13,8 +13,8 @@
  * What a pass means: the token's signature, expiry, and (for a TCT) its
  * grant/audience check out -- a TCT under the key encoded in the issuer AID, a
  * delegation under the key from the delegator's verified Manifest (taken from
- * the registry; see {@link verifyObservedDelegation}). It does NOT consult the
- * revocation list, and an expired token fails -- so a late report
+ * the registry; see {@link verifyObservedDelegation}). It does NOT consult
+ * revocation entries, and an expired token fails -- so a late report
  * of a TCT that has since expired is dropped in strict mode.
  */
 

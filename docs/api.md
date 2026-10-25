@@ -16,7 +16,7 @@ spec rather than restate it.
 ## Conventions
 
 - **Content type:** `application/json` on POST/PATCH.
-- **Request gate scope:** request IDs, CORS, authentication and rate limiting are applied by the request gate (`src/proxy.ts`), which runs on `/api/*` paths only. The public `/.well-known/aitp-manifest` and `/.well-known/aitp-revocation-list` URLs are rewrites that reach their handlers **without** passing the gate, so responses on those two paths carry no `x-request-id` or CORS headers and are never rate-limited. Request the `/api/well-known/*` path directly if you need those headers.
+- **Request gate scope:** request IDs, CORS, authentication and rate limiting are applied by the request gate (`src/proxy.ts`), which runs on `/api/*` paths only. The public `/.well-known/aitp-manifest` URL is a rewrite that reaches its handler **without** passing the gate, so responses on that path carry no `x-request-id` or CORS headers and are never rate-limited. Request the `/api/well-known/*` path directly if you need those headers.
 - **Request ID:** Every `/api/*` response carries `x-request-id`. Clients may pre-set the header; the CP echoes it.
 - **CORS:** On `/api/*`, `Access-Control-Allow-Origin` is set to `CORS_ORIGIN` (defaults to `http://localhost:3000`). Applied per-request by the proxy, so it reads from the runtime environment. A single origin is supported. Only a browser app that calls the CP **directly** needs it: the UI console does not, because its BFF proxy calls the CP server-to-server (where CORS does not apply), so leave it unset or set it to whichever browser origin calls `/api/*` itself. `OPTIONS` preflights are answered `204` by the proxy.
 - **Filter key casing:** List filters are accepted in **both** camelCase and snake_case where noted (e.g. `runId` or `run_id`). The playground emits snake_case; UI clients tend to use camelCase. Both resolve to the same column.
@@ -119,7 +119,6 @@ Stored responses are retained for `IDEMPOTENCY_KEY_TTL_DAYS` (default 7).
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/.well-known/aitp-manifest` | public | CP's own AITP manifest. Rewritten to `/api/well-known/aitp-manifest`. `Cache-Control: max-age=3600`. Its `handshake_endpoint` is `<CP_BASE_URL>/api/aitp/handshake/hello` — required by the manifest schema, but the CP is not a handshake peer and that URL answers `404` (see [`operations.md` § Identity](operations.md#identity)). |
-| GET | `/.well-known/aitp-revocation-list` | public | Signed revocation snapshot ([RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation)). Rewritten to `/api/well-known/aitp-revocation-list`. `Cache-Control: max-age=60`. `503 REVOCATION_UNAVAILABLE` when the database cannot be read — see [Revocation](#revocation). |
 
 The CP's own manifest has an 86400s TTL and is kept fresh automatically — it rebuilds itself once it nears expiry, no restart required.
 
@@ -335,29 +334,66 @@ This is the **admin action** log (registrations, revocations, webhook changes), 
 
 ### Revocation
 
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| POST | `/api/revocation/entries` | API key | Add a JTI to the revocation list |
+The CP is a revocation **registry and relay**, not a revocation authority. Under [RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation) §1.5 a revocation list is valid only when it is signed by the issuer of the tokens it names, and a verifier discards a list signed by anyone else (spec fixture `rev-011`). So operators record entries here, each **issuing agent** pulls its own, signs them with its own key and serves the list at its Manifest's revocation endpoint. The CP signs nothing. (Until CP1.1 it served a CP-signed aggregate at `/.well-known/aitp-revocation-list`; that path now answers `404`.)
 
-```json
-{ "jti": "uuid", "reason": "operator action", "revokedAt": "2026-06-01T00:00:00Z" }
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CP as Control plane
+    participant B as Issuing agent B
+    participant V as Verifier
+    Op->>CP: POST /api/revocation/entries {jti}
+    Note over CP: iss resolved from the TCT projection
+    B->>CP: GET /api/revocations?iss=B (B's issuer key)
+    CP-->>B: {iss, entries}
+    Note over B: signRevocationList(entries) with B's own key
+    V->>B: fetch B's revocation list
+    Note over V: verifyRevocationList(list, B) then verifyTct(..., revokedJtis)
 ```
 
-`jti` must be a lowercase hyphenated UUID **v4** or `400 JTI_INVALID` (`"jti must be a lowercase UUID v4"`); see [the UUID rule](#conventions). A delegation's synthetic id from `/api/delegations` is a v5 UUID and cannot be revoked this way. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input — including a body that is not JSON or is JSON but not an object (`null`, an array, a string, a number) — → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason }`.
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/revocation/entries` | API key | Record a revoked JTI against its issuer |
+| GET | `/api/revocations?iss=<aid>` | API key, or that issuer's [issuer key](#issuer-keys) | That issuer's entries, ready for it to sign |
 
-Recording a revocation also flips the matching `issued_tcts.revoked` flag, cascades to descendant delegations, and emits a `tct.revoked` event (and webhook).
+#### `POST /api/revocation/entries`
 
-**Re-revoking a `jti` that is already on the list** is not an error: the stored entry keeps its original `revoked_at` and `reason`, but the route still answers `201` echoing the values from *this* request, and emits another `tct.revoked` event and webhook delivery.
+```json
+{ "jti": "uuid", "reason": "operator action", "revokedAt": "2026-06-01T00:00:00Z", "iss": "aid:pubkey:..." }
+```
 
-Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits: **`revokedAt` must fall inside a bounded date range** (as a UTC instant — the epoch is the lower bound, because the signed list carries `revoked_at` as seconds since it), and **`reason` must not contain a NUL (U+0000)** (other control characters are fine). The exact bounds and their reasons are in [`openapi.yaml`](../openapi.yaml), `RevocationEntryRequest`.
+`jti` must be a lowercase hyphenated UUID **v4** or `400 JTI_INVALID` (`"jti must be a lowercase UUID v4"`); see [the UUID rule](#conventions). A delegation's synthetic id from `/api/delegations` is a v5 UUID and cannot be revoked this way. `reason` is optional, a string of ≤ 500 characters. `revokedAt` is an optional date string (ISO-8601 recommended) defaulting to now; a non-string `revokedAt` is ignored and treated as absent. Other invalid input — including a body that is not JSON or is JSON but not an object (`null`, an array, a string, a number) — → `400 BODY_INVALID`. Response `201 { jti, revokedAt, reason, iss }`.
+
+**`iss` — who the entry is relayed to.** The CP takes it from what it already knows, in order: the `issued_tcts` row for this `jti` (from the agents' `tct.issued` reports), then an existing entry for this `jti`. An explicit `iss` is needed only when neither knows the token, and must be an AID (`aid:...`) or `400 ISS_INVALID`. An explicit `iss` that contradicts what the CP knows is `409 ISS_MISMATCH`, as is a stored entry whose `iss` disagrees with the TCT record (the stored value is what is relayed, and is never overwritten). A recorded issuer that is not an AID counts as unknown. No `iss` known and none given is `400 ISS_REQUIRED`: an entry with no issuer would be stored and enforced nowhere, so it is refused.
+
+Recording a revocation also flips the matching `issued_tcts.revoked` flag, cascades to descendant delegations, and emits a `tct.revoked` event (and webhook) whose payload carries `iss`.
+
+**Re-revoking a `jti` that already has an entry** is not an error: the stored entry keeps its original `revoked_at` and `reason`, but the route still answers `201` echoing the values from *this* request, and emits another `tct.revoked` event and webhook delivery. Re-posting with `iss` is also how an operator attributes an entry that migration `0009` could not (see [`operations.md`](operations.md#revocation-relay)): an entry's `iss` is filled when it is empty, never changed.
+
+Two further `400 BODY_INVALID` rules exist because the values are storable by neither the revocation table nor the audit event the route emits: **`revokedAt` must fall inside a bounded date range** (as a UTC instant — the epoch is the lower bound, because a signed list carries `revoked_at` as seconds since it), and **`reason` must not contain a NUL (U+0000)** (other control characters are fine). The exact bounds and their reasons are in [`openapi.yaml`](../openapi.yaml), `RevocationEntryRequest`.
 
 A genuine database fault is a framework `500` with no `{error, code}` body, per [Conventions](#conventions). If you use `Idempotency-Key` here, note that the `BODY_INVALID` for a non-JSON or non-object body is never stored, while the field-level `400`s are.
 
-**List freshness.** `GET /.well-known/aitp-revocation-list` is served from a per-process cache that re-reads the database and re-signs at most every **60 seconds**. A `POST` here invalidates that cache only on the replica that handled it, so other replicas can serve a list without the new entry for up to 60 seconds. `REVOCATION_LIST_TTL_SECS` is something else: the validity window of each signed list (its `expires_at`). The HTTP response carries `Cache-Control: max-age=60`.
+#### `GET /api/revocations?iss=<aid>`
 
-**The list fails closed.** If the CP cannot read `revocation_entries`, `GET /.well-known/aitp-revocation-list` answers `503` with `{ "error": "revocation list temporarily unavailable", "code": "REVOCATION_UNAVAILABLE" }`, `Cache-Control: no-store` and `Retry-After: 30`. It never signs an empty list in that case: a signed empty list asserts that nothing is revoked, which the CP cannot honestly say while its store is unreachable. Operators who prefer availability can set `REVOCATION_FAIL_MODE=serve_stale`: the CP then re-serves the last list that was backed by a successful read, unchanged and still validly signed, for at most `REVOCATION_MAX_STALENESS_SECS` (default 300, clamped to `REVOCATION_LIST_TTL_SECS`), then `503`s. Recording a revocation discards that fallback, so a list known to omit an entry is never re-served.
+```json
+{
+  "iss": "aid:pubkey:...",
+  "entries": [{ "jti": "uuid", "revoked_at": 1782907200, "reason": "operator action" }]
+}
+```
 
-**Relying parties:** treat a `503` as "revocation status unknown", not as an empty list. How long to keep using a previously verified list and what to do when it goes stale is the consumer's revocation policy — see [RFC-AITP-0008 §3.1 (Modes)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#31-modes) and [§3.2 (Staleness)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#32-staleness). Verify the signed list with the `aitp` SDK's `verifyRevocationList`, pinning the CP's AID as the expected issuer, and branch on the thrown error's `.code`, never its message — see [aitp-rs Node SDK: Revocation lists](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008) for the code set.
+Every entry recorded for `iss`, oldest `revoked_at` first. This is the full set, not a delta, so each pull replaces the last. Entries are in the [RFC-AITP-0008](https://agentidentitytrustprotocol.io/spec/revocation) shape: `revoked_at` in epoch seconds, `reason` only when set. The issuer passes them to its SDK's `signRevocationList` / `sign_revocation_list` (`revoked_at` maps to the Node binding's `revokedAt`). Always `Cache-Control: no-store`, and nothing is cached server-side, so a new entry is visible on the next pull from any replica.
+
+- `400 ISS_INVALID` — `iss` missing or not an AID.
+- `403 ISSUER_MISMATCH` — an issuer key asked for an `iss` other than its own.
+- `503 REVOCATION_UNAVAILABLE` (`Cache-Control: no-store`, `Retry-After: 30`) — the database cannot be read. It never answers an empty `200` in that case: that would tell the issuer nothing is revoked, and it would sign and publish that. On a `503` the issuer should keep serving its last list.
+
+**Verifiers** never talk to the CP for revocation. They fetch the issuer's list, verify it with `verifyRevocationList` pinning **the TCT's issuer** as the expected issuer, and branch on the thrown error's `.code` — see [aitp-rs Node SDK: Revocation lists](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008). Freshness and what to do when a list goes stale are the verifier's policy: [RFC-AITP-0008 §3.1 (Modes)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#31-modes) and [§3.2 (Staleness)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#32-staleness).
+
+#### Issuer keys
+
+An issuing agent pulls with its own key from `ISSUER_KEYS` (`label@aid=key`, comma-separated), not an admin key. An issuer key opens **only** `GET /api/revocations`, and only for `iss` equal to the AID it is bound to. Anywhere else it is an unknown key (`401 INVALID_API_KEY`). A key listed in both `ISSUER_KEYS` and `API_KEYS` is refused at boot with a warning, so an issuer key never carries admin rights. Its label names the agent's series in `aitp_control_plane_revocation_last_pull_timestamp_seconds` ([`operations.md`](operations.md#revocation-relay)). A bearer key rather than a signed request because the aitp SDK has no request-signing primitive yet; that is the trigger to replace it.
 
 ### Webhooks
 

@@ -137,18 +137,30 @@ export const auditEvents = pgTable(
   }),
 );
 
-// ── Revocation (CP's own issued TCTs) ──────────────────────────────────────
+// ── Revocation registry (relayed to each issuer; the CP never signs it) ────
+//
+// RFC-AITP-0008 §1.5: a revocation list is valid only for tokens its own
+// signer issued. The CP records revocations and relays them to the issuing
+// agent (`GET /api/revocations?iss=`), which signs and serves its own list.
 
-export const revocationEntries = pgTable('revocation_entries', {
-  jti: uuid('jti').primaryKey(),
-  revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' })
-    .notNull()
-    .defaultNow(),
-  reason: text('reason'),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
-    .notNull()
-    .defaultNow(),
-});
+export const revocationEntries = pgTable(
+  'revocation_entries',
+  {
+    jti: uuid('jti').primaryKey(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    reason: text('reason'),
+    // The AID of the TCT's issuer: who the entry is relayed to. NULL only for
+    // rows written before migration 0009 that no `issued_tcts` row could
+    // attribute; those are never relayed (see docs/operations.md).
+    iss: varchar('iss', { length: 512 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({ issIdx: index('revocation_entries_iss_idx').on(t.iss) }),
+);
 
 // ── Webhooks (HMAC-SHA256, outbox pattern) ─────────────────────────────────
 

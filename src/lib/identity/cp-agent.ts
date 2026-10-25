@@ -27,8 +27,9 @@ function buildManifestJson(agent: AitpAgent): string {
     // REQUIRED by RFC-AITP-0003 §3.1 and aitp-manifest.schema.json (pattern
     // ^https://), and the aitp builder refuses a manifest without it — so it
     // cannot be dropped, even though this service serves no such route: the CP
-    // is not a handshake peer (its manifest exists to identify the key that
-    // signs the revocation list). A peer that POSTs here gets 404. Pointing it
+    // is not a handshake peer (its manifest exists to identify the CP's own
+    // key; since CP1.1 that key signs no revocation list, RFC-AITP-0008 §1.5).
+    // A peer that POSTs here gets 404. Pointing it
     // at some other route would be worse (a wrong contract rather than an
     // absent one). It is built from CP_BASE_URL, which the boot check in
     // cp-seed-config.ts warns about in production when it is not a public
@@ -57,7 +58,7 @@ export function initCpIdentity(): void {
     const seed = randomBytes(32);
     agent = AitpAgent.fromSeed(seed);
     // NEVER log the seed: it is the CP's Ed25519 private key material and
-    // reconstructs the key that signs the revocation list and manifest.
+    // reconstructs the key that signs the CP's manifest.
     // Log only the public AID so the ephemeral identity is still traceable.
     logger.warn(
       { aid: agent.aid },
