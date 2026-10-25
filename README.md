@@ -112,7 +112,7 @@ rate-limit, retention, and telemetry subsystems behave.
 |---|---|---|---|
 | `OBSERVED_ARTIFACT_VERIFICATION` | no | `off` | `off` \| `warn` \| `strict`. Verify the signed token in reported TCT/delegation telemetry before projecting it. `warn` logs failures; `strict` drops anything unverified (including claims-only reports). Unknown values fall back to `off`. See [operations.md](docs/operations.md#observed-artifact-verification). |
 
-**Data retention** (periodic sweep, multi-instance safe — set any TTL to `0` to keep that table forever). The retention sweep, the agent-expiry job and the webhook retry reaper start **lazily on the first `POST /api/events`** a process receives, not at boot; a process that never ingests never runs them. (The JWKS refresher above is the exception: it starts at boot.)
+**Data retention** (periodic sweep, multi-instance safe — set any TTL to `0` to keep that table forever). The retention sweep, the agent-expiry job and the webhook retry reaper start **at boot**, alongside the JWKS refresher above, so retries queued before a deploy resume within a minute with no ingest needed.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|

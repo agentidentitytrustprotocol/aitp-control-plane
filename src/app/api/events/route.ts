@@ -208,7 +208,9 @@ const MAX_BATCH_EVENTS = 500;
 const WEBHOOK_DISPATCH_CONCURRENCY = 8;
 
 export async function POST(req: NextRequest) {
-  // Lazy startup hooks — idempotent, .unref()'d intervals. Run BEFORE
+  // Re-arm calls: instrumentation.ts already starts these at boot (#171);
+  // they are idempotent, .unref()'d intervals, so these are no-ops on a
+  // booted server. Run BEFORE
   // the idempotency wrapper so they fire even on replayed requests
   // (the periodic jobs are also re-arm-on-call). Suppressed under Jest:
   // every worker's first ingest would fire a boot sweep / retry flush

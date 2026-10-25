@@ -106,11 +106,26 @@ export async function register(): Promise<void> {
   // loaded earlier is never patched, so with OTEL_ENABLED=true every database
   // query would silently lose its span. The shipped-image harness pins exactly
   // this (check 21), and `src/instrumentation.test.ts` pins the order.
+  //
+  // The webhook retry reaper, the agent-expiry job and the retention sweep
+  // start here too, for the same reason and in the same place. They used to
+  // start only on the first POST /api/events after a boot, so after every
+  // deploy a quiet CP left due retries (revocation webhooks included)
+  // stalled until something ingested (issue #171). Each starter is idempotent
+  // through a globalThis handle, so the re-arm calls that POST /api/events
+  // still makes, and a dev hot reload re-running this hook, start nothing
+  // twice.
   const startBackgroundJobs = async () => {
     const { startJwksRefresher } = await import(
       './lib/trust-anchors/jwks-refresher'
     );
     startJwksRefresher();
+    const { startWebhookReaper } = await import('./lib/webhooks/service');
+    startWebhookReaper();
+    const { startExpiryJob } = await import('./lib/registry/expiry-job');
+    startExpiryJob();
+    const { startRetentionJob } = await import('./lib/retention');
+    startRetentionJob();
   };
 
   if (process.env.OTEL_ENABLED !== 'true') {

@@ -626,13 +626,17 @@ only gates projection and is logged.
 A periodic sweep keeps storage bounded. It is multi-instance safe via a Postgres
 advisory lock (`pg_try_advisory_xact_lock`), so replicas don't duplicate work.
 
-**It starts lazily, not at boot.** The retention sweep, the agent-expiry job
-(every 5 min) and the webhook retry reaper (every 60 s) are all started by the
-first `POST /api/events` a process receives; the retention sweep then runs once
-immediately and every `RETENTION_INTERVAL_MS` after. A replica that never
-receives an ingest never sweeps, never marks agents `expired` and never picks
-up webhook retries left `pending` by an earlier process. The trust-anchor JWKS refresher is the exception: it starts at
-boot. (Under Jest none of the lazy jobs start.)
+**It starts at boot.** The retention sweep, the agent-expiry job (every 5 min),
+the webhook retry reaper (every 60 s) and the trust-anchor JWKS refresher are
+all started by `register()` in `src/instrumentation.ts` when the process boots,
+after the OpenTelemetry SDK so their `pg` queries are traced. The retention sweep
+and the reaper each run one pass immediately, so webhook retries left `pending`
+by an earlier process are picked up within one reaper interval of a deploy, with
+no ingest needed. Before issue #171 these three started only on the first
+`POST /api/events`. That route still calls the starters, but each is idempotent
+(a `globalThis` handle), so nothing starts twice, including on a dev hot reload.
+(Under Jest none of them start: Jest never runs `register()`, and the route
+skips the calls.)
 
 - **`RETENTION_ENABLED`** (default true) — master switch.
 - **`RETENTION_INTERVAL_MS`** (default 1800000 / 30 min) — sweep cadence.

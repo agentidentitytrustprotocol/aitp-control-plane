@@ -1,9 +1,11 @@
 /**
  * Process-local counters for `POST /api/events`, surfaced at `GET /api/metrics`.
  *
- * Same pattern as `getAdminAuditInsertFailures()` and `enroll-metrics.ts`: a
- * module-level number, no DB write, no metrics library. Per replica, reset on
- * restart (docs/operations.md#metrics).
+ * Same pattern as `enroll-metrics.ts`: a module-level number, no DB write, no
+ * metrics library. Per replica, reset on restart (docs/operations.md#metrics).
+ * Module scope is enough because only the events route increments these;
+ * `getAdminAuditInsertFailures()` is on `globalThis` because boot-started jobs
+ * write audit rows from instrumentation's separate module instance.
  */
 
 let eventsDroppedTotal = 0;
