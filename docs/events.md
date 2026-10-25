@@ -256,6 +256,17 @@ Receivers bound replay with the timestamped pair, not `enqueuedAt` (see
 The body bytes and signature are fixed at enqueue time, so every retry of a
 delivery is byte-identical. See [`api.md`](api.md#webhooks).
 
+**Responses.** A `2xx` marks the delivery delivered. **`410 Gone` unsubscribes:**
+the CP fails that delivery, sets the webhook `active: false`, fails the webhook's
+other pending deliveries without POSTing them, records one `webhook.unsubscribed`
+admin-audit entry (actor `system:webhook-delivery`, `details: { url, deliveryId,
+statusCode }`), and makes no further attempts. A `410` does not count against the
+circuit breaker; it resets that webhook's breaker instead. The subscription is kept, so `PATCH /api/webhooks/:id` with
+`{"active": true}` re-enables it (earlier deliveries stay failed). Every other
+response, `404` and other `4xx` included, plus `5xx` and network errors, is a
+failure: retried with backoff up to `WEBHOOK_RETRY_ATTEMPTS` and counted by the
+breaker. A receiver that wants the CP to stop must answer `410`, not `404`.
+
 ## Notes for event producers
 
 - **Fire-and-forget is fine.** Unknown types are tolerated and never rejected.

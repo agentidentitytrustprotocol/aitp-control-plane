@@ -100,7 +100,8 @@ export const REVIEW_TABLES = [
   'pinned_keys',
 ] as const;
 
-/** admin_audit_log.action -> the route that writes it. Every action is a mutation. */
+/** admin_audit_log.action -> the route that writes it (or, for a system
+ * action, what does). Every action is a mutation. */
 export const ACTION_ROUTES: Record<string, string> = {
   'agent.register': 'POST /api/registry/agents',
   'agent.deregister': 'DELETE /api/registry/agents/:aid',
@@ -109,6 +110,8 @@ export const ACTION_ROUTES: Record<string, string> = {
   'webhook.update': 'PATCH /api/webhooks/:id',
   'webhook.delete': 'DELETE /api/webhooks/:id',
   'webhook.circuit-breaker.reset': 'POST /api/webhooks/:id/circuit-breaker/reset',
+  // Not a route: written by webhook delivery when a receiver answers 410 Gone.
+  'webhook.unsubscribed': '(system: webhook delivery got 410 Gone)',
   'trust-anchor.create': 'POST /api/trust-anchors',
   'trust-anchor.update': 'PATCH /api/trust-anchors/:id',
   'trust-anchor.delete': 'DELETE /api/trust-anchors/:id',

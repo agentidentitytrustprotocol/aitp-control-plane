@@ -19,6 +19,9 @@ const insertValuesCalls: Record<string, unknown>[] = [];
 // Feeds .returning() on UPDATE (optimistic claim / updateWebhook) and DELETE.
 let claimResult: { id: string }[] = [];
 let deleteReturning: { id: string }[] = [];
+// Per-call overrides for UPDATE .returning(), consumed in order before
+// falling back to claimResult.
+let returningQueue: { id: string }[][] = [];
 
 jest.mock('../db', () => ({
   db: {
@@ -50,7 +53,7 @@ jest.mock('../db', () => ({
             const p = Promise.resolve(undefined) as Promise<undefined> & {
               returning: () => Promise<{ id: string }[]>;
             };
-            p.returning = () => Promise.resolve(claimResult);
+            p.returning = () => Promise.resolve(returningQueue.shift() ?? claimResult);
             return p;
           },
         };
@@ -77,6 +80,7 @@ jest.mock('./circuit-breaker', () => ({
     getSnapshot: () => breakerSnapshot,
     recordSuccess: () => breakerCalls.push('success'),
     recordFailure: () => breakerCalls.push('failure'),
+    reset: () => breakerCalls.push('reset'),
   },
 }));
 
@@ -161,6 +165,7 @@ beforeEach(() => {
   insertValuesCalls.length = 0;
   claimResult = [{ id: 'd1' }];
   deleteReturning = [];
+  returningQueue = [];
   breakerAllows = true;
   breakerCalls.length = 0;
   urlGuardError = null;
@@ -420,6 +425,62 @@ describe('attemptDelivery — failure, backoff, exhaustion', () => {
       error: 'non-2xx (500): still down',
       nextRetryAt: null,
     });
+  });
+});
+
+describe('attemptDelivery — 410 Gone unsubscribes', () => {
+  it('fails the delivery, disables the webhook, fails its queue and audits once', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(new Response('no such run', { status: 410 }));
+      selectQueue = [[makeDelivery()], [makeWebhook()]];
+
+      await attemptDelivery('d1');
+
+      // claim, this delivery, the webhook, its other pending deliveries.
+      expect(updateSets.slice(1)).toEqual([
+        { status: 'failed', statusCode: 410, error: 'non-2xx (410): no such run', nextRetryAt: null },
+        { active: false, updatedAt: expect.any(String) },
+        { status: 'failed', error: 'webhook unsubscribed (410 Gone)', nextRetryAt: null },
+      ]);
+      // Reset, not a failure: releases a half-open probe if this was one.
+      expect(breakerCalls).toEqual(['reset']);
+      expect(insertValuesCalls).toEqual([
+        expect.objectContaining({
+          action: 'webhook.unsubscribed',
+          actorId: 'system:webhook-delivery',
+          targetId: 'wh1',
+          details: { url: 'https://receiver.example.com/hook', deliveryId: 'd1', statusCode: 410 },
+        }),
+      ]);
+      // No retry scheduled.
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not audit again when another attempt already disabled the webhook', async () => {
+    fetchMock.mockResolvedValue(new Response('', { status: 410 }));
+    selectQueue = [[makeDelivery()], [makeWebhook()]];
+    returningQueue = [[{ id: 'd1' }], []]; // claim wins; disable finds it already inactive
+
+    await attemptDelivery('d1');
+
+    expect(updateSets[1]).toMatchObject({ status: 'failed', statusCode: 410 });
+    expect(insertValuesCalls).toEqual([]);
+  });
+
+  it('keeps 404 on the retry and breaker path', async () => {
+    fetchMock.mockResolvedValue(new Response('not found', { status: 404 }));
+    selectQueue = [[makeDelivery()], [makeWebhook()]];
+
+    await attemptDelivery('d1');
+
+    expect(breakerCalls).toEqual(['failure']);
+    expect(updateSets).toHaveLength(2);
+    expect(updateSets[1]).toMatchObject({ status: 'pending', statusCode: 404 });
+    expect(insertValuesCalls).toEqual([]);
   });
 });
 

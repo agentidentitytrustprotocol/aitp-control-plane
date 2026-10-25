@@ -142,7 +142,7 @@ Distinct from `audit_events`; records who hit the admin mutating endpoints.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `action` | varchar(128) | One of `agent.register`, `agent.deregister`, `revocation.add`, `webhook.create`, `webhook.update`, `webhook.delete`, `webhook.circuit-breaker.reset`, `trust-anchor.create`, `trust-anchor.update`, `trust-anchor.delete`, `pinned-key.upsert`, `pinned-key.delete` |
+| `action` | varchar(128) | One of `agent.register`, `agent.deregister`, `revocation.add`, `webhook.create`, `webhook.update`, `webhook.delete`, `webhook.unsubscribed` (system: a receiver answered `410 Gone`), `webhook.circuit-breaker.reset`, `trust-anchor.create`, `trust-anchor.update`, `trust-anchor.delete`, `pinned-key.upsert`, `pinned-key.delete` |
 | `actor_id` | varchar(255) | Indexed |
 | `target_id` | varchar(512) | Affected AID/JTI |
 | `details` | jsonb | Action-specific context. Never contains a webhook secret: `webhook.update` records `secretRotated: true` instead (migration `0008` scrubbed rows written before that) |
