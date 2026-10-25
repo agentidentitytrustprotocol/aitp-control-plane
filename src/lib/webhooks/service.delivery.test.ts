@@ -110,6 +110,7 @@ import {
   dispatchWebhooks,
   flushDueRetries,
   signPayload,
+  signTimestampedPayload,
   startWebhookReaper,
   updateWebhook,
 } from './service';
@@ -242,11 +243,17 @@ describe('attemptDelivery — successful POST', () => {
     expect(url).toBe('https://receiver.example.com/hook');
     expect(init.method).toBe('POST');
     expect(init.body).toBe(delivery.body);
-    expect(init.headers).toEqual({
+    const headers = init.headers as Record<string, string>;
+    const timestamp = headers['X-Aitp-Timestamp'];
+    expect(headers).toEqual({
       'Content-Type': 'application/json',
       'X-Aitp-Event': 'handshake.complete',
       'X-Aitp-Delivery': 'd1',
       'X-Aitp-Signature': 'sha256=stored-signature',
+      'X-Aitp-Timestamp': timestamp,
+      'X-Aitp-Timestamp-Signature': `sha256=${createHmac('sha256', 'topsecret')
+        .update(`${timestamp}.${delivery.body}`)
+        .digest('hex')}`,
     });
 
     expect(breakerCalls).toEqual(['success']);
@@ -275,9 +282,58 @@ describe('attemptDelivery — successful POST', () => {
     const expectedSig = createHmac('sha256', 'topsecret')
       .update(expectedBody)
       .digest('hex');
-    expect(
-      (init.headers as Record<string, string>)['X-Aitp-Signature'],
-    ).toBe(`sha256=${expectedSig}`);
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Aitp-Signature']).toBe(`sha256=${expectedSig}`);
+    // Legacy rows get the per-attempt timestamp pair too.
+    expect(headers['X-Aitp-Timestamp']).toMatch(/^[0-9]+$/);
+    expect(headers['X-Aitp-Timestamp-Signature']).toBe(
+      `sha256=${createHmac('sha256', 'topsecret')
+        .update(`${headers['X-Aitp-Timestamp']}.${expectedBody}`)
+        .digest('hex')}`,
+    );
+  });
+});
+
+describe('signTimestampedPayload', () => {
+  it('is HMAC-SHA256 over "<timestamp>.<body>" (fixed vector, cross-checked with Python hmac)', () => {
+    expect(signTimestampedPayload('topsecret', '1700000000', '{"a":1}')).toBe(
+      '6a939b0c71853d606167625a15168ee9188c6a511c773ef4f42d307f3849e50f',
+    );
+  });
+});
+
+describe('attemptDelivery — signed per-attempt timestamp (#158)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('stamps each attempt with the send time, not enqueuedAt, under the HMAC', async () => {
+    jest.useFakeTimers({ now: Date.parse('2026-10-25T04:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate'] });
+    const delivery = makeDelivery();
+    selectQueue = [[delivery], [makeWebhook()]];
+    await attemptDelivery('d1');
+
+    jest.setSystemTime(Date.parse('2026-10-25T04:10:30.000Z'));
+    selectQueue = [[delivery], [makeWebhook()]];
+    await attemptDelivery('d1');
+
+    const sent = fetchMock.mock.calls.map(
+      ([, init]) => (init as RequestInit).headers as Record<string, string>,
+    );
+    expect(sent.map((h) => h['X-Aitp-Timestamp'])).toEqual([
+      String(Date.parse('2026-10-25T04:00:00.000Z') / 1000),
+      String(Date.parse('2026-10-25T04:10:30.000Z') / 1000),
+    ]);
+    for (const h of sent) {
+      // The body signature is unchanged across retries; only the timestamped one moves.
+      expect(h['X-Aitp-Signature']).toBe('sha256=stored-signature');
+      expect(h['X-Aitp-Timestamp-Signature']).toBe(
+        `sha256=${createHmac('sha256', 'topsecret')
+          .update(`${h['X-Aitp-Timestamp']}.${delivery.body}`)
+          .digest('hex')}`,
+      );
+    }
+    expect(sent[0]['X-Aitp-Timestamp-Signature']).not.toBe(sent[1]['X-Aitp-Timestamp-Signature']);
   });
 });
 

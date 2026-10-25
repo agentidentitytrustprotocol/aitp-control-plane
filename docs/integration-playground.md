@@ -147,7 +147,10 @@ record of what those calls depend on.
 
 The playground also **receives** webhook deliveries the CP POSTs to a run-scoped
 URL it registers via `POST /api/webhooks`. The CP signs those with
-`X-AITP-Signature` — see [`events.md` § Webhook-deliverable events](events.md#webhook-deliverable-events)
+`X-AITP-Signature` (body only) and, per attempt, `X-Aitp-Timestamp` +
+`X-Aitp-Timestamp-Signature` (body and send time). A receiver that bounds replay
+must require the timestamped pair and check `X-Aitp-Timestamp` against its window,
+not `enqueuedAt`, which a late retry legitimately carries — see [`events.md` § Webhook-deliverable events](events.md#webhook-deliverable-events)
 and [`api.md` § Webhooks](api.md#webhooks).
 
 Enrollment (`POST /api/registry/enroll` → `POST /api/registry/agents`) is **not**

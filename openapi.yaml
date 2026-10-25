@@ -760,7 +760,7 @@ components:
           type: string
           maxLength: 255
           description: >-
-            HMAC key for `X-Aitp-Signature`. Server-generated when omitted. At
+            HMAC key for `X-Aitp-Signature` and `X-Aitp-Timestamp-Signature`. Server-generated when omitted. At
             most 255 characters (Unicode code points; the column is
             varchar(255)) and no NUL (U+0000), else `400 BODY_INVALID`.
         active: { type: boolean, default: true }
