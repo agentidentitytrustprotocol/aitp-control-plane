@@ -351,19 +351,14 @@ describe('integration: revocation relay → issuer-signed list → fail_closed v
     expect(ofOther[0].reason).toBeUndefined();
   });
 
-  it('lists issuers with entry counts, in stable pages', async () => {
-    // Page through everything (the database may hold other suites' rows).
-    const seen: { iss: string; entries: number }[] = [];
-    for (let offset = 0; ; offset += 2) {
-      const res = await revocationIssuersGet(
-        mkReq(`http://localhost/api/revocation/issuers?limit=2&offset=${offset}`),
-      );
-      expect(res.status).toBe(200);
-      const page = (await res.json()) as { issuers: { iss: string; entries: number }[] };
-      seen.push(...page.issuers);
-      if (page.issuers.length < 2) break;
-    }
-    // No issuer on two pages (the order itself is the database collation's).
+  it('lists issuers with entry counts', async () => {
+    // One page: other suites write revocation rows concurrently, and a new
+    // issuer between two offset pages would shift them (paging is unit-tested).
+    const res = await revocationIssuersGet(
+      mkReq('http://localhost/api/revocation/issuers?limit=1000'),
+    );
+    expect(res.status).toBe(200);
+    const { issuers: seen } = (await res.json()) as { issuers: { iss: string; entries: number }[] };
     const isses = seen.map((i) => i.iss);
     expect(new Set(isses).size).toBe(isses.length);
     expect(seen.find((i) => i.iss === otherIssuer.aid)).toEqual({ iss: otherIssuer.aid, entries: 1 });

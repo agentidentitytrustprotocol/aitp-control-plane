@@ -399,7 +399,7 @@ Every entry recorded for `iss`, oldest `revoked_at` first. This is the full set,
 { "issuers": [{ "iss": "aid:pubkey:...", "entries": 2 }], "limit": 100, "offset": 0 }
 ```
 
-Every issuer with at least one entry, and how many it has, ordered by `iss`, so an admin view can skip issuers with nothing to relay instead of pulling `/api/revocations` once per known issuer. Paged with `?limit=` (default 100, clamped to 1-1000) and `?offset=` (default 0). There is no total: a page shorter than `limit` is the last. An entry with no `iss` is relayed to nobody and is not counted. Admin keys only: an issuer key is `401` here. `Cache-Control: no-store`.
+Every issuer with at least one entry, and how many it has, ordered by `iss`, so an admin view can skip issuers with nothing to relay instead of pulling `/api/revocations` once per known issuer. Paged with `?limit=` (default 100, clamped to 1-1000) and `?offset=` (default 0). There is no total: a page shorter than `limit` is the last. An issuer that gets its first entry between two page requests shifts the later pages by one, so a full read is exact only from a single page. An entry with no `iss` is relayed to nobody and is not counted. Admin keys only: an issuer key is `401` here. `Cache-Control: no-store`.
 
 #### Issuer keys
 
