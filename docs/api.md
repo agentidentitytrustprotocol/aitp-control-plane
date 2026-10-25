@@ -356,6 +356,7 @@ sequenceDiagram
 |---|---|---|---|
 | POST | `/api/revocation/entries` | API key | Record a revoked JTI against its issuer |
 | GET | `/api/revocations?iss=<aid>` | API key, or that issuer's [issuer key](#issuer-keys) | That issuer's entries, ready for it to sign |
+| GET | `/api/revocation/issuers` | API key | Issuers that have entries, with counts |
 
 #### `POST /api/revocation/entries`
 
@@ -391,6 +392,14 @@ Every entry recorded for `iss`, oldest `revoked_at` first. This is the full set,
 - `503 REVOCATION_UNAVAILABLE` (`Cache-Control: no-store`, `Retry-After: 30`) — the database cannot be read. It never answers an empty `200` in that case: that would tell the issuer nothing is revoked, and it would sign and publish that. On a `503` the issuer should keep serving its last list.
 
 **Verifiers** never talk to the CP for revocation. They fetch the issuer's list, verify it with `verifyRevocationList` pinning **the TCT's issuer** as the expected issuer, and branch on the thrown error's `.code` — see [aitp-rs Node SDK: Revocation lists](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008). Freshness and what to do when a list goes stale are the verifier's policy: [RFC-AITP-0008 §3.1 (Modes)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#31-modes) and [§3.2 (Staleness)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#32-staleness).
+
+#### `GET /api/revocation/issuers`
+
+```json
+{ "issuers": [{ "iss": "aid:pubkey:...", "entries": 2 }], "limit": 100, "offset": 0 }
+```
+
+Every issuer with at least one entry, and how many it has, ordered by `iss`, so an admin view can skip issuers with nothing to relay instead of pulling `/api/revocations` once per known issuer. Paged with `?limit=` (default 100, clamped to 1-1000) and `?offset=` (default 0). There is no total: a page shorter than `limit` is the last. An entry with no `iss` is relayed to nobody and is not counted. Admin keys only: an issuer key is `401` here. `Cache-Control: no-store`.
 
 #### Issuer keys
 
