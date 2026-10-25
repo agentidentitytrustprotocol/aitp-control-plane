@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 
 import { db, pool } from '@/lib/db';
-import { delegations, issuedTcts } from '@/lib/db/schema';
+import { delegations, issuedTcts, revocationEntries } from '@/lib/db/schema';
 import { tctMonitor } from '@/lib/tcts/monitor';
 import type { AuditEventRecord } from '@/lib/audit/stream';
 
@@ -337,6 +337,151 @@ describe('integration: tctMonitor revocation cascade', () => {
       expect(tctRows[0]?.revoked).toBe(false);
     } finally {
       await cleanup(ids);
+    }
+  });
+
+  // #165: a report that arrives after its revocation was recorded must not
+  // project as active -- tct.revoked only updates rows that already exist.
+  it('tct.issued after its revocation: projects the TCT as revoked', async () => {
+    const jti = randomUUID();
+    const revokedAt = '2026-10-24T10:00:00.000Z';
+    try {
+      await db.insert(revocationEntries).values({ jti, revokedAt, iss: 'aid:test:issuer' });
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'tct.issued',
+        ts: new Date().toISOString(),
+        payload: {
+          tct: {
+            token: 'eyJ...late',
+            claims: {
+              jti,
+              iss: 'aid:test:issuer',
+              sub: 'aid:test:subject',
+              aud: 'aid:test:subject',
+              grants: ['demo.echo'],
+              iat: 1_750_000_000,
+              exp: 1_750_003_600,
+            },
+          },
+        },
+      });
+      const res = await db.execute(
+        sql`select revoked, revoked_at from issued_tcts where jti = ${jti}`,
+      );
+      const rows = (res as unknown as { rows: { revoked: boolean; revoked_at: Date | string }[] }).rows;
+      expect(rows[0]?.revoked).toBe(true);
+      expect(new Date(rows[0]!.revoked_at).toISOString()).toBe(revokedAt);
+    } finally {
+      await db.delete(issuedTcts).where(sql`${issuedTcts.jti} = ${jti}`);
+      await db.delete(revocationEntries).where(sql`${revocationEntries.jti} = ${jti}`);
+    }
+  });
+
+  it('tct.issued with no revocation entry: still projects as active', async () => {
+    const jti = randomUUID();
+    try {
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'tct.issued',
+        ts: new Date().toISOString(),
+        payload: {
+          tct: {
+            token: 'eyJ...active',
+            claims: {
+              jti,
+              iss: 'aid:test:issuer',
+              sub: 'aid:test:subject',
+              aud: 'aid:test:subject',
+              grants: ['demo.echo'],
+              iat: 1_750_000_000,
+            },
+          },
+        },
+      });
+      const res = await db.execute(
+        sql`select revoked, revoked_at from issued_tcts where jti = ${jti}`,
+      );
+      const rows = (res as unknown as { rows: { revoked: boolean; revoked_at: string | null }[] }).rows;
+      expect(rows[0]).toMatchObject({ revoked: false, revoked_at: null });
+    } finally {
+      await db.delete(issuedTcts).where(sql`${issuedTcts.jti} = ${jti}`);
+    }
+  });
+
+  it('delegation.issued under an already-revoked parent: projects as parent_revoked', async () => {
+    const ids = await seedChain();
+    const late = randomUUID();
+    try {
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'tct.revoked',
+        ts: new Date().toISOString(),
+        payload: { jti: ids.root },
+      });
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'delegation.issued',
+        ts: new Date().toISOString(),
+        payload: {
+          tct: {
+            token: 'eyJ...lateDel',
+            claims: {
+              jti: late,
+              src_jti: ids.child,
+              iss: 'aid:test:child',
+              sub: 'aid:test:late',
+              aud: 'aid:test:issuer',
+              scope: ['demo.echo'],
+            },
+          },
+        },
+      });
+      const res = await db.execute(
+        sql`select revoked, revoked_reason, revoked_at from delegations where jti = ${late}`,
+      );
+      const rows = (res as unknown as {
+        rows: { revoked: boolean; revoked_reason: string | null; revoked_at: string | null }[];
+      }).rows;
+      expect(rows[0]).toMatchObject({ revoked: true, revoked_reason: 'parent_revoked' });
+      expect(rows[0]?.revoked_at).not.toBeNull();
+    } finally {
+      await db.delete(delegations).where(sql`${delegations.jti} = ${late}`);
+      await cleanup(ids);
+    }
+  });
+
+  it('delegation.issued under a revocation-entry parent with no projected row: revoked', async () => {
+    const parent = randomUUID();
+    const child = randomUUID();
+    try {
+      await db.insert(revocationEntries).values({ jti: parent, iss: 'aid:test:issuer' });
+      await tctMonitor.onEvent({
+        id: randomUUID(),
+        type: 'delegation.issued',
+        ts: new Date().toISOString(),
+        payload: {
+          tct: {
+            token: 'eyJ...orphan',
+            claims: {
+              jti: child,
+              src_jti: parent,
+              iss: 'aid:test:delegator',
+              sub: 'aid:test:delegatee',
+              aud: 'aid:test:issuer',
+              scope: ['demo.echo'],
+            },
+          },
+        },
+      });
+      const res = await db.execute(
+        sql`select revoked, revoked_reason from delegations where jti = ${child}`,
+      );
+      const rows = (res as unknown as { rows: { revoked: boolean; revoked_reason: string | null }[] }).rows;
+      expect(rows[0]).toMatchObject({ revoked: true, revoked_reason: 'parent_revoked' });
+    } finally {
+      await db.delete(delegations).where(sql`${delegations.jti} = ${child}`);
+      await db.delete(revocationEntries).where(sql`${revocationEntries.jti} = ${parent}`);
     }
   });
 });

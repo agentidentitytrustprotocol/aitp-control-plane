@@ -77,7 +77,7 @@ Projected from `tct.issued` / `handshake.complete` payloads. The CP observes; it
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `session_id` | varchar(255) | Indexed |
-| `revoked`, `revoked_at` | boolean / timestamptz | Set by any `tct.revoked` event — CP-emitted on `POST /api/revocation/entries`, or ingested |
+| `revoked`, `revoked_at` | boolean / timestamptz | Set by any `tct.revoked` event — CP-emitted on `POST /api/revocation/entries`, or ingested. A row inserted after its `revocation_entries` row exists (a late `tct.issued` report) is inserted already revoked, with the entry's `revoked_at` |
 | `created_at` | timestamptz | Row insert time |
 
 Indexes: `issuer_aid`, `subject_aid`, `audience_aid`, `session_id`, GIN on `grants`.
@@ -93,7 +93,7 @@ Parent→child TCT relationships — single-hop [RFC-AITP-0006](https://agentide
 | `scope` | jsonb `string[]` | Delegated capability subset |
 | `issued_at`, `expires_at` | timestamptz | |
 | `revoked`, `revoked_at` | boolean / timestamptz | |
-| `revoked_reason` | varchar(64) | `explicit` \| `parent_revoked` (cascade) |
+| `revoked_reason` | varchar(64) | `explicit` \| `parent_revoked` (cascade, or inserted under an already-revoked parent) |
 | `created_at` | timestamptz | Row insert time |
 
 Indexes: `parent_jti`, `delegator_aid`, `delegatee_aid`. For how `jti` and `parent_jti` are derived from reported tokens, see [`events.md`](events.md#tct--delegation-projection).
