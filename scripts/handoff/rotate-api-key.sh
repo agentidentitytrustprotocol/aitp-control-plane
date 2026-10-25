@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rotate the control-plane API key the console uses (H0.1), with no downtime.
 #
-#   O = the key the console uses today   (Doppler secret CP_API_KEY_OLD)
+#   O = the key the console uses today   (Doppler secret CP_API_KEY_CONSOLE)
 #   N = the key that replaces it          (Doppler secret CP_API_KEY_NEW)
 #
 #   1. CP (Railway):  API_KEYS gains `<label>:N` next to O       (both work)
@@ -259,11 +259,11 @@ VERCEL_AUTH_FILE="${VERCEL_AUTH_FILE:-$HOME/Library/Application Support/com.verc
 [ -r "$VERCEL_AUTH_FILE" ] || VERCEL_AUTH_FILE="$HOME/.local/share/com.vercel.cli/auth.json"
 vercel_refresh_token
 
-OLD="$(doppler_get CP_API_KEY_OLD)"
+OLD="$(doppler_get CP_API_KEY_CONSOLE)"
 NEW="$(doppler_get CP_API_KEY_NEW)"
-[ -n "$OLD" ] || die "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG has no CP_API_KEY_OLD (the console's current key)"
+[ -n "$OLD" ] || die "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG has no CP_API_KEY_CONSOLE (the console's current key)"
 case "$OLD$NEW" in *,*|*:*) die "keys must not contain ',' or ':'" ;; esac
-[ "$OLD" != "$NEW" ] || die "CP_API_KEY_NEW equals CP_API_KEY_OLD"
+[ "$OLD" != "$NEW" ] || die "CP_API_KEY_NEW equals CP_API_KEY_CONSOLE"
 KEYS="$(current_api_keys)"
 [ -n "$KEYS" ] || die "could not read API_KEYS from Railway"
 
@@ -356,4 +356,4 @@ describe_list "$REMAINING" >&2
 wait_for_status "$OLD" 401 "O at the CP"
 wait_for_status "$NEW" 200 "N at the CP"
 console_check
-log "done. Next: copy CP_API_KEY_NEW over CP_API_KEY_OLD in Doppler once the rotation is final."
+log "done. Next: copy CP_API_KEY_NEW over CP_API_KEY_CONSOLE in Doppler, then delete CP_API_KEY_NEW, once the rotation is final."
