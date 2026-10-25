@@ -39,6 +39,7 @@
     "/api/registry/agents/[aid]/manifest",
     "/api/registry/enroll",
     "/api/revocation/entries",
+    "/api/revocation/issuers",
     "/api/revocations",
     "/api/sessions",
     "/api/sessions/[sessionId]",
@@ -54,7 +55,7 @@
     "/api/webhooks/[id]/circuit-breaker/reset",
     "/api/well-known/aitp-manifest"
   ],
-  "apiRouteCount": 31,
+  "apiRouteCount": 32,
   "rewrites": [
     {
       "phase": "afterFiles",
@@ -249,6 +250,12 @@
       "namedRegex": "^/api/revocation/entries(?:/)?$",
       "page": "/api/revocation/entries",
       "regex": "^/api/revocation/entries(?:/)?$",
+      "routeKeys": {}
+    },
+    {
+      "namedRegex": "^/api/revocation/issuers(?:/)?$",
+      "page": "/api/revocation/issuers",
+      "regex": "^/api/revocation/issuers(?:/)?$",
       "routeKeys": {}
     },
     {

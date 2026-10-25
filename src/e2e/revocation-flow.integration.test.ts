@@ -42,6 +42,7 @@ import { sql } from 'drizzle-orm';
 
 import { POST as revocationPost } from '@/app/api/revocation/entries/route';
 import { GET as revocationsGet } from '@/app/api/revocations/route';
+import { GET as revocationIssuersGet } from '@/app/api/revocation/issuers/route';
 import { POST as eventsPost } from '@/app/api/events/route';
 import { GET as delegationsGet } from '@/app/api/delegations/route';
 
@@ -348,6 +349,21 @@ describe('integration: revocation relay → issuer-signed list → fail_closed v
     expect(ofOther.map((e) => e.jti)).toEqual([otherJti]);
     // reason omitted → no reason key on the relayed entry.
     expect(ofOther[0].reason).toBeUndefined();
+  });
+
+  it('lists issuers with entry counts', async () => {
+    // One page: other suites write revocation rows concurrently, and a new
+    // issuer between two offset pages would shift them (paging is unit-tested).
+    const res = await revocationIssuersGet(
+      mkReq('http://localhost/api/revocation/issuers?limit=1000'),
+    );
+    expect(res.status).toBe(200);
+    const { issuers: seen } = (await res.json()) as { issuers: { iss: string; entries: number }[] };
+    const isses = seen.map((i) => i.iss);
+    expect(new Set(isses).size).toBe(isses.length);
+    expect(seen.find((i) => i.iss === otherIssuer.aid)).toEqual({ iss: otherIssuer.aid, entries: 1 });
+    const ofB = await pullEntries(issuerB);
+    expect(seen.find((i) => i.iss === issuerB.aid)?.entries).toBe(ofB.length);
   });
 
   it('re-posting is idempotent, and a contradicting iss is 409', async () => {
