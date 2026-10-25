@@ -8,6 +8,7 @@ import {
   type Webhook,
 } from '../db/schema';
 import type { AuditEventRecord } from '../audit/stream';
+import { writeAdminAudit } from '../audit-log/service';
 import { config } from '../config';
 import { logger } from '../logger';
 import { webhookBreaker } from './circuit-breaker';
@@ -341,6 +342,49 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
         nextRetryAt: null,
       })
       .where(eq(webhookDeliveries.id, deliveryId));
+    return;
+  }
+
+  // 410 Gone is the receiver unsubscribing (e.g. a playground run that no
+  // longer exists). Terminal: disable the webhook, fail its queued
+  // deliveries, audit once, and reset rather than trip the breaker (this
+  // may be the half-open probe, which only a record/reset releases, and a
+  // later re-enable should start closed). Every other non-2xx, 404
+  // included, stays on the retry path below.
+  if (statusCode === 410) {
+    webhookBreaker.reset(webhook.id);
+    await db
+      .update(webhookDeliveries)
+      .set({ status: 'failed', statusCode, error, nextRetryAt: null })
+      .where(eq(webhookDeliveries.id, deliveryId));
+    const disabled = await db
+      .update(webhooks)
+      .set({ active: false, updatedAt: new Date().toISOString() })
+      .where(and(eq(webhooks.id, webhook.id), eq(webhooks.active, true)))
+      .returning({ id: webhooks.id });
+    await db
+      .update(webhookDeliveries)
+      .set({ status: 'failed', error: 'webhook unsubscribed (410 Gone)', nextRetryAt: null })
+      .where(
+        and(
+          eq(webhookDeliveries.webhookId, webhook.id),
+          eq(webhookDeliveries.status, 'pending'),
+        ),
+      );
+    // Only the attempt that flipped `active` audits, so concurrent 410s
+    // for the same webhook leave a single row.
+    if (disabled.length > 0) {
+      await writeAdminAudit({
+        action: 'webhook.unsubscribed',
+        actorId: 'system:webhook-delivery',
+        targetId: webhook.id,
+        details: { url: webhook.url, deliveryId, statusCode },
+      });
+      logger.info(
+        { webhookId: webhook.id, url: webhook.url, deliveryId },
+        'webhook disabled — receiver returned 410 Gone',
+      );
+    }
     return;
   }
   webhookBreaker.recordFailure(webhook.id);

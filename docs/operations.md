@@ -528,6 +528,11 @@ retries:
 - **`WEBHOOK_BREAKER_RESET_MS`** (default 60000) — how long the breaker stays
   open before a half-open probe is allowed.
 
+A receiver that answers `410 Gone` is unsubscribed instead: the webhook is set
+`active: false`, its pending deliveries are failed, and a `webhook.unsubscribed`
+admin-audit entry is written. The webhook's breaker is reset, not tripped. Re-enable with
+`PATCH /api/webhooks/:id {"active": true}`.
+
 Inspect or reset a breaker via `GET /api/webhooks/:id/circuit-breaker` and
 `POST /api/webhooks/:id/circuit-breaker/reset` (see [`api.md`](api.md#webhooks)).
 

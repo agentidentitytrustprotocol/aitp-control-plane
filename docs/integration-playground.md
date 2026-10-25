@@ -151,7 +151,9 @@ URL it registers via `POST /api/webhooks`. The CP signs those with
 `X-Aitp-Timestamp-Signature` (body and send time). A receiver that bounds replay
 must require the timestamped pair and check `X-Aitp-Timestamp` against its window,
 not `enqueuedAt`, which a late retry legitimately carries — see [`events.md` § Webhook-deliverable events](events.md#webhook-deliverable-events)
-and [`api.md` § Webhooks](api.md#webhooks).
+and [`api.md` § Webhooks](api.md#webhooks). A run the playground no longer knows
+should answer `410 Gone`: the CP then disables that subscription and stops
+delivering to it. A `404` is retried like any other failure.
 
 Enrollment (`POST /api/registry/enroll` → `POST /api/registry/agents`) is **not**
 called by the playground service — agents enroll themselves; the playground only
