@@ -55,8 +55,8 @@ function fixture() {
   const responder = b.newResponder(null, { pinnedKeys: [a.aid] });
   const hello = responder.processHello(initiator.buildHello(manifestB, ['demo.echo']));
   const commit = initiator.processHelloAck(hello.ackJson, hello.sessionId);
-  const committed = responder.processCommit(commit);
-  const done = initiator.complete(committed.ackJson);
+  const committed = responder.processCommit(commit, []);
+  const done = initiator.complete(committed.ackJson, []);
   const delegation = a.buildDelegation(done.grantVoucher!, c.aid, ['demo.echo'], 600);
   const dClaims = JSON.parse(
     Buffer.from(delegation.split('.')[1], 'base64url').toString('utf8'),

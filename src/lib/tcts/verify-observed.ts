@@ -13,13 +13,24 @@
  * What a pass means: the token's signature, expiry, and (for a TCT) its
  * grant/audience check out -- a TCT under the key encoded in the issuer AID, a
  * delegation under the key from the delegator's verified Manifest (taken from
- * the registry; see {@link verifyObservedDelegation}). It does NOT consult
- * revocation entries, and an expired token fails -- so a late report
- * of a TCT that has since expired is dropped in strict mode.
+ * the registry; see {@link verifyObservedDelegation}). An expired token fails,
+ * so a late report of a TCT that has since expired is dropped in strict mode.
+ *
+ * Revocation is deliberately NOT checked (`revocation: 'fail_open'`, aitp
+ * 0.20+). This is a non-enforcing observation path: the CP is not the relying
+ * party for any reported token and grants nothing on the strength of one, so
+ * the question here is "was this report really signed?", not "may this token
+ * still be used?". Revocation is projected separately -- `tct.revoked` sets
+ * `issued_tcts.revoked` and cascades through `delegations` (monitor.ts).
+ * Applying the issuer's deny list here would make strict mode drop the
+ * issuance record of a revoked TCT, erasing the history the console shows.
  */
 
 import { verifyDelegation } from 'aitp';
 import { getCpAgent } from '../identity/cp-agent';
+
+/** See the module comment: authenticity only, revocation is projected elsewhere. */
+const OBSERVE_REVOCATION = 'fail_open';
 import type { ParsedTct } from './monitor';
 
 export type VerificationMode = 'off' | 'warn' | 'strict';
@@ -104,7 +115,13 @@ export function verifyObservedTct(raw: unknown, parsed: ParsedTct): Verification
     };
   }
   try {
-    getCpAgent().verifyTct(token, parsed.grants[0], parsed.audienceAid);
+    getCpAgent().verifyTct(
+      token,
+      parsed.grants[0],
+      parsed.audienceAid,
+      null,
+      OBSERVE_REVOCATION,
+    );
     return { attempted: true, verified: true, error: null };
   } catch (err) {
     return failure(err);
@@ -141,7 +158,7 @@ export function verifyObservedDelegation(
     };
   }
   try {
-    verifyDelegation(token, aud, issuerManifests);
+    verifyDelegation(token, aud, issuerManifests, null, OBSERVE_REVOCATION);
     return { attempted: true, verified: true, error: null };
   } catch (err) {
     return failure(err);

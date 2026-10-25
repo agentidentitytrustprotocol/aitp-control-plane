@@ -605,8 +605,16 @@ Since aitp 0.16 it also needs the **delegator's Manifest**, which the CP takes
 from the delegator's `agents` row: a delegation whose delegator is not enrolled
 here, or whose stored Manifest is expired or `aitp/0.2`, fails
 (`KEY_RESOLUTION_FAILED`) — logged under `warn`, dropped under `strict`.
-Verification does not consult the revocation list, and no `verified` flag is
-persisted: the outcome only gates projection and is logged.
+Verification does not consult revocation. aitp 0.20 made `verifyTct` and
+`verifyDelegation` fail closed (with no deny list, every token is refused as
+`TCT_REVOKED` / `DELEGATION_SOURCE_TCT_REVOKED`), so the CP passes
+`revocation: 'fail_open'` explicitly (`src/lib/tcts/verify-observed.ts`). This
+path enforces nothing: the CP is not the relying party for a reported token,
+and the check answers only "was this report really signed?". Revocation is
+projected separately, from `tct.revoked` onto `issued_tcts.revoked` and down
+the delegation chain; applying the deny list here would make `strict` drop the
+issuance record of a revoked TCT. No `verified` flag is persisted: the outcome
+only gates projection and is logged.
 
 ## Data retention
 

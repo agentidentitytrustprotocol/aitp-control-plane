@@ -197,7 +197,7 @@ components:
                 The value set is owned by the `aitp` SDK's `verifyManifestJson`
                 (listed at
                 https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#manifest-verification;
-                verified against `aitp` `^0.19.0`; `unknown_field` since 0.15). It is deliberately not an
+                verified against `aitp` `^0.20.0`; `unknown_field` since 0.15). It is deliberately not an
                 `enum`: a new SDK release may add values, which this service
                 passes through verbatim. Treat any unrecognized value as a
                 generic "manifest verification failed".
