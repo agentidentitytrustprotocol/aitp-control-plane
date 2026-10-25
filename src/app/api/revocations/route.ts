@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
 
   if (boundIssuer !== null) {
     const label = req.headers.get(KEY_LABEL_HEADER);
-    if (label) recordIssuerPull(label);
+    if (label) recordIssuerPull(label, boundIssuer);
   }
 
   return Response.json(

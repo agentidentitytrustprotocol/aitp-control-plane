@@ -208,13 +208,14 @@ export async function GET() {
   // The CP only relays revocations; an issuer that stops pulling enforces
   // nothing new. Labels come from ISSUER_KEYS config, so cardinality is bounded.
   lines.push(
-    '# HELP aitp_control_plane_revocation_last_pull_timestamp_seconds Unix time of the last successful GET /api/revocations by each issuer key, by key label (absent until that issuer first pulls)',
+    '# HELP aitp_control_plane_revocation_last_pull_timestamp_seconds Unix time of the last successful GET /api/revocations by each issuer key, by key label and the AID the key is bound to (absent until that issuer first pulls)',
   );
   lines.push('# TYPE aitp_control_plane_revocation_last_pull_timestamp_seconds gauge');
-  for (const [issuer, secs] of getIssuerLastPulls()) {
+  for (const [issuer, { aid, secs }] of getIssuerLastPulls()) {
     const label = issuer.replace(/"/g, '\\"');
+    const aidLabel = aid.replace(/"/g, '\\"');
     lines.push(
-      `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="${label}"} ${secs}`,
+      `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="${label}",aid="${aidLabel}"} ${secs}`,
     );
   }
 
