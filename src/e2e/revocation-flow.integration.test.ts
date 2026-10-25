@@ -363,8 +363,8 @@ describe('integration: revocation relay → issuer-signed list → fail_closed v
       seen.push(...page.issuers);
       if (page.issuers.length < 2) break;
     }
+    // No issuer on two pages (the order itself is the database collation's).
     const isses = seen.map((i) => i.iss);
-    expect(isses).toEqual([...isses].sort());
     expect(new Set(isses).size).toBe(isses.length);
     expect(seen.find((i) => i.iss === otherIssuer.aid)).toEqual({ iss: otherIssuer.aid, entries: 1 });
     const ofB = await pullEntries(issuerB);

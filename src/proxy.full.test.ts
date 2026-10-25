@@ -413,6 +413,7 @@ describe('proxy — issuer keys', () => {
   it.each([
     ['/api/revocation/entries', 'POST'],
     ['/api/revocation/entries', 'GET'],
+    ['/api/revocation/issuers', 'GET'],
     ['/api/registry/agents/aid:abc/export', 'GET'],
     ['/api/revocations', 'POST'],
   ])('is an unknown key on %s %s (401)', (path, method) => {
