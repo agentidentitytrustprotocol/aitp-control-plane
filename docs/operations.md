@@ -73,10 +73,12 @@ operating it involves.
   Changing the list is a redeploy, like `API_KEYS`.
 - **Watch that issuers pull.** An entry takes effect only once its issuer has
   pulled and republished, and an agent that stopped pulling fails silently.
-  `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>"}`
+  `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>",aid="<aid>"}`
   is the Unix time of each issuer key's last successful pull, per process
   (absent until it first pulls, reset on restart; admin-key pulls are not
-  counted). Alert on `time() - max by (issuer) (…)` exceeding the pull
+  counted). It is labelled with the key's label and the AID the key is bound
+  to in `ISSUER_KEYS`; join dashboards on `aid`, since a label can change when
+  a key is rotated. Alert on `time() - max by (aid) (…)` exceeding the pull
   interval you expect, plus the restart case where a series is absent.
 - **No caching, no replica lag.** Every pull reads the database and answers
   `Cache-Control: no-store`, so an entry is visible on the next pull from any

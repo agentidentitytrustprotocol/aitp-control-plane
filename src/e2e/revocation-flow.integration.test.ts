@@ -329,7 +329,8 @@ describe('integration: revocation relay → issuer-signed list → fail_closed v
 
     const before = Math.floor(Date.now() / 1000);
     expect((await pull(issuerB.aid, issuerB.aid, 'issuer-b')).status).toBe(200);
-    expect(getIssuerLastPulls().get('issuer-b')).toBeGreaterThanOrEqual(before);
+    expect(getIssuerLastPulls().get('issuer-b')?.secs).toBeGreaterThanOrEqual(before);
+    expect(getIssuerLastPulls().get('issuer-b')?.aid).toBe(issuerB.aid);
 
     // A refused pull is not a pull.
     expect((await pull(otherIssuer.aid, issuerB.aid, 'issuer-b-refused')).status).toBe(403);

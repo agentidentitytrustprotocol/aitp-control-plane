@@ -275,16 +275,28 @@ describe('GET /api/metrics — revocation relay last pull (CP1.1)', () => {
     );
   });
 
-  it('emits one series per issuer key label, in epoch seconds', async () => {
-    relay.recordIssuerPull('researcher', 1_792_889_239_500);
-    relay.recordIssuerPull('writer', 1_792_889_300_000);
+  it('emits one series per issuer key label, with its bound AID, in epoch seconds', async () => {
+    relay.recordIssuerPull('researcher', 'aid:example:researcher', 1_792_889_239_500);
+    relay.recordIssuerPull('writer', 'aid:example:writer', 1_792_889_300_000);
     const text = await (await GET()).text();
     expect(text).toContain(
-      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="researcher"} 1792889239',
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="researcher",aid="aid:example:researcher"} 1792889239',
     );
     expect(text).toContain(
-      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="writer"} 1792889300',
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="writer",aid="aid:example:writer"} 1792889300',
     );
+  });
+
+  it('keeps one series per key label: a later pull replaces the AID and time', async () => {
+    relay.recordIssuerPull('researcher', 'aid:example:old', 1_792_889_239_500);
+    relay.recordIssuerPull('researcher', 'aid:example:new', 1_792_889_300_000);
+    const text = await (await GET()).text();
+    const series = text
+      .split('\n')
+      .filter((l) => l.startsWith('aitp_control_plane_revocation_last_pull_timestamp_seconds{'));
+    expect(series).toEqual([
+      'aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="researcher",aid="aid:example:new"} 1792889300',
+    ]);
   });
 });
 
