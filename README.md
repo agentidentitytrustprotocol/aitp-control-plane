@@ -1,5 +1,7 @@
 # AITP Control Plane
 
+> **Reference/demo control plane: no tenant isolation, not for production multi-tenant use.** Namespaces are a query-scoping convention, not a security boundary. Unscoped discovery returns rows from every namespace ([`schema.ts`](src/lib/db/schema.ts#L50-L56), [`docs/api.md` — `GET /api/registry/agents`](docs/api.md#get-apiregistryagents)), and any valid API key can read and write every namespace.
+
 A backend service that hosts the registry, audit log, revocation relay, and webhook fan-out for an [AITP (Agent Identity & Trust Protocol)](https://agentidentitytrustprotocol.io/spec) deployment ([spec repo](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol)).
 
 This service is **API-only**. It ships no UI. Operators consume the JSON endpoints directly or front them with a separate UI app.
