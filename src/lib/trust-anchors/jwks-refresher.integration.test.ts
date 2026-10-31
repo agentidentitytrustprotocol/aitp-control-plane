@@ -20,8 +20,19 @@ import { GET as jwksGet } from '@/app/api/trust-anchors/[id]/jwks/route';
 const realFetch = global.fetch;
 const SAMPLE_JWKS = { keys: [{ kty: 'OKP', crv: 'Ed25519', x: 'abc', kid: 'k1' }] };
 
+// Hosts of the anchors this file inserted. refreshStaleJwks() walks every
+// stale anchor in the shared test database, including other files' (run in
+// parallel workers), so a stub answers only these hosts and 404s the rest: a
+// 404 makes the refresher skip that row instead of caching this file's keys
+// onto another file's anchor.
+const ownedHosts = new Set<string>();
+
 function stubFetch(handler: (url: string) => Response | Promise<Response>) {
-  const fn = jest.fn(async (input: unknown) => handler(String(input)));
+  const fn = jest.fn(async (input: unknown) => {
+    const url = String(input);
+    if (!ownedHosts.has(new URL(url).host)) return new Response('not ours', { status: 404 });
+    return handler(url);
+  });
   global.fetch = fn as unknown as typeof fetch;
   return fn;
 }
@@ -43,10 +54,13 @@ describe('integration: JWKS refresher', () => {
   async function insertAnchor(jwksUrl: string | null, issuerUrl?: string): Promise<string> {
     const id = randomUUID();
     ids.push(id);
+    const issuer = issuerUrl ?? `https://issuer-${id.slice(0, 8)}.example.com`;
+    ownedHosts.add(new URL(issuer).host);
+    if (jwksUrl) ownedHosts.add(new URL(jwksUrl).host);
     await db.insert(trustAnchors).values({
       id,
       namespace: `jwks-it-${id.slice(0, 8)}`,
-      issuerUrl: issuerUrl ?? `https://issuer-${id.slice(0, 8)}.example.com`,
+      issuerUrl: issuer,
       jwksUrl,
     });
     return id;
