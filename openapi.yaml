@@ -1669,6 +1669,42 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/revocation/issuers:
+    get:
+      tags: [revocation]
+      summary: Issuers that have revocation entries, with counts
+      description: >-
+        Ordered by `iss`; a page shorter than `limit` is the last (no total).
+        Entries with no `iss` are not listed. Admin keys only.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: "OK. `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuers, limit, offset]
+                properties:
+                  issuers:
+                    type: array
+                    items:
+                      type: object
+                      required: [iss, entries]
+                      properties:
+                        iss: { type: string }
+                        entries: { type: integer, minimum: 1 }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GateMisconfigured" }
+
   /api/webhooks:
     get:
       tags: [webhooks]

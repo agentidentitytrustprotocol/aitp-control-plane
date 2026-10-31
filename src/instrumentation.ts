@@ -93,6 +93,12 @@ export async function register(): Promise<void> {
   const { enforceCpSeedAtBoot } = await import('./lib/identity/cp-seed-config');
   enforceCpSeedAtBoot();
 
+  // A key label used twice in API_KEYS or ISSUER_KEYS (audit rows and metric
+  // series that cannot be told apart) is fatal in every NODE_ENV. Rule and exit
+  // in key-labels-config.ts; position pinned by src/instrumentation.test.ts.
+  const { enforceKeyLabelsAtBoot } = await import('./lib/key-labels-config');
+  enforceKeyLabelsAtBoot();
+
   // Shutdown hooks must always be wired — even with OTel off — so
   // readiness drains correctly on SIGTERM.
   const { registerShutdownHooks } = await import('./lib/shutdown');

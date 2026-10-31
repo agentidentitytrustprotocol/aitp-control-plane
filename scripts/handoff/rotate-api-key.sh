@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rotate the control-plane API key the console uses (H0.1), with no downtime.
 #
-#   O = the key the console uses today   (Doppler secret CP_API_KEY_OLD)
+#   O = the key the console uses today   (Doppler secret CP_API_KEY_CONSOLE)
 #   N = the key that replaces it          (Doppler secret CP_API_KEY_NEW)
 #
 #   1. CP (Railway):  API_KEYS gains `<label>:N` next to O       (both work)
@@ -147,6 +147,22 @@ without_key() { # list key -> list
   done
   printf '%s' "$out"
 }
+has_label() { # list label; labels as the CP assigns them (bare key = unlabelled-<n>)
+  local IFS=, e n=0 k lbl
+  for e in $1; do
+    e="$(printf '%s' "$e" | sed 's/^ *//;s/ *$//')"
+    [ -z "$e" ] && continue
+    n=$((n + 1)); k="$(entry_key "$e")"
+    if [ "$k" = "$e" ]; then lbl="unlabelled-$n"; else lbl="${e%%:*}"; fi
+    [ "$lbl" = "$2" ] && return 0
+  done
+  return 1
+}
+free_label() { # list base -> base, or base-2, base-3, ... (the CP refuses boot on a duplicate label)
+  local l="$2" i=1
+  while has_label "$1" "$l"; do i=$((i + 1)); l="$2-$i"; done
+  printf '%s' "$l"
+}
 describe_list() { # list -> "label|fingerprint" lines, no secrets
   local IFS=, e n=0 k lbl
   for e in $1; do
@@ -259,11 +275,11 @@ VERCEL_AUTH_FILE="${VERCEL_AUTH_FILE:-$HOME/Library/Application Support/com.verc
 [ -r "$VERCEL_AUTH_FILE" ] || VERCEL_AUTH_FILE="$HOME/.local/share/com.vercel.cli/auth.json"
 vercel_refresh_token
 
-OLD="$(doppler_get CP_API_KEY_OLD)"
+OLD="$(doppler_get CP_API_KEY_CONSOLE)"
 NEW="$(doppler_get CP_API_KEY_NEW)"
-[ -n "$OLD" ] || die "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG has no CP_API_KEY_OLD (the console's current key)"
+[ -n "$OLD" ] || die "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG has no CP_API_KEY_CONSOLE (the console's current key)"
 case "$OLD$NEW" in *,*|*:*) die "keys must not contain ',' or ':'" ;; esac
-[ "$OLD" != "$NEW" ] || die "CP_API_KEY_NEW equals CP_API_KEY_OLD"
+[ "$OLD" != "$NEW" ] || die "CP_API_KEY_NEW equals CP_API_KEY_CONSOLE"
 KEYS="$(current_api_keys)"
 [ -n "$KEYS" ] || die "could not read API_KEYS from Railway"
 
@@ -294,6 +310,8 @@ Plan (nothing has been changed):
 Run with --apply to execute, --rollback to undo.
 EOF
   has_key "$KEYS" "$OLD" || log "warning: O is not on the CP; --apply would refuse"
+  { [ -n "$NEW" ] && has_key "$KEYS" "$NEW"; } || ! has_label "$KEYS" "$LABEL" ||
+    log "warning: label $LABEL is already in API_KEYS; --apply would refuse (pass --label)"
   exit 0
 fi
 
@@ -303,8 +321,9 @@ if [ "$MODE" = rollback ]; then
   if has_key "$KEYS" "$OLD"; then
     log "step R1: O already on the CP"
   else
-    set_api_keys "$KEYS,console-old:$OLD"
-    log "step R1: API_KEYS += console-old:$(fp "$OLD")"
+    RLABEL="$(free_label "$KEYS" console-old)"
+    set_api_keys "$KEYS,$RLABEL:$OLD"
+    log "step R1: API_KEYS += $RLABEL:$(fp "$OLD")"
   fi
   wait_for_status "$OLD" 200 "O at the CP"
   vercel_set_cp_key "$OLD"
@@ -316,6 +335,10 @@ fi
 
 # ----- apply ------------------------------------------------------------------
 has_key "$KEYS" "$OLD" || die "O is not in the CP's API_KEYS; nothing to rotate (or already rotated)"
+# Before anything is written: a duplicate label makes the CP exit 1 at boot, which
+# would leave a crash-looping API_KEYS on Railway (docs/api.md).
+{ [ -n "$NEW" ] && has_key "$KEYS" "$NEW"; } || ! has_label "$KEYS" "$LABEL" ||
+  die "label $LABEL is already in the CP's API_KEYS; pass --label with a new one"
 confirm "Rotate the console's CP key on $CP_URL?"
 
 if [ -z "$NEW" ]; then
@@ -356,4 +379,4 @@ describe_list "$REMAINING" >&2
 wait_for_status "$OLD" 401 "O at the CP"
 wait_for_status "$NEW" 200 "N at the CP"
 console_check
-log "done. Next: copy CP_API_KEY_NEW over CP_API_KEY_OLD in Doppler once the rotation is final."
+log "done. Next: copy CP_API_KEY_NEW over CP_API_KEY_CONSOLE in Doppler, then delete CP_API_KEY_NEW, once the rotation is final."

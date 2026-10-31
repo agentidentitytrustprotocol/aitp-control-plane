@@ -22,6 +22,7 @@
     "/api/registry/agents/[aid]/manifest": "public",
     "/api/registry/enroll": "public",
     "/api/revocation/entries": "gated",
+    "/api/revocation/issuers": "gated",
     "/api/revocations": "gated",
     "/api/sessions": "gated",
     "/api/sessions/[sessionId]": "gated",

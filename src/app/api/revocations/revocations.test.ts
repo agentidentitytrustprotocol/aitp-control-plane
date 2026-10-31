@@ -91,7 +91,9 @@ describe('GET /api/revocations', () => {
     await get(AID, { 'x-aitp-key-label': 'ops' });
     expect(getIssuerLastPulls().size).toBe(0);
     await get(AID, asIssuer(AID));
-    expect(getIssuerLastPulls().get('researcher')).toBeGreaterThan(0);
+    const pull = getIssuerLastPulls().get('researcher');
+    expect(pull?.secs).toBeGreaterThan(0);
+    expect(pull?.aid).toBe(AID);
   });
 
   it('fails closed with 503 on a database fault, and records no pull', async () => {

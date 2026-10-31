@@ -139,7 +139,7 @@ rate-limit, retention, and telemetry subsystems behave.
 See [`docs/`](docs/README.md) for the full documentation set — [`docs/api.md`](docs/api.md) (prose API reference), [`docs/events.md`](docs/events.md) (event types & projections), [`docs/data-model.md`](docs/data-model.md) (Postgres schema), and [`docs/operations.md`](docs/operations.md) (runbook) — plus [`openapi.yaml`](openapi.yaml) for the machine-readable schema. High-level groups:
 
 - Public discovery: `/api/health`, `/api/readyz`, `/api/metrics`, `/.well-known/aitp-manifest`
-- Revocation: `POST /api/revocation/entries` (admin), `GET /api/revocations?iss=<aid>` (admin, or that issuer's `ISSUER_KEYS` key)
+- Revocation: `POST /api/revocation/entries` (admin), `GET /api/revocations?iss=<aid>` (admin, or that issuer's `ISSUER_KEYS` key), `GET /api/revocation/issuers` (admin; issuers with entry counts)
 - Registry: `/api/registry/enroll`, `/api/registry/agents`, `/api/registry/agents/:aid`, `/api/registry/agents/:aid/manifest`, `/api/registry/agents/:aid/export`
 - Sessions: `/api/sessions`, `/api/sessions/:sessionId`, `/api/sessions/:sessionId/export`, `/api/sessions/:sessionId/replay`
 - Events: `POST /api/events`, `GET /api/events/history`, `GET /api/events/stream` (SSE)

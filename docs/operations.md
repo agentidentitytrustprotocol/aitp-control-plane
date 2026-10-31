@@ -69,14 +69,18 @@ operating it involves.
   one entry per agent. The key reads only that AID's entries and opens no
   other route, so it is safe to hand to the agent; never give an agent an
   `API_KEYS` key for this. Boot warnings name any entry that was skipped
-  (malformed, label resembling a key, key reused from `API_KEYS`, duplicate).
-  Changing the list is a redeploy, like `API_KEYS`.
+  (malformed, label resembling a key, key reused from `API_KEYS`, duplicate
+  key). A label used twice, in either list, exits 1 at boot. Changing the list
+  is a redeploy, like `API_KEYS`; rotate an issuer's key under a new label for
+  the same AID ([api.md](api.md#api-keys-per-consumer-labels)).
 - **Watch that issuers pull.** An entry takes effect only once its issuer has
   pulled and republished, and an agent that stopped pulling fails silently.
-  `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>"}`
+  `aitp_control_plane_revocation_last_pull_timestamp_seconds{issuer="<label>",aid="<aid>"}`
   is the Unix time of each issuer key's last successful pull, per process
   (absent until it first pulls, reset on restart; admin-key pulls are not
-  counted). Alert on `time() - max by (issuer) (…)` exceeding the pull
+  counted). It is labelled with the key's label and the AID the key is bound
+  to in `ISSUER_KEYS`; join dashboards on `aid`, since a label can change when
+  a key is rotated. Alert on `time() - max by (aid) (…)` exceeding the pull
   interval you expect, plus the restart case where a series is absent.
 - **No caching, no replica lag.** Every pull reads the database and answers
   `Cache-Control: no-store`, so an entry is visible on the next pull from any

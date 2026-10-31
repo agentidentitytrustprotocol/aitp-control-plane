@@ -70,10 +70,11 @@ API_KEYS=console-20261024:<secret>,playground:<secret>,<legacy-bare-secret>
 
 - **Label.** 1-40 characters matching `[A-Za-z0-9][A-Za-z0-9._-]{0,39}`, a short **non-secret** consumer name. Only the first `:` splits, and only when the prefix is a valid label; otherwise the whole entry is a bare key, so existing bare keys keep working unchanged. Clients always send just the key: `Authorization: Bearer <secret>`, never `label:secret`.
 - **Bare keys** are labelled `unlabelled-<n>` (1-based position in the list). That label moves if the list is reordered, so label every key.
-- **Guards** (boot warnings, never fatal; they never print a secret): a label that equals a configured key, or is an 8+ character substring of one, is refused and falls back to `unlabelled-<n>`; a duplicate key keeps its first entry; a label used twice is accepted but its traffic is indistinguishable.
+- **Guards** (they never print a secret): a label that equals a configured key, or is an 8+ character substring of one, is refused and falls back to `unlabelled-<n>`, and a duplicate key keeps its first entry (both boot warnings). A label used twice, including an explicit label equal to a bare key's `unlabelled-<n>`, is **fatal**: the process exits 1 at boot in every `NODE_ENV`, because two keys under one label cannot be told apart in the audit log. The same rule applies to `ISSUER_KEYS`.
 - **Audit attribution.** The gate resolves the label and forwards it to the handler (`x-aitp-key-label`, together with the client IP as `x-aitp-client-ip`; any client-supplied copy of either header is dropped). Every `admin_audit_log` row written by a key-authenticated mutation records `actor_id = key:<label>` and, when known, `details.client_ip`. Agent registration via an enrollment token records `actor_id = enrollment-token`. Agent telemetry (`POST /api/events` -> `audit_events`) is not labelled; its event ids still derive from a key fingerprint.
 - **Rate limits stay per key**, not per label: two keys with the same label get separate `api-key` buckets.
-- **Rotation without downtime.** Add the new key next to the old one, move the consumer to it, then remove the old entry; the removed key answers `401 INVALID_API_KEY` from then on. `scripts/handoff/rotate-api-key.sh` does this for the console key (dry run by default; `--apply`, `--rollback`).
+- **Rotation without downtime.** Add the new key next to the old one under a **new label** (`console-20261024:<old>,console-20261124:<new>`), move the consumer to it, then remove the old entry; the removed key answers `401 INVALID_API_KEY` from then on. `scripts/handoff/rotate-api-key.sh` does this for the console key (dry run by default; `--apply`, `--rollback`).
+- **Issuer key rotation** (`ISSUER_KEYS`, [Revocation](#revocation)) is the same overlap: one AID may be bound under several labels, so add `researcher-2@<aid>=<new>` next to `researcher-1@<aid>=<old>`, move the agent to the new key, then remove the old entry. Each label has exactly one AID, since a label used twice is fatal at boot; both keys pull the same `iss` meanwhile, and the last-pull metric shows two series for that `aid` until the old entry is removed (a redeploy, which clears its series).
 - **Review.** `scripts/audit-review.ts` is a read-only report over `admin_audit_log`, telemetry and the state tables for a `--since`/`--until` range, grouped by key label, route, source IP and outcome, with unattributed mutations flagged (`npx tsx scripts/audit-review.ts --since 2026-05-23 [--known-actors key:console-*,...] [--json]`; reads `AUDIT_REVIEW_DATABASE_URL` or `DATABASE_URL`, and opens a `default_transaction_read_only` session). Not every row comes from a key: a `webhook.unsubscribed` row (a receiver answered `410 Gone`) has actor `system:webhook-delivery`, so include `system:*` in `--known-actors` to keep those rows out of the flagged list.
 
 `ENROLLMENT_SECRET` is the **server-side** HMAC key the CP uses to mint and verify enrollment tokens. Callers never present it directly. A production server whose value is unset or shorter than 32 characters refuses to start, so the enrollment `503 SERVER_MISCONFIGURED` below is something you should only see from a non-production deployment — see [operations.md](operations.md#authentication--exposure).
@@ -355,6 +356,7 @@ sequenceDiagram
 |---|---|---|---|
 | POST | `/api/revocation/entries` | API key | Record a revoked JTI against its issuer |
 | GET | `/api/revocations?iss=<aid>` | API key, or that issuer's [issuer key](#issuer-keys) | That issuer's entries, ready for it to sign |
+| GET | `/api/revocation/issuers` | API key | Issuers that have entries, with counts |
 
 #### `POST /api/revocation/entries`
 
@@ -391,9 +393,17 @@ Every entry recorded for `iss`, oldest `revoked_at` first. This is the full set,
 
 **Verifiers** never talk to the CP for revocation. They fetch the issuer's list, verify it with `verifyRevocationList` pinning **the TCT's issuer** as the expected issuer, and branch on the thrown error's `.code` — see [aitp-rs Node SDK: Revocation lists](https://github.com/agentidentitytrustprotocol/aitp-rs/blob/main/docs/sdk-node.md#revocation-lists-rfc-aitp-0008). Freshness and what to do when a list goes stale are the verifier's policy: [RFC-AITP-0008 §3.1 (Modes)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#31-modes) and [§3.2 (Staleness)](https://github.com/agentidentitytrustprotocol/agentidentitytrustprotocol/blob/main/rfcs/RFC-AITP-0008-revocation.md#32-staleness).
 
+#### `GET /api/revocation/issuers`
+
+```json
+{ "issuers": [{ "iss": "aid:pubkey:...", "entries": 2 }], "limit": 100, "offset": 0 }
+```
+
+Every issuer with at least one entry, and how many it has, ordered by `iss`, so an admin view can skip issuers with nothing to relay instead of pulling `/api/revocations` once per known issuer. Paged with `?limit=` (default 100, clamped to 1-1000) and `?offset=` (default 0). There is no total: a page shorter than `limit` is the last. An issuer that gets its first entry between two page requests shifts the later pages by one, so a full read is exact only from a single page. An entry with no `iss` is relayed to nobody and is not counted. Admin keys only: an issuer key is `401` here. `Cache-Control: no-store`.
+
 #### Issuer keys
 
-An issuing agent pulls with its own key from `ISSUER_KEYS` (`label@aid=key`, comma-separated), not an admin key. An issuer key opens **only** `GET /api/revocations`, and only for `iss` equal to the AID it is bound to. Anywhere else it is an unknown key (`401 INVALID_API_KEY`). A key listed in both `ISSUER_KEYS` and `API_KEYS` is refused at boot with a warning, so an issuer key never carries admin rights. Its label names the agent's series in `aitp_control_plane_revocation_last_pull_timestamp_seconds` ([`operations.md`](operations.md#revocation-relay)). A bearer key rather than a signed request because the aitp SDK has no request-signing primitive yet; that is the trigger to replace it.
+An issuing agent pulls with its own key from `ISSUER_KEYS` (`label@aid=key`, comma-separated), not an admin key. An issuer key opens **only** `GET /api/revocations`, and only for `iss` equal to the AID it is bound to. Anywhere else it is an unknown key (`401 INVALID_API_KEY`). A key listed in both `ISSUER_KEYS` and `API_KEYS` is refused at boot with a warning, so an issuer key never carries admin rights. Its label and bound AID name the agent's series (`issuer` and `aid`) in `aitp_control_plane_revocation_last_pull_timestamp_seconds` ([`operations.md`](operations.md#revocation-relay)). A bearer key rather than a signed request because the aitp SDK has no request-signing primitive yet; that is the trigger to replace it.
 
 ### Webhooks
 
