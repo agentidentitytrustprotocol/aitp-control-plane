@@ -25,7 +25,11 @@ import { POST } from '../route';
 const realFetch = global.fetch;
 const OLD_JWKS = { keys: [{ kty: 'OKP', crv: 'Ed25519', x: 'old', kid: 'old' }] };
 const NEW_JWKS = { keys: [{ kty: 'OKP', crv: 'Ed25519', x: 'new', kid: 'new' }] };
-const CACHED_AT = '2026-01-01T00:00:00.000Z';
+// Fresh, not a fixed past date: a stale cached anchor is picked up by any
+// refreshStaleJwks() pass on the shared database, including the one in
+// jwks-refresher.integration.test.ts (a parallel worker whose stubbed fetch
+// answers every URL), which then overwrites the cache these tests assert on.
+const CACHED_AT = new Date().toISOString();
 
 afterAll(async () => {
   await pool.end();
