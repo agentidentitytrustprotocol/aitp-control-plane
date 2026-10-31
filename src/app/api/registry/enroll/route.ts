@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { MANIFEST_BODY_MAX_BYTES, readLimitedBody } from '@/lib/http/read-body';
 import { childLogger } from '@/lib/logger';
 import { recordEnrollFailure } from '@/lib/registry/enroll-metrics';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
@@ -63,10 +64,9 @@ const SDK_EXPIRED_CODE = 'expired';
  * line, by code.
  *
  * Deliberately logs NOTHING about the manifest — not the body, not the AID.
- * The body is unauthenticated attacker-controlled input and this route applies
- * NO size limit to it (`req.text()` below is unbounded; `readBodyTextWithLimit`
- * is used only by events/route.ts), so logging it at warn level on a public
- * endpoint is an unbounded log-volume amplification vector. The code plus the request id is enough to chart and
+ * The body is unauthenticated attacker-controlled input (capped at
+ * MANIFEST_BODY_MAX_BYTES, but still up to 256 KiB per request), so logging it
+ * at warn level on a public endpoint is a log-volume amplification vector. The code plus the request id is enough to chart and
  * alert on, and the request id is bound explicitly here: nothing else in this
  * service puts one on a log line, so without this the line could not be
  * correlated to a request at all.
@@ -99,7 +99,10 @@ function recordFailure(
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.text();
+  // Public and unauthenticated, so the body is read with a ceiling (#150).
+  const read = await readLimitedBody(req, MANIFEST_BODY_MAX_BYTES);
+  if (!read.ok) return read.response;
+  const body = read.text;
   // Pre-validate JSON shape so the caller gets "body must be ManifestEnvelope"
   // instead of a Rust serde error string when they POST something unrelated.
   try {

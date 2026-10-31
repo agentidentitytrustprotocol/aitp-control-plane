@@ -14,6 +14,8 @@
  * path id, `BODY_INVALID` for a body field, `BAD_REQUEST` for a query param.
  */
 
+import { ADMIN_JSON_MAX_BYTES, readLimitedBody } from './read-body';
+
 /**
  * RFC 4122 versions 1-5 only — the rule the `jti` / `root_jti` / `parent_jti`
  * checks have always applied (delegations, revocation entries, the TCT
@@ -108,14 +110,21 @@ export type JsonObjectResult =
   | { ok: false; response: Response };
 
 /**
- * Parse the request body as a JSON OBJECT. A body that is not JSON, or is JSON
- * but not a plain object (`null`, an array, a string, a number, a boolean),
- * yields a `400 BODY_INVALID` response for the caller to return as-is.
+ * Parse the request body as a JSON OBJECT. A body over `maxBytes` yields
+ * `413 PAYLOAD_TOO_LARGE` (read with a streaming ceiling, never buffered
+ * whole). A body that is not JSON, or is JSON but not a plain object (`null`,
+ * an array, a string, a number, a boolean), yields a `400 BODY_INVALID`
+ * response. Either is for the caller to return as-is.
  */
-export async function readJsonObject(req: Request): Promise<JsonObjectResult> {
+export async function readJsonObject(
+  req: Request,
+  maxBytes: number = ADMIN_JSON_MAX_BYTES,
+): Promise<JsonObjectResult> {
+  const read = await readLimitedBody(req, maxBytes);
+  if (!read.ok) return read;
   let parsed: unknown;
   try {
-    parsed = await req.json();
+    parsed = JSON.parse(read.text);
   } catch {
     return { ok: false, response: badRequest('body must be JSON') };
   }

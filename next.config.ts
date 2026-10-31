@@ -96,6 +96,17 @@ const nextConfig: NextConfig = {
     '@grpc/grpc-js',
   ],
 
+  // src/proxy.ts runs on every /api/* request, so Next clones each request
+  // body into memory before the route handler reads it (default cap 10 MB).
+  // This caps that copy (#150). It must stay ABOVE every route's own ceiling
+  // (src/lib/http/read-body.ts, 256 KiB max) by more than one socket chunk:
+  // Next silently TRUNCATES at this cap, and a route must see more than its
+  // ceiling to answer 413 rather than parse a cut-off body. Pinned by
+  // src/lib/http/proxy-body-limit.test.ts.
+  experimental: {
+    proxyClientMaxBodySize: '1mb',
+  },
+
   async rewrites() {
     return [
       {

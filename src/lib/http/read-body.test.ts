@@ -1,4 +1,4 @@
-import { BodyTooLargeError, readBodyTextWithLimit } from './read-body';
+import { BodyTooLargeError, readBodyTextWithLimit, readLimitedBody } from './read-body';
 
 /** Build a Request whose body streams the given chunks one read() at a
  * time, so the byte-ceiling logic is exercised incrementally rather than
@@ -86,5 +86,94 @@ describe('readBodyTextWithLimit', () => {
     expect(err.name).toBe('BodyTooLargeError');
     expect(err.maxBytes).toBe(2048);
     expect(err.message).toContain('2048');
+  });
+});
+
+describe('readBodyTextWithLimit decodes like Request.text()', () => {
+  it.each([
+    ['a leading BOM', new Uint8Array([0xef, 0xbb, 0xbf, 0x7b, 0x7d])],
+    ['an invalid sequence', new Uint8Array([0x7b, 0xff, 0x7d])],
+  ])('%s', async (_name, bytes) => {
+    const expected = await new Request('http://x', { method: 'POST', body: bytes }).text();
+    await expect(readBodyTextWithLimit(streamingRequest([bytes]), 100)).resolves.toBe(expected);
+  });
+});
+
+describe('readBodyTextWithLimit on an endless stream', () => {
+  it('stops pulling and cancels the stream once over the ceiling', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const req = new Request('http://x', {
+      method: 'POST',
+      body: stream,
+      // @ts-expect-error duplex is valid at runtime but missing from the DOM lib types
+      duplex: 'half',
+    });
+    await expect(readBodyTextWithLimit(req, 4096)).rejects.toBeInstanceOf(BodyTooLargeError);
+    expect(cancelled).toBe(true);
+    // 5 chunks cross 4096; a small read-ahead is the stream's, not ours.
+    expect(pulls).toBeLessThan(10);
+  });
+});
+
+describe('readLimitedBody', () => {
+  it('returns the text under the ceiling', async () => {
+    const r = await readLimitedBody(new Request('http://x', { method: 'POST', body: 'abc' }), 3);
+    expect(r).toEqual({ ok: true, text: 'abc' });
+  });
+
+  it('answers 413 PAYLOAD_TOO_LARGE one byte over', async () => {
+    const r = await readLimitedBody(new Request('http://x', { method: 'POST', body: 'abcd' }), 3);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.response.status).toBe(413);
+    await expect(r.response.json()).resolves.toEqual({
+      error: 'request body exceeds 3 bytes',
+      code: 'PAYLOAD_TOO_LARGE',
+    });
+  });
+
+  it('refuses a declared Content-Length over the ceiling without reading', async () => {
+    const req = new Request('http://x', {
+      method: 'POST',
+      body: 'ab',
+      headers: { 'content-length': '999' },
+    });
+    const r = await readLimitedBody(req, 3);
+    expect(r.ok).toBe(false);
+    expect(req.bodyUsed).toBe(false);
+  });
+
+  it('still enforces the ceiling when Content-Length understates the body', async () => {
+    const req = streamingRequest([enc.encode('abcd')]);
+    const r = await readLimitedBody(
+      new Request(req, { headers: { 'content-length': '1' } }),
+      3,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it('rethrows a stream fault that is not about size', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error('socket reset'));
+      },
+    });
+    const req = new Request('http://x', {
+      method: 'POST',
+      body: stream,
+      // @ts-expect-error duplex is valid at runtime but missing from the DOM lib types
+      duplex: 'half',
+    });
+    await expect(readLimitedBody(req, 10)).rejects.toThrow('socket reset');
   });
 });

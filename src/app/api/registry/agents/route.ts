@@ -13,6 +13,7 @@ import { dispatchWebhooks } from '@/lib/webhooks/service';
 import { logger } from '@/lib/logger';
 import { withIdempotency } from '@/lib/idempotency';
 import { parsePagination } from '@/lib/pagination';
+import { MANIFEST_BODY_MAX_BYTES, readLimitedBody } from '@/lib/http/read-body';
 import { badRequest, checkColumnString, checkQueryParam } from '@/lib/http/validate';
 import { randomUUID } from 'node:crypto';
 
@@ -112,7 +113,12 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = req.headers.get('authorization') ?? '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
-  const body = await req.text();
+  // Read with a ceiling before the token check and any database work (#150):
+  // the body is read before the token can be checked, since the token binds it.
+  // A 413 is answered outside withIdempotency, so it is never stored against a key.
+  const read = await readLimitedBody(req, MANIFEST_BODY_MAX_BYTES);
+  if (!read.ok) return read.response;
+  const body = read.text;
 
   return withIdempotency(req, 'agents.register', async () => {
     let envelope: ManifestEnvelope;
