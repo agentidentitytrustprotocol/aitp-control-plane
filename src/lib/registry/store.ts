@@ -1,5 +1,5 @@
 import { and, asc, eq, gte, inArray, isNull, or, sql } from 'drizzle-orm';
-import { db } from '../db';
+import { db, type DbExecutor } from '../db';
 import { agents, type Agent } from '../db/schema';
 
 export interface RegistryFilters {
@@ -70,9 +70,12 @@ export async function getAgent(aid: string): Promise<Agent | undefined> {
   return rows[0];
 }
 
-export async function upsertAgent(input: RegisterInput): Promise<void> {
+export async function upsertAgent(
+  input: RegisterInput,
+  executor: DbExecutor = db,
+): Promise<void> {
   const enrolledAt = new Date().toISOString();
-  await db
+  await executor
     .insert(agents)
     .values({
       aid: input.aid,
