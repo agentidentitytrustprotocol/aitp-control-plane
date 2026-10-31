@@ -134,8 +134,10 @@ components:
       description: >-
         `code` is `PAYLOAD_TOO_LARGE` — the body is over this route's ceiling
         (256 KiB for the registry routes, 64 KiB for admin JSON routes; see
-        docs/api.md Conventions). Checked on the streamed bytes before any
-        other check, and on a declared `Content-Length` before reading.
+        docs/api.md Conventions). Checked on a declared `Content-Length`
+        and on the bytes actually read, before the route's body and token
+        checks. Sent once the upload has finished; the server keeps at most
+        1 MiB of any body.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
