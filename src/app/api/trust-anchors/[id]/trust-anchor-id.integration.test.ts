@@ -165,7 +165,9 @@ describe('integration: PATCH /api/trust-anchors/:id URL changes vs the JWKS cach
         patched = true;
         return Response.json(OLD_JWKS);
       }
-      return Response.json({ keys: [] });
+      // 404 any other anchor's URL: this pass walks every stale anchor in the
+      // shared database, and a 200 here would cache onto another file's rows.
+      return new Response('not ours', { status: 404 });
     }) as typeof fetch;
 
     await refreshStaleJwks();
@@ -180,7 +182,7 @@ describe('integration: PATCH /api/trust-anchors/:id URL changes vs the JWKS cach
     global.fetch = (async (input: unknown) =>
       String(input) === newJwksUrl
         ? Response.json(NEW_JWKS)
-        : Response.json({ keys: [] })) as typeof fetch;
+        : new Response('not ours', { status: 404 })) as typeof fetch;
     await refreshStaleJwks();
     r = await row(id);
     expect(r.jwksCache).toEqual(NEW_JWKS);
