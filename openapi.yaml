@@ -1194,10 +1194,11 @@ paths:
             consumed; re-enroll with a current SDK); `MANIFEST_EXPIRED`
             when `manifest.expires_at` is inside the 5-minute registration
             window (the same code `POST /api/registry/enroll` returns for that
-            condition; checked before the `jti` is consumed); `BODY_INVALID` when `manifest.extensions.namespace` is
-            present but not a string, or — when no `X-Aitp-Namespace` header is
-            sent — is over 128 characters or contains a NUL (also before the
-            `jti` is consumed); `BODY_INVALID` when a manifest value cannot be stored —
+            condition; checked before the `jti` is consumed); `BODY_INVALID`
+            when `manifest.extensions.namespace` is present but not a string,
+            or — when no `X-Aitp-Namespace` header is sent — is over 128
+            characters or contains a NUL (also before the `jti` is consumed);
+            `BODY_INVALID` when a manifest value cannot be stored —
             `display_name` (or, when absent, `aid`) over 256 characters, `aid`
             over 512, a NUL in `aid`, `display_name` or `handshake_endpoint`, a
             non-string `handshake_endpoint`, `offered_capabilities` that is
@@ -1212,8 +1213,9 @@ paths:
             a `400` never burns the token: the same token gets the same answer
             again, not `401 TOKEN_REPLAYED`. The token is bound to the exact
             body bytes (its `msh` claim), so a corrected manifest still needs a
-            fresh token from `POST /api/registry/enroll`. A `400` is stored against an `Idempotency-Key`, so a retry
-            with the same key replays it; retry with a new key or none.
+            fresh token from `POST /api/registry/enroll`. A `400` is stored
+            against an `Idempotency-Key`, so a retry with the same key replays
+            it; retry with a new key or none.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1227,9 +1229,9 @@ paths:
             malformed, bad signature, or an unparseable payload — or
             `TOKEN_REPLAYED`, meaning a still-valid token was presented a second
             time: the `jti` is consumed in the same database transaction as the
-            registration it authorizes (a registration that fails with a
-            `500` leaves the token usable; of two concurrent uses exactly one
-            succeeds), so a captured
+            registration it authorizes (if storing the agent fails, the
+            consume rolls back with it and the token stays usable; of two
+            concurrent uses exactly one succeeds), so a captured
             token cannot resurrect a deregistered agent or overwrite a
             registration an operator has since changed.
 
