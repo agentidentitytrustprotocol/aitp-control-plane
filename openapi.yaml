@@ -130,6 +130,15 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: >-
+        `code` is `PAYLOAD_TOO_LARGE` — the body is over this route's ceiling
+        (256 KiB for the registry routes, 64 KiB for admin JSON routes; see
+        docs/api.md Conventions). Checked on the streamed bytes before any
+        other check, and on a declared `Content-Length` before reading.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     GateMisconfigured:
       description: >-
         `code` is `SERVER_MISCONFIGURED` — production server with an empty
@@ -1063,6 +1072,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ManifestVerificationError" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "429":
           description: Rate limited — the strict per-IP `enroll-ip` bucket.
           content:
@@ -1229,6 +1239,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "429":
           description: >-
             Rate limited. `bucket` is `public-ip`: this path is public as far as
@@ -1613,6 +1624,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "500":
           description: >-
             An internal fault — in practice a database one. This route rethrows
@@ -1752,6 +1764,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}:
@@ -1794,6 +1807,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [webhooks]
@@ -2018,6 +2032,7 @@ paths:
                         properties:
                           id: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/trust-anchors/{id}:
@@ -2122,6 +2137,7 @@ paths:
                         properties:
                           id: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [trust]
@@ -2337,6 +2353,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "500":
           description: >-
             An internal fault — in practice a database one; no caller input
