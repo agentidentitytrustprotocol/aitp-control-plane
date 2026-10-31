@@ -186,7 +186,7 @@ Caches the response of a mutating request keyed by `(scope, key)`.
 | `created_at` | timestamptz | Indexed; aged out after `IDEMPOTENCY_KEY_TTL_DAYS` |
 
 ### `enrollment_jtis` — one-time-token enforcement
-A consumed enrollment-token `jti` lands here; a replay conflicts on the PK.
+A consumed enrollment-token `jti` lands here, inserted in the same transaction as the `agents` upsert it authorizes (so a failed registration rolls it back); a replay conflicts on the PK.
 
 | Column | Type | Notes |
 |---|---|---|

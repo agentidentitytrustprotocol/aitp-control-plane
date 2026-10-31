@@ -30,4 +30,8 @@ function createDb() {
 export const db = globalThis.__db ?? (globalThis.__db = createDb());
 export const pool = globalThis.__dbPool!;
 export type Db = typeof db;
+/** A transaction handle: the same query API as `db`, bound to one connection. */
+export type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
+/** Either: lets a store function run alone or inside a caller's transaction. */
+export type DbExecutor = Db | DbTx;
 export { schema };

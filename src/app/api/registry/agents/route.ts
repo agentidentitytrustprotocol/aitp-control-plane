@@ -1,8 +1,8 @@
 import { NextRequest } from 'next/server';
 import { getEnrollmentService } from '@/lib/registry/enrollment';
 import { EnrollmentConfigError } from '@/lib/registry/enrollment-config';
-import { consumeEnrollmentJti } from '@/lib/registry/jti-store';
-import { listAgents, upsertAgent } from '@/lib/registry/store';
+import { registerConsumingJti } from '@/lib/registry/register';
+import { listAgents } from '@/lib/registry/store';
 import { checkManifestColumns } from '@/lib/registry/manifest-columns';
 import { SUPPORTED_MANIFEST_VERSION } from '@/lib/registry/manifest-version';
 import { ingestOneEvent } from '@/lib/audit/event-store';
@@ -262,7 +262,7 @@ export async function POST(req: NextRequest) {
 
     // The manifest values `upsertAgent` stores (aid, display_name,
     // handshake_endpoint, offered_capabilities) must fit their columns, or the
-    // upsert fails with a 500 AFTER the jti below has been burned. `/enroll`
+    // upsert fails with an unclassified 500 on every retry. `/enroll`
     // refuses to mint a token for such a manifest, so this is defence in
     // depth — for tokens minted before that check existed. Before the jti is
     // consumed, like the header check above.
@@ -286,21 +286,8 @@ export async function POST(req: NextRequest) {
       };
     }
 
-    // One-time-token enforcement: atomically consume the jti. A second
-    // presentation of the same (still-valid) token is a replay — reject
-    // it so a captured token can't resurrect a deregistered agent or
-    // overwrite a registration after the operator changed it.
-    const firstUse = await consumeEnrollmentJti(tokenPayload.jti, tokenPayload.exp);
-    if (!firstUse) {
-      return {
-        status: 401,
-        body: {
-          error: 'enrollment token already used',
-          code: 'TOKEN_REPLAYED',
-        },
-      };
-    }
-
+    // Every check that depends only on this request runs BEFORE the jti is
+    // consumed (#151), so none of them spends the one-time token.
     if (manifest.expires_at) {
       const expiresMs = manifest.expires_at * 1000;
       if (expiresMs < Date.now() + REGISTRATION_EXPIRY_GUARD_MS) {
@@ -336,7 +323,13 @@ export async function POST(req: NextRequest) {
     const namespace =
       headerNamespace ?? (typeof extNamespace === 'string' ? extNamespace : undefined);
 
-    await upsertAgent({
+    // One-time-token enforcement: the jti is consumed in the SAME transaction
+    // as the upsert (#151). A second presentation of a token whose
+    // registration committed is a replay — rejected so a captured token can't
+    // resurrect a deregistered agent or overwrite a registration after the
+    // operator changed it. An upsert fault rolls the consume back, so the
+    // caller can retry with the same token.
+    const registered = await registerConsumingJti(tokenPayload, {
       aid: manifest.aid,
       displayName: manifest.display_name ?? manifest.aid,
       handshakeEndpoint: manifest.handshake_endpoint,
@@ -347,6 +340,15 @@ export async function POST(req: NextRequest) {
         : null,
       namespace,
     });
+    if (!registered) {
+      return {
+        status: 401,
+        body: {
+          error: 'enrollment token already used',
+          code: 'TOKEN_REPLAYED',
+        },
+      };
+    }
 
     const event: AuditEventRecord = {
       id: randomUUID(),

@@ -24,6 +24,8 @@
 //     asserted verbatim, because it is deliberately echoed to the caller and
 //     an over-broad redaction would otherwise remove their only signal.
 //   • 401 TOKEN_REPLAYED when the jti was already consumed.
+//   • MANIFEST_EXPIRED and the manifest.extensions.namespace BODY_INVALIDs
+//     answer BEFORE the jti is consumed, so they do not spend the token (#151).
 //
 // POST — manifest handling
 //   • 400 MANIFEST_EXPIRED for a manifest expiring inside the 5-minute guard.
@@ -71,9 +73,17 @@ let getServiceImpl: () => { validateToken: (...args: unknown[]) => unknown };
 jest.mock('@/lib/registry/enrollment', () => ({
   getEnrollmentService: () => getServiceImpl(),
 }));
-jest.mock('@/lib/registry/jti-store', () => ({
-  consumeEnrollmentJti: (jti: string, exp: number) =>
-    consumeEnrollmentJtiMock(jti, exp),
+// The route consumes the jti and upserts in one transaction through
+// registerConsumingJti (#151). Its stand-in runs the same two steps in the
+// same order against the two mocks, so a test can still tell which ran;
+// the transaction itself is covered by register.test.ts and the integration
+// test src/e2e/enrollment-token.integration.test.ts.
+jest.mock('@/lib/registry/register', () => ({
+  registerConsumingJti: async (token: { jti: string; exp: number }, input: unknown) => {
+    if (!(await consumeEnrollmentJtiMock(token.jti, token.exp))) return false;
+    await upsertAgentMock(input);
+    return true;
+  },
 }));
 jest.mock('@/lib/audit/event-store', () => ({
   ingestOneEvent: (e: unknown) => ingestOneEventMock(e),
@@ -186,6 +196,8 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     const body = (await res.json()) as { code: string; error: string };
     expect(body.code).toBe('MANIFEST_EXPIRED');
     expect(body.error).toMatch(/5 minutes/);
+    // Before the consume (#151): this 400 does not spend the token.
+    expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
     expect(upsertAgentMock).not.toHaveBeenCalled();
   });
 
@@ -498,6 +510,7 @@ describe('POST /api/registry/agents (Plan Bug 6)', () => {
     );
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('BODY_INVALID');
+    expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
   });
 });
 
@@ -620,6 +633,7 @@ describe('POST /api/registry/agents — envelope and namespace validation (P1b)'
     );
     expect(res.status).toBe(400);
     expect(((await res.json()) as { code: string }).code).toBe('BODY_INVALID');
+    expect(consumeEnrollmentJtiMock).not.toHaveBeenCalled();
     expect(upsertAgentMock).not.toHaveBeenCalled();
   });
 });
