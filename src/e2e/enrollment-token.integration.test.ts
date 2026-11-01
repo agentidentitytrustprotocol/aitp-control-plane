@@ -83,7 +83,7 @@ function agent(): AitpAgent {
 function manifestOf(a: AitpAgent, ttlSecs = 3600): string {
   return a.buildManifest({
     displayName: 'e2e-token',
-    handshakeEndpoint: 'http://e2e-token.local/aitp',
+    handshakeEndpoint: 'https://e2e-token.local/aitp',
     offeredCaps: ['demo.echo'],
     ttlSecs,
   });

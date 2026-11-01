@@ -44,7 +44,7 @@ when nothing matches is described in
 [`control-plane.md` § Discovery][pg-cp].
 
 ```json
-{ "agents": [ { "aid": "aid:pubkey:ed25519:...", "handshakeEndpoint": "http://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
+{ "agents": [ { "aid": "aid:pubkey:ed25519:...", "handshakeEndpoint": "https://agent-host:8101/aitp", "offeredCaps": ["demo.echo"], "status": "active", "namespace": "default", "...": "..." } ] }
 ```
 
 The CP **must** include `handshakeEndpoint` on every record and keep the

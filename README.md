@@ -63,6 +63,7 @@ rate-limit, retention, and telemetry subsystems behave.
 |---|---|---|---|
 | `PORT` | no | `4000` | HTTP listen port |
 | `CP_BASE_URL` | recommended (prod) | `http://localhost:4000` | Public `https://` base URL used in the CP's own manifest. In production an unset, loopback or non-https value logs a boot warning (not fatal). |
+| `AITP_INSECURE_LOCALHOST_DANGEROUS` | no | unset | Local testing only. `true` accepts an `http://localhost` or `http://127.0.0.1` `handshake_endpoint` in agent Manifests, and only under `NODE_ENV=development` or `test`; any other `NODE_ENV` ignores it. Never set it in a deployment. |
 | `CP_AID_SEED_HEX` | **prod** | empty | 32-byte hex seed (64 hex chars) for the CP's own Ed25519 identity. Outside production an unset seed is replaced by a random one on every boot, so the CP AID changes on restart. **Checked at boot: with `NODE_ENV=production` a missing seed, or one that does not decode to 32 bytes, makes the process print one fatal line and exit 1.** Trailing non-hex characters (or a 65th hex digit) after the 64 hex digits are accepted with the same AID (boot warning only) — see [operations.md](docs/operations.md#identity). |
 | `DATABASE_URL` | yes | none at runtime (`.env.example` and `drizzle-kit` use `postgres://postgres:postgres@localhost:5432/aitp_control_plane`) | Postgres connection string. The runtime pool passes it straight to `pg`, so leaving it unset falls back to `pg`'s own `PG*` defaults rather than this URL. |
 | `DB_POOL_MAX` | no | `20` | Connection pool size |

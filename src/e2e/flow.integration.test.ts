@@ -88,13 +88,13 @@ describe('integration: enroll → register → discover → event → revoke flo
     // 5-minute guard requires ttlSecs > 300 + a small buffer.
     researcherManifest = researcher.buildManifest({
       displayName: 'e2e-researcher',
-      handshakeEndpoint: 'http://e2e-researcher.local/aitp',
+      handshakeEndpoint: 'https://e2e-researcher.local/aitp',
       offeredCaps: ['demo.echo'],
       ttlSecs: 3600,
     });
     writerManifest = writer.buildManifest({
       displayName: 'e2e-writer',
-      handshakeEndpoint: 'http://e2e-writer.local/aitp',
+      handshakeEndpoint: 'https://e2e-writer.local/aitp',
       offeredCaps: ['demo.write'],
       ttlSecs: 3600,
     });
@@ -158,6 +158,29 @@ describe('integration: enroll → register → discover → event → revoke flo
     writerToken = body2.token;
   });
 
+  it('refuses an http:// handshake_endpoint by default, loopback included', async () => {
+    for (const handshakeEndpoint of [
+      'http://localhost:8101/aitp',
+      'http://127.0.0.1:8101/aitp',
+      'http://e2e-plain.local/aitp',
+    ]) {
+      const manifest = AitpAgent.generate().buildManifest({
+        displayName: 'e2e-plain-http',
+        handshakeEndpoint,
+        offeredCaps: ['demo.echo'],
+        ttlSecs: 3600,
+      });
+      const res = await enrollPost(
+        mkReq('http://localhost/api/registry/enroll', { method: 'POST', body: manifest }),
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        code: 'MANIFEST_INVALID',
+        verifyCode: 'malformed',
+      });
+    }
+  });
+
   it('returns a real SDK verifyCode when enroll rejects an expired manifest', async () => {
     // The only test in the suite that proves an actual aitp code reaches an
     // actual HTTP body — every other enroll failure test mocks the service,
@@ -166,7 +189,7 @@ describe('integration: enroll → register → discover → event → revoke flo
     const stale = AitpAgent.generate();
     const expiredManifest = stale.buildManifest({
       displayName: 'e2e-expired',
-      handshakeEndpoint: 'http://e2e-expired.local/aitp',
+      handshakeEndpoint: 'https://e2e-expired.local/aitp',
       offeredCaps: ['demo.echo'],
       ttlSecs: -3600, // already past expires_at, so the SDK itself rejects it
     });
@@ -220,7 +243,7 @@ describe('integration: enroll → register → discover → event → revoke flo
     const shortLived = AitpAgent.generate();
     const shortManifest = shortLived.buildManifest({
       displayName: 'e2e-short-ttl',
-      handshakeEndpoint: 'http://e2e-short.local/aitp',
+      handshakeEndpoint: 'https://e2e-short.local/aitp',
       offeredCaps: ['demo.echo'],
       ttlSecs: 60, // inside the 5-minute guard, but NOT expired
     });
@@ -259,7 +282,7 @@ describe('integration: enroll → register → discover → event → revoke flo
     const shortLived = AitpAgent.generate();
     const shortManifest = shortLived.buildManifest({
       displayName: 'e2e-cross-route',
-      handshakeEndpoint: 'http://e2e-cross.local/aitp',
+      handshakeEndpoint: 'https://e2e-cross.local/aitp',
       offeredCaps: ['demo.echo'],
       ttlSecs: 60, // same aid, TTL inside the guard
     });
@@ -350,7 +373,7 @@ describe('integration: enroll → register → discover → event → revoke flo
     };
     expect(echoBody.agents.some((a) => a.aid === researcher.aid)).toBe(true);
     expect(echoBody.agents.find((a) => a.aid === researcher.aid)?.handshakeEndpoint).toBe(
-      'http://e2e-researcher.local/aitp',
+      'https://e2e-researcher.local/aitp',
     );
     expect(writeBody.agents.some((a) => a.aid === writer.aid)).toBe(true);
   });

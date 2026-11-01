@@ -41,6 +41,11 @@ signs its own (see [Revocation relay](#revocation-relay)).
   endpoint — the field is required by RFC-AITP-0003 §3.1 and the manifest
   schema, so it cannot be omitted — but the CP serves no handshake route: that
   URL returns `404`. The CP is an observer and signer, not a handshake peer.
+- **`AITP_INSECURE_LOCALHOST_DANGEROUS`** — local testing only, off by default.
+  Agent Manifests must advertise an `https://` handshake endpoint. Setting this
+  to `true` also accepts `http://localhost` and `http://127.0.0.1`, and only when
+  `NODE_ENV` is `development` or `test`: every other `NODE_ENV` ignores it. Any
+  other plain-HTTP host is refused either way. Never set it in a deployment.
 - The CP's own manifest has a **86400s (24h) TTL** (`MANIFEST_TTL_SECS`) and
   is rebuilt in place once it comes within **3600s** of expiry
   (`MANIFEST_REBUILD_MARGIN_SECS`), on the next call to `getCpManifestJson()`

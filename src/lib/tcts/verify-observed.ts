@@ -28,6 +28,7 @@
 
 import { verifyDelegation } from 'aitp';
 import { getCpAgent } from '../identity/cp-agent';
+import { insecureLocalhostDangerous } from '../registry/insecure-localhost';
 
 /** See the module comment: authenticity only, revocation is projected elsewhere. */
 const OBSERVE_REVOCATION = 'fail_open';
@@ -158,7 +159,14 @@ export function verifyObservedDelegation(
     };
   }
   try {
-    verifyDelegation(token, aud, issuerManifests, null, OBSERVE_REVOCATION);
+    verifyDelegation(
+      token,
+      aud,
+      issuerManifests,
+      null,
+      OBSERVE_REVOCATION,
+      insecureLocalhostDangerous(),
+    );
     return { attempted: true, verified: true, error: null };
   } catch (err) {
     return failure(err);
