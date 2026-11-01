@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { verifyManifestJson } from 'aitp';
 import { config } from '../config';
 import { assertEnrollmentSecretUsable } from './enrollment-config';
+import { insecureLocalhostDangerous } from './insecure-localhost';
 import { checkManifestColumns } from './manifest-columns';
 import { ManifestRejectedError, markSdkVerifyFailure } from './verify-error';
 
@@ -108,7 +109,7 @@ export class EnrollmentService {
     // A future second call site of `verifyManifestJson` must mark too; see
     // `markSdkVerifyFailure` for what forgetting costs and why it is loud.
     try {
-      verifyManifestJson(manifestEnvelopeJson);
+      verifyManifestJson(manifestEnvelopeJson, null, insecureLocalhostDangerous());
     } catch (err) {
       markSdkVerifyFailure(err);
       throw err;

@@ -130,7 +130,7 @@ describe('integration: retention sweep', () => {
       {
         aid: probeAid,
         displayName: 'retention-probe-old',
-        handshakeEndpoint: 'http://test.invalid',
+        handshakeEndpoint: 'https://test.invalid',
         offeredCaps: [],
         manifestJson: '{}',
         status: 'deregistered',
@@ -140,7 +140,7 @@ describe('integration: retention sweep', () => {
       {
         aid: otherAid,
         displayName: 'retention-probe-fresh',
-        handshakeEndpoint: 'http://test.invalid',
+        handshakeEndpoint: 'https://test.invalid',
         offeredCaps: [],
         manifestJson: '{}',
         status: 'deregistered',

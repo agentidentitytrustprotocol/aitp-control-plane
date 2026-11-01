@@ -156,7 +156,7 @@ other top-level keys are fixture metadata):
   "manifest": {
     "aid": "aid:pubkey:ed25519:<43-char base64url public key>",
     "display_name": "researcher-1",
-    "handshake_endpoint": "http://agent-host:8101/aitp",
+    "handshake_endpoint": "https://agent-host:8101/aitp",
     "offered_capabilities": ["demo.echo"],
     "expires_at": 1790000000,
     "extensions": { "namespace": "default" }
@@ -166,7 +166,7 @@ other top-level keys are fixture metadata):
 
 The CP verifies the manifest with the `aitp` SDK and returns `200 { token, expiresIn, aid }` — a single-use enrollment token valid for 5 minutes. Errors:
 
-- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, `manifest.aid` is missing or does not start with `aid:`, or the manifest verified but holds a value the registry cannot store: `display_name` over 256 characters (Unicode code points) or not a string, `aid` over 512 characters — or, with no `display_name`, over 256, since the AID is then stored as the display name — a NUL (U+0000) in `aid`, `display_name` or `handshake_endpoint`, a `handshake_endpoint` that is not a string, `offered_capabilities` that is not an array of NUL-free, well-formed strings, or an `expires_at` that is not a number of Unix seconds between years 0001 and 9999 (`0`, `null` or absent means no expiry). Rejected here so no token is minted for a manifest `POST /api/registry/agents` could never store. Checked after the expiry guard, so a manifest that fails both reports `MANIFEST_EXPIRED`.
+- `400 MANIFEST_INVALID` — the body has no `manifest` object, the SDK rejected the manifest, `manifest.aid` is missing or does not start with `aid:`, or the manifest verified but holds a value the registry cannot store: `display_name` over 256 characters (Unicode code points) or not a string, `aid` over 512 characters — or, with no `display_name`, over 256, since the AID is then stored as the display name — a NUL (U+0000) in `aid`, `display_name` or `handshake_endpoint`, a `handshake_endpoint` that is not a string, `offered_capabilities` that is not an array of NUL-free, well-formed strings, or an `expires_at` that is not a number of Unix seconds between years 0001 and 9999 (`0`, `null` or absent means no expiry). Rejected here so no token is minted for a manifest `POST /api/registry/agents` could never store. Checked after the expiry guard, so a manifest that fails both reports `MANIFEST_EXPIRED`. The SDK enforces the manifest schema first: `handshake_endpoint` must be `https://` and `display_name` at most 128 characters, so a value outside the schema answers `verifyCode: "malformed"`. Plain `http://` on `localhost` or `127.0.0.1` is accepted only for local testing (`AITP_INSECURE_LOCALHOST_DANGEROUS`, see [operations](operations.md)), never in production.
 - `400 MANIFEST_EXPIRED` — the manifest is already past `expires_at`, or expires inside the 5-minute registration window. `POST /api/registry/agents` returns the same code for the same condition; both mean "re-issue with a longer TTL".
 - `400 BODY_INVALID` — the body is not JSON.
 - `413 PAYLOAD_TOO_LARGE` — the body is over 256 KiB (see [Conventions](#conventions)).
@@ -226,7 +226,7 @@ Response `{ "agents": [...] }`. Each record:
 {
   "aid": "aid:pubkey:ed25519:<43-char base64url public key>",
   "displayName": "researcher-1",
-  "handshakeEndpoint": "http://agent-host:8101/aitp",
+  "handshakeEndpoint": "https://agent-host:8101/aitp",
   "offeredCaps": ["demo.echo"],
   "status": "active",
   "namespace": "default",
@@ -234,7 +234,7 @@ Response `{ "agents": [...] }`. Each record:
   "lastEnrolledAt": "...",
   "lastSeenAt": "...",
   "manifestUrl": "/api/registry/agents/<aid>/manifest",
-  "agentManifestHint": "http://agent-host:8101/.well-known/aitp-manifest",
+  "agentManifestHint": "https://agent-host:8101/.well-known/aitp-manifest",
   "manifestJson": "{...}"
 }
 ```

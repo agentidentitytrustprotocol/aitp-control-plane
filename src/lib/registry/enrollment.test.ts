@@ -146,7 +146,6 @@ describe('EnrollmentService', () => {
   });
 
   it.each([
-    ['a 257-character display_name', 'd'.repeat(257)],
     ['a NUL in display_name', 'a\u0000b'],
     ['a NUL in an offered capability', undefined],
   ])(
@@ -170,6 +169,83 @@ describe('EnrollmentService', () => {
       expect(sdkVerifyCode(caught)).toBeUndefined();
     },
   );
+
+  it('leaves a display_name over the schema limit to the SDK', () => {
+    const manifest = AitpAgent.generate().buildManifest({
+      displayName: 'd'.repeat(129),
+      handshakeEndpoint: 'https://agent.example.com/handshake',
+      offeredCaps: ['demo.echo'],
+      ttlSecs: 3600,
+    });
+    let caught: unknown;
+    try {
+      service.verifyAndIssueToken(manifest);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).not.toBeInstanceOf(ManifestRejectedError);
+    expect(sdkVerifyCode(caught)).toBe('malformed');
+  });
+
+  describe('handshake_endpoint scheme', () => {
+    const OPT_IN = 'AITP_INSECURE_LOCALHOST_DANGEROUS';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      delete process.env[OPT_IN];
+    });
+
+    function manifestAt(handshakeEndpoint: string): string {
+      return AitpAgent.generate().buildManifest({
+        displayName: 'scheme-test-agent',
+        handshakeEndpoint,
+        offeredCaps: ['demo.echo'],
+        ttlSecs: 3600,
+      });
+    }
+
+    function rejectionCode(manifest: string): string | undefined {
+      try {
+        service.verifyAndIssueToken(manifest);
+      } catch (err) {
+        return sdkVerifyCode(err);
+      }
+      throw new Error('expected the manifest to be refused');
+    }
+
+    it.each([
+      'http://localhost:8101/aitp',
+      'http://127.0.0.1:8101/aitp',
+      'http://agent.example.com/aitp',
+    ])('refuses %s by default', (endpoint) => {
+      expect(rejectionCode(manifestAt(endpoint))).toBe('malformed');
+    });
+
+    it.each(['http://localhost:8101/aitp', 'http://127.0.0.1:8101/aitp'])(
+      'accepts %s with the opt-in on',
+      (endpoint) => {
+        process.env[OPT_IN] = 'true';
+        expect(service.verifyAndIssueToken(manifestAt(endpoint)).aid).toMatch(/^aid:pubkey:/);
+      },
+    );
+
+    it.each(['http://agent.example.com/aitp', 'http://localhost.example.com/aitp'])(
+      'refuses %s even with the opt-in on',
+      (endpoint) => {
+        process.env[OPT_IN] = 'true';
+        expect(rejectionCode(manifestAt(endpoint))).toBe('malformed');
+      },
+    );
+
+    it('refuses loopback http in production even with the variable set', () => {
+      process.env[OPT_IN] = 'true';
+      jest.replaceProperty(process, 'env', {
+        ...process.env,
+        NODE_ENV: 'production',
+      } as NodeJS.ProcessEnv);
+      expect(rejectionCode(manifestAt('http://localhost:8101/aitp'))).toBe('malformed');
+    });
+  });
 
   it('rejects a token signed with a different secret', () => {
     const manifest = buildManifest();

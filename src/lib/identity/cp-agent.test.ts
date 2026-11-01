@@ -3,6 +3,7 @@ import { verifyManifestJson } from 'aitp';
 describe('cp identity', () => {
   beforeAll(() => {
     delete process.env.CP_AID_SEED_HEX;
+    process.env.CP_BASE_URL = 'https://cp.test.invalid';
     // Reset module state so the singleton initializes inside the test.
     delete (globalThis as { __cpAgent?: unknown }).__cpAgent;
     delete (globalThis as { __cpManifestJson?: unknown }).__cpManifestJson;
