@@ -1539,24 +1539,62 @@ process.stdout.write(JSON.stringify({
  * Recurses THROUGH scope directories: `.next/node_modules/@opentelemetry` is a
  * real directory holding five symlinks, not a symlink itself, so a sweep that
  * asserts "every entry is a symlink" fails on a healthy image.
+ *
+ * Each leaf is resolved the way the server chunks LOAD it. A chunk loads an
+ * external with `.x("spec")` (require) or `.y("spec")` (ESM import), and a dual
+ * package resolves to different files under the two: OpenTelemetry 3.x is
+ * imported, and tracing ships only its `.mjs` entry, so `require.resolve` of it
+ * fails on a healthy image. An imported leaf is resolved by Node's ESM resolver
+ * run from the chunks directory; a required leaf, or one no chunk names, by
+ * `require.resolve`. A leaf loaded both ways must resolve both ways.
  */
 const PROBE_SWEEP = `
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const ROOT = ${JSON.stringify(TRACED_DIR)};
 const RESOLVE_FROM = ${JSON.stringify(RESOLVE_FROM)};
 const leaves = [];
 const anomalies = [];
+const loads = {};
+try {
+  for (const f of fs.readdirSync(RESOLVE_FROM)) {
+    if (f.slice(-3) !== '.js') continue;
+    const src = fs.readFileSync(path.join(RESOLVE_FROM, f), 'utf8');
+    const re = /\\.(x|y)\\("([^"]+)"/g;
+    let m;
+    while ((m = re.exec(src))) {
+      (loads[m[2]] = loads[m[2]] || {})[m[1] === 'y' ? 'import' : 'require'] = true;
+    }
+  }
+} catch (e) { /* resolveFromExists reports a missing directory */ }
+function importResolve(spec) {
+  return execFileSync(process.execPath, ['--input-type=module', '-e',
+    'process.stdout.write(import.meta.resolve(process.argv[1]))', spec],
+    { cwd: RESOLVE_FROM, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
 function walk(dir, prefix, depth) {
   for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, ent.name);
     const spec = prefix ? prefix + '/' + ent.name : ent.name;
     if (ent.isSymbolicLink()) {
       const leaf = { spec: spec, realpath: null, resolved: null, error: null };
+      const how = loads[spec] || { require: true };
+      const fault = function (msg) { leaf.error = (leaf.error ? leaf.error + '; ' : '') + msg; };
       try { leaf.realpath = fs.realpathSync(full); }
-      catch (e) { leaf.error = 'realpath: ' + e.message; }
-      try { leaf.resolved = require.resolve(spec, { paths: [RESOLVE_FROM] }); }
-      catch (e) { leaf.error = (leaf.error ? leaf.error + '; ' : '') + 'require.resolve: ' + e.message; }
+      catch (e) { fault('realpath: ' + e.message); }
+      if (how.require) {
+        try { leaf.resolved = require.resolve(spec, { paths: [RESOLVE_FROM] }); }
+        catch (e) { fault('require.resolve: ' + e.message); }
+      }
+      if (how.import) {
+        try {
+          const url = importResolve(spec);
+          const file = new URL(url).pathname;
+          fs.statSync(file);
+          leaf.resolved = leaf.resolved || file;
+        } catch (e) { fault('import.meta.resolve: ' + String(e.stderr || e.message).trim().split('\\n')[0]); }
+      }
       leaves.push(leaf);
     } else if (ent.isDirectory() && ent.name.charAt(0) === '@' && depth === 0) {
       walk(full, spec, depth + 1);
