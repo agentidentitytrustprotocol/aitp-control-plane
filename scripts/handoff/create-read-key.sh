@@ -96,8 +96,8 @@ SYNC_CONFIG="$(sed -n 's/^DOPPLER_CONFIG=\([A-Za-z0-9_-]*\).*/\1/p' "$SYNC_SCRIP
 doppler configs get "$DOPPLER_CONFIG" -p "$DOPPLER_PROJECT" >/dev/null 2>&1 ||
   die "Doppler project/config $DOPPLER_PROJECT/$DOPPLER_CONFIG is not readable"
 
-doppler_read() { # name var -> sets var to the value, "" only if Doppler says the secret does not exist
-  local v err
+doppler_read() { # name var [failure note] -> sets var; "" only if Doppler says the secret does not exist
+  local v err note="${3:-nothing written}"
   if v="$(doppler secrets get "$1" --plain -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" 2>/dev/null)"; then
     printf -v "$2" '%s' "$v"; return 0
   fi
@@ -107,7 +107,7 @@ doppler_read() { # name var -> sets var to the value, "" only if Doppler says th
   case "$err" in
     *"Could not find requested secret"*) printf -v "$2" '%s' ""; return 0 ;;
   esac
-  die "could not read $1 from Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG (not a 'not found'); nothing written"
+  die "could not read $1 from Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG (not a 'not found'); $note"
 }
 doppler_set_stdin() { # name; value on stdin
   doppler secrets set "$1" -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --silent >/dev/null
@@ -175,7 +175,7 @@ if EXISTING="$(ro_key_for_label "$RO" "$LABEL")"; then
     exit 0
   fi
   printf '%s' "$EXISTING" | doppler_set_stdin "$SECRET_NAME"
-  doppler_read "$SECRET_NAME" GOT_SECRET
+  doppler_read "$SECRET_NAME" GOT_SECRET "a write was sent; re-run this script to check and complete it"
   [ "$GOT_SECRET" = "$EXISTING" ] || die "$SECRET_NAME did not read back as $(fp "$EXISTING")"
   log "completed: $SECRET_NAME = $(fp "$EXISTING")"
   exit 0
@@ -202,8 +202,9 @@ printf '%s' "$NEW_RO" | doppler_set_stdin READ_ONLY_API_KEYS
 printf '%s' "$KEY" | doppler_set_stdin "$SECRET_NAME"
 
 GOT_RO=""; GOT_SECRET=""
-doppler_read READ_ONLY_API_KEYS GOT_RO
-doppler_read "$SECRET_NAME" GOT_SECRET
+AFTER="writes were sent; re-run this script to check and complete them"
+doppler_read READ_ONLY_API_KEYS GOT_RO "$AFTER"
+doppler_read "$SECRET_NAME" GOT_SECRET "$AFTER"
 [ "$GOT_RO" = "$NEW_RO" ] ||
   die "READ_ONLY_API_KEYS did not read back as written (expected $(fp "$NEW_RO"), got $(fp "$GOT_RO"))"
 [ "$GOT_SECRET" = "$KEY" ] ||
