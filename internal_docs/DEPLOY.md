@@ -25,11 +25,10 @@ cancelled when a new commit lands):
    don't block merges. The allowlist in `audit-ci.jsonc` is currently empty
    (the steady state; fixable advisories are fixed via `overrides` in
    `package.json` instead).
-3. **docker-build-check** (PRs only) — builds the image single-arch
-   (`linux/amd64`, no push) with the shared GHA layer cache, so Dockerfile
-   or standalone-output breakage is caught before merge.
-   **docker-build-check-arm64** does the same for `linux/arm64` under QEMU,
-   only on PRs carrying the `arch:arm64` label (informational).
+3. **docker-build-check-arm64** — builds the image for `linux/arm64` under
+   QEMU, only on PRs carrying the `arch:arm64` label (informational). There
+   is no separate amd64 build-only job: `verify-image` builds the same amd64
+   image and then boots and probes it, so it is the required image check.
 4. **verify-image** (every run, no `if:`) — `npm run verify:image` against
    the amd64 image, then `npm run verify:sse` against the same image.
    **verify-image-arm64** repeats both under QEMU, only on a manual dispatch
@@ -142,6 +141,64 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 
 See `.env.example` for the full list (rate-limiting, retention/TTL, OTel
 endpoints).
+
+## Configuration source of truth: Doppler
+
+Production variables live in Doppler project **`aitp-control-plane`**, config
+**`prd`** (configs `dev`, `dev_personal`, `stg`, `prd` exist; only `prd` feeds
+Railway). Railway project `aitp-runner`, environment `production`, service
+`aitp-control-plane` receives them through `deploy/doppler-sync.sh`. There is
+no native Doppler→Railway integration: every push is explicit and
+hash-checked.
+
+```mermaid
+flowchart LR
+  D["Doppler aitp-control-plane/prd"] -->|"jq → curl stdin (values never in argv)"| S["deploy/doppler-sync.sh"]
+  K["deploy/doppler-keys.txt (allowlist)"] --> S
+  S -->|"variableUpsert, skipDeploys"| R["Railway aitp-runner / aitp-control-plane"]
+  S -->|"serviceInstanceRedeploy only if a value changed"| R
+  P["Railway Postgres"] -->|"DATABASE_URL = ${{Postgres.DATABASE_URL}}"| R
+```
+
+**Managed keys** are exactly the ones in `deploy/doppler-keys.txt`:
+`API_KEYS`, `CORS_ORIGIN`, `CP_AID_SEED_HEX`, `CP_BASE_URL`,
+`ENROLLMENT_SECRET`, `HOSTNAME`, `PORT`. `DATABASE_URL` is a Railway reference
+and stays Railway-managed. `RAILWAY_*` system variables are never managed.
+
+**Change a value:** set it in Doppler `prd`, then
+
+```bash
+deploy/doppler-sync.sh            # dry run: per-key unchanged/changed/new + sha256 prefix, never values
+deploy/doppler-sync.sh --apply    # push changed keys, verify the hash, redeploy once
+```
+
+Rules the script enforces:
+- dry run by default; `--apply` refuses a dirty working tree, so the allowlist
+  it applies is the committed one;
+- it never deletes a variable and never touches a key not in the allowlist;
+- it refuses a `RAILWAY_*` name and any `${{…}}` value on either side;
+- it refuses a key missing from Doppler rather than skipping it;
+- Railway redeploys on every variable set, even an identical one, so it sets
+  only keys whose value differs and redeploys at most once; with nothing to
+  change it makes no API write at all;
+- after setting, it re-reads Railway and dies before redeploying unless the
+  managed-key hash equals Doppler's.
+
+**Add a key:** set it in Doppler `prd`, add the name to
+`deploy/doppler-keys.txt`, commit, then dry-run and `--apply`.
+
+**Do not edit managed keys in the Railway UI** — the next `--apply` overwrites
+them. A dry run is safe at any time and doubles as a drift check: anything but
+`unchanged` and `match` means someone changed one side.
+
+Doppler `prd` also holds `CP_API_KEY_CONSOLE` and `CP_API_KEY_PLAYGROUND` (the
+key halves of `API_KEYS`' `console-…` and `playground-…` entries) and
+`CONSOLE_PASSWORD`. The control plane reads none of them, so they are not in
+the allowlist; when rotating a consumer key, update both the component key and
+its `API_KEYS` entry (rotation: `scripts/handoff/rotate-api-key.sh`).
+
+Offline tests for the script: `bash deploy/test-doppler-sync.sh` (stubbed
+`curl`/`doppler`; runs in CI).
 
 ## Local image build / smoke test
 

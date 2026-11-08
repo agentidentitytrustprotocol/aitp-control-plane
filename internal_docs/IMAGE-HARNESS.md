@@ -138,7 +138,6 @@ Other flags: `--no-build`, `--tag`, `--keep`, `--prune`, `--inventory-out <file>
 |---|---|---|
 | `build-and-test` | typecheck, lint, unit + integration tests, production `next build`, `verify:gate` | yes |
 | `audit` | no high+ advisory in production dependencies | yes |
-| `docker-build-check` | the image builds for amd64 (PRs only) | yes |
 | `docker-build-check-arm64` | the image builds for arm64; opt-in via the `arch:arm64` PR label | no |
 | `verify-image` | this harness on amd64, then `verify:sse` against the same image | yes |
 | `verify-image-arm64` | the same under QEMU; opt-in via the `verify_image_arm64` dispatch input | no |

@@ -1,0 +1,13 @@
+# Railway variables that Doppler (aitp-control-plane/prd) owns for the aitp-control-plane
+# service in Railway project aitp-runner (production).
+# deploy/doppler-sync.sh sets and updates exactly these; it never deletes anything.
+# Never list RAILWAY_* system variables or Railway references (${{...}}): Railway owns those.
+# DATABASE_URL is deliberately absent: on Railway it is a reference to the Postgres service.
+# What each key means: internal_docs/DEPLOY.md "Required environment variables".
+API_KEYS           # admin bearer keys, comma-separated `label:key` entries
+CORS_ORIGIN        # allowed browser origin(s)
+CP_AID_SEED_HEX    # 32-byte Ed25519 seed (64 hex): the control plane's identity; never rotate casually
+CP_BASE_URL        # public base URL the control plane advertises
+ENROLLMENT_SECRET  # HMAC secret for enrollment tokens (>= 32 chars)
+HOSTNAME           # bind address for the Next.js server
+PORT               # listen port

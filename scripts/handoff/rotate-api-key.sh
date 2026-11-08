@@ -4,15 +4,18 @@
 #   O = the key the console uses today   (Doppler secret CP_API_KEY_CONSOLE)
 #   N = the key that replaces it          (Doppler secret CP_API_KEY_NEW)
 #
-#   1. CP (Railway):  API_KEYS gains `<label>:N` next to O       (both work)
+#   1. CP (Doppler, then Railway):  API_KEYS gains `<label>:N` next to O       (both work)
 #   2. Console (Vercel): CP_API_KEY=N, then a production redeploy
 #   3. Verify: N -> 200 at the CP; the console reaches the CP with N
-#   4. CP (Railway):  O is removed from API_KEYS
+#   4. CP (Doppler, then Railway):  O is removed from API_KEYS
 #   5. Verify: O -> 401, N -> 200
 #
 # Every other API_KEYS entry (for example the playground's key) is left as it
-# is. Keys are labelled (`label:key`, see docs/api.md), so admin audit rows made
-# with N carry actor `key:<label>`.
+# is. API_KEYS is owned by Doppler (deploy/doppler-keys.txt), so every API_KEYS
+# write goes to --doppler-project/--doppler-config first (aitp-control-plane/prd
+# in production), keeping deploy/doppler-sync.sh in agreement. Keys are
+# labelled (`label:key`, see docs/api.md), so admin audit rows made with N
+# carry actor `key:<label>`.
 #
 # MODES
 #   (default)    dry run: read-only preflight, then print the plan. Changes nothing.
@@ -60,7 +63,7 @@ DOPPLER_CONFIG=""
 LABEL="console-$(date -u +%Y%m%d)"
 ASSUME_YES=0
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -102,6 +105,17 @@ doppler_set_stdin() { # name; value on stdin
 doppler configs get "$DOPPLER_CONFIG" -p "$DOPPLER_PROJECT" >/dev/null 2>&1 ||
   die "Doppler project/config $DOPPLER_PROJECT/$DOPPLER_CONFIG is not readable"
 
+# API_KEYS must land in the Doppler config deploy/doppler-sync.sh reads, or the
+# next sync --apply reverts the rotation. Read the expected pair from the sync
+# script itself so the two cannot drift apart.
+SYNC_SCRIPT="$(cd "$(dirname "$0")/../.." && pwd)/deploy/doppler-sync.sh"
+[ -r "$SYNC_SCRIPT" ] || die "cannot read $SYNC_SCRIPT (needed to confirm the Doppler project/config)"
+SYNC_PROJECT="$(sed -n 's/^DOPPLER_PROJECT=\([A-Za-z0-9_-]*\).*/\1/p' "$SYNC_SCRIPT")"
+SYNC_CONFIG="$(sed -n 's/^DOPPLER_CONFIG=\([A-Za-z0-9_-]*\).*/\1/p' "$SYNC_SCRIPT")"
+[ -n "$SYNC_PROJECT" ] && [ -n "$SYNC_CONFIG" ] || die "could not read DOPPLER_PROJECT/DOPPLER_CONFIG from $SYNC_SCRIPT"
+[ "$DOPPLER_PROJECT/$DOPPLER_CONFIG" = "$SYNC_PROJECT/$SYNC_CONFIG" ] ||
+  die "refusing: --doppler-project/--doppler-config is $DOPPLER_PROJECT/$DOPPLER_CONFIG, but deploy/doppler-sync.sh syncs $SYNC_PROJECT/$SYNC_CONFIG into Railway"
+
 # Railway commands run from a throwaway directory linked to the target; the
 # link file holds ids only, never a secret.
 RW_DIR="$(mktemp -d)"
@@ -114,6 +128,10 @@ current_api_keys() {
   rw variables --json -s "$RAILWAY_SERVICE" -e "$RAILWAY_ENV" | jq -r '.API_KEYS // ""'
 }
 set_api_keys() { # value on $1, sent on stdin
+  # Doppler owns API_KEYS (deploy/doppler-keys.txt): write it there FIRST, so a
+  # failure between the two writes leaves Doppler ahead, never behind. Behind
+  # would make the next deploy/doppler-sync.sh --apply silently undo this step.
+  printf '%s' "$1" | doppler_set_stdin API_KEYS
   printf '%s' "$1" | rw variable set API_KEYS --stdin -s "$RAILWAY_SERVICE" -e "$RAILWAY_ENV" >/dev/null
 }
 
@@ -282,6 +300,16 @@ case "$OLD$NEW" in *,*|*:*) die "keys must not contain ',' or ':'" ;; esac
 [ "$OLD" != "$NEW" ] || die "CP_API_KEY_NEW equals CP_API_KEY_CONSOLE"
 KEYS="$(current_api_keys)"
 [ -n "$KEYS" ] || die "could not read API_KEYS from Railway"
+DOPPLER_KEYS="$(doppler_get API_KEYS)"
+if [ "$(fp "$DOPPLER_KEYS")" = "$(fp "$KEYS")" ]; then
+  log "API_KEYS: Doppler and Railway agree ($(fp "$KEYS"))"
+elif [ "$MODE" = apply ]; then
+  die "refusing: API_KEYS differs between Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG and Railway; reconcile first (deploy/doppler-sync.sh dry run shows the drift; an interrupted --apply leaves Doppler ahead, and deploy/doppler-sync.sh --apply finishes it)"
+elif [ "$MODE" = rollback ]; then
+  log "warning: API_KEYS differs between Doppler and Railway; rollback starts from Railway's value and writes the result to both"
+else
+  log "warning: API_KEYS differs between Doppler and Railway; --apply would refuse (deploy/doppler-sync.sh dry run shows the drift)"
+fi
 
 log "CP $RAILWAY_SERVICE ($RAILWAY_ENV) API_KEYS now:"
 describe_list "$KEYS" >&2
@@ -302,10 +330,10 @@ confirm() {
 if [ "$MODE" = dry-run ]; then
   cat >&2 <<EOF
 Plan (nothing has been changed):
-  1. Railway $RAILWAY_SERVICE/$RAILWAY_ENV: API_KEYS += "$LABEL:<N>" (redeploys the CP); wait for N -> 200 on $CP_PROBE_PATH
+  1. Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG, then Railway $RAILWAY_SERVICE/$RAILWAY_ENV: API_KEYS += "$LABEL:<N>" (redeploys the CP); wait for N -> 200 on $CP_PROBE_PATH
   2. Vercel $VERCEL_SCOPE/$VERCEL_PROJECT: CP_API_KEY = N (production, preview); redeploy production
   3. Verify: N -> 200 at the CP; console $CONSOLE_PROBE_PATH -> 200
-  4. Railway: API_KEYS -= O (redeploys the CP)
+  4. Doppler, then Railway: API_KEYS -= O (redeploys the CP)
   5. Verify: O -> 401, N -> 200
 Run with --apply to execute, --rollback to undo.
 EOF
@@ -319,7 +347,14 @@ fi
 if [ "$MODE" = rollback ]; then
   confirm "Roll back: put O back on the CP and point the console at O?"
   if has_key "$KEYS" "$OLD"; then
-    log "step R1: O already on the CP"
+    if [ "$(fp "$DOPPLER_KEYS")" != "$(fp "$KEYS")" ]; then
+      # e.g. step 4 wrote Doppler (without O) and then the Railway write failed:
+      # write Railway's value (with O) back to Doppler too, or the next sync drops O.
+      set_api_keys "$KEYS"
+      log "step R1: O already on the CP; Doppler API_KEYS reset to Railway's ($(fp "$KEYS"))"
+    else
+      log "step R1: O already on the CP"
+    fi
   else
     RLABEL="$(free_label "$KEYS" console-old)"
     set_api_keys "$KEYS,$RLABEL:$OLD"

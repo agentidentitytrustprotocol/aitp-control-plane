@@ -3,8 +3,10 @@
 Running the control plane in production. Configuration is entirely environment
 variables — `.env.example` in the repo is the canonical list, and the internal
 [deployment guide](https://github.com/agentidentitytrustprotocol/aitp-control-plane/blob/main/internal_docs/DEPLOY.md)
-covers the CI/CD and Railway path. This document explains the operational
-subsystems and how to tune them.
+covers the CI/CD and Railway path. Production values are owned by Doppler
+(`aitp-control-plane/prd`) and pushed to Railway with `deploy/doppler-sync.sh`
+(dry run by default); never edit a managed key in the Railway UI. This
+document explains the operational subsystems and how to tune them.
 
 ## Identity
 

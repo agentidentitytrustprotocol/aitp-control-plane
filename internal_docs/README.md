@@ -20,5 +20,6 @@ and is published.
 |---|---|
 | [`DEPLOY.md`](DEPLOY.md) | CI/CD pipeline (GHCR image build/publish) and a step-by-step Railway deployment guide, including the required environment variables and a local image smoke test. |
 | [`IMAGE-HARNESS.md`](IMAGE-HARNESS.md) | Maintainer index for the shipped-image harness (`npm run verify:image`): the 27 checks with a one-line rationale each, pointers into the `scripts/verify-image.mjs` header, baseline regeneration rules, the CI jobs that run it, and teardown behaviour. Moved out of `docs/operations.md` for reader triage, not secrecy — the repo is public. |
+| [`CI-COST.md`](CI-COST.md) | GitHub Actions usage and cost: the 30-day measurement, the 2026-11-07 CI-cost pass (build-only image check retired, `verify-image` required), what was considered and kept, and the local-gate-first rules. |
 
 [`aitp-website`]: https://github.com/agentidentitytrustprotocol/aitp-website

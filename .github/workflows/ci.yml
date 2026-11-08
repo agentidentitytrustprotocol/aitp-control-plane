@@ -69,6 +69,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # deploy/doppler-sync.sh pushes production secrets; its safeguards (dry run by
+      # default, no deletes, no RAILWAY_*/${{ }} keys, redeploy only on change, values
+      # never in argv or output) are pinned by offline tests with stubbed curl/doppler.
+      - name: Deploy scripts (shellcheck + offline tests)
+        run: shellcheck deploy/*.sh scripts/handoff/*.sh && bash deploy/test-doppler-sync.sh
+
       # Migrations run BEFORE any test step so unit tests that
       # accidentally touch the DB don't fail against an unmigrated schema.
       - name: Apply migrations to test database
@@ -158,31 +164,6 @@ jobs:
       - name: Audit production dependencies
         run: npx audit-ci --config ./audit-ci.jsonc
 
-  # PR-only image build (no push): catches Dockerfile / standalone-output
-  # breakage before merge, using the same GHA layer cache the publish job
-  # writes. Single platform — multi-arch correctness is proven on main.
-  docker-build-check:
-    name: Docker build check (PR)
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build (no push)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   # Opt-in arm64 build check, gated on the `arch:arm64` PR label. arm64 is
   # otherwise first exercised by docker-publish AFTER merge to main, which is
   # the wrong side of the merge button for changes whose risk is arch-specific
@@ -231,7 +212,7 @@ jobs:
   # with src/proxy.ts renamed to a filename Next does not recognise passes every
   # static check and the health check, then serves the admin audit log to an
   # unauthenticated caller — `200 {"entries":[],"count":0}` where a 401 belongs.
-  # That image builds green and docker-build-check would ship it.
+  # That image builds green; a build-only check would pass it.
   #
   # It ALSO pins the manifest that OVERRIDES that matcher set at runtime. The router reads
   # TWO middleware manifests and prefers `.next/server/middleware-manifest.json` over the
@@ -280,7 +261,7 @@ jobs:
   # DELETE THIS JOB AND: an image whose NAPI binary was missing or built for the
   # wrong architecture, or whose traced externals had stopped resolving, or whose
   # compiled request gate had been rewritten while `src/proxy.ts` stayed untouched,
-  # would build green and ship. docker-build-check only answers "does it build" —
+  # would build green and ship. A build-only check answers only "does it build" —
   # nothing else looks inside the image at all, and `verify:gate` builds its own
   # server from source, so it is structurally blind to every one of the five
   # recorded gate defeats.
@@ -292,7 +273,7 @@ jobs:
   # every manual re-publish into a skipped docker-publish.
   #
   # LAYER CACHE: deliberately NONE, and the harness says so in its own output.
-  # `cache-from: type=gha` works in docker-build-check only because
+  # `cache-from: type=gha` works in docker-publish only because
   # docker/build-push-action injects ACTIONS_RUNTIME_TOKEN / ACTIONS_CACHE_URL
   # from the action runtime. A bare `docker buildx build` spawned by a node
   # script inherits neither, so buildx WARNS and builds cold rather than failing
