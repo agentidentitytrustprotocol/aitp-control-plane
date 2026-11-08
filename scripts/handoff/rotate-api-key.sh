@@ -347,7 +347,14 @@ fi
 if [ "$MODE" = rollback ]; then
   confirm "Roll back: put O back on the CP and point the console at O?"
   if has_key "$KEYS" "$OLD"; then
-    log "step R1: O already on the CP"
+    if [ "$(fp "$DOPPLER_KEYS")" != "$(fp "$KEYS")" ]; then
+      # e.g. step 4 wrote Doppler (without O) and then the Railway write failed:
+      # write Railway's value (with O) back to Doppler too, or the next sync drops O.
+      set_api_keys "$KEYS"
+      log "step R1: O already on the CP; Doppler API_KEYS reset to Railway's ($(fp "$KEYS"))"
+    else
+      log "step R1: O already on the CP"
+    fi
   else
     RLABEL="$(free_label "$KEYS" console-old)"
     set_api_keys "$KEYS,$RLABEL:$OLD"

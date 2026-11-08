@@ -29,6 +29,8 @@
 # shellcheck disable=SC2016
 set -euo pipefail
 
+# Keep these unquoted: scripts/handoff/rotate-api-key.sh reads DOPPLER_PROJECT and
+# DOPPLER_CONFIG from here with sed (and refuses to run if it cannot).
 RAILWAY_PROJECT_ID=70754f0b-c930-4433-a268-7b408e8230e2 # Railway: aitp-runner
 RAILWAY_ENVIRONMENT=production
 RAILWAY_SERVICE=aitp-control-plane
@@ -75,6 +77,7 @@ keys_json="$(printf '%s\n' "${keys[@]}" | jq -R . | jq -sc 'unique')"
 
 railway_token="${RAILWAY_API_TOKEN:-$(jq -r '.user.accessToken // .user.token // empty' ~/.railway/config.json 2>/dev/null || true)}"
 [ -n "$railway_token" ] || die "no Railway token: log in with the railway CLI or set RAILWAY_API_TOKEN"
+case "$railway_token" in *[\"\\[:space:]]*) die "the Railway token contains a quote, backslash or space; refusing to build the curl config" ;; esac
 
 # POST a GraphQL request whose JSON body arrives on stdin, so values never reach argv.
 # The token goes in a curl config read from a pipe (printf is a builtin), not argv.
