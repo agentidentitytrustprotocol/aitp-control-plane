@@ -108,7 +108,11 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
    from a running service (database down) does not restart it; restarts come
    only from `ON_FAILURE`, i.e. a process exiting non-zero.
 
-5. **Run database migrations** (one-time per schema change). The runtime
+5. **Run database migrations** (one-time per schema change) **before the
+   PR merges.** Every merge to `main` rolls out automatically (step 6), so a
+   schema change must be expand-only (new tables/nullable columns; drop
+   things only in a later release) and applied first. The CI deploy job
+   warns when a release touches `drizzle/*.sql`. The runtime
    image does not bundle `drizzle-kit`, so run migrations from a checkout
    pointed at the Railway database:
 
@@ -120,9 +124,32 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
    Alternatively `railway run npm run db:migrate` from a dev checkout uses
    the linked project's `DATABASE_URL`.
 
-6. **Redeploy on new images.** Each push to `main` publishes a new
-   `:latest`. Trigger a Railway redeploy via the dashboard, `railway
-   redeploy`, or a Railway deploy webhook called from CI.
+6. **Rollout on new images (automatic).** Each push to `main` publishes
+   `:latest` and `:sha-<commit>`; the CI `deploy` job then runs
+   `deploy/railway-release.sh deploy --digest <pushed digest>`: it redeploys
+   the service and waits until the newest deployment is `SUCCESS` on exactly
+   that digest (it skips the redeploy when Railway's image auto-update got
+   there first). Anyone can check the same thing read-only:
+
+   ```bash
+   RAILWAY_TOKEN="$(doppler secrets get RAILWAY_TOKEN -p aitp-control-plane -c prd --plain)" \
+   RAILWAY_ENVIRONMENT_ID=<env id> RAILWAY_SERVICE_ID=<service id> \
+     deploy/railway-release.sh verify --digest sha256:<digest>
+   ```
+
+   Wiring: a Railway **project** token (`gha-aitp-control-plane-release`,
+   project aitp-runner, environment production) lives in Doppler
+   `aitp-control-plane/prd` `RAILWAY_TOKEN` and in the GitHub Environment
+   `production` (deployment branches: `main`) as secret `RAILWAY_TOKEN`, with
+   variables `RAILWAY_ENVIRONMENT_ID` and `RAILWAY_SERVICE_ID`. The repo
+   variable `DEPLOY_TO_RAILWAY=true` turns the job on. Rotate: create a new
+   project token, pipe it into Doppler and `gh secret set RAILWAY_TOKEN --env
+   production` (stdin), then delete the old token in Railway.
+
+   **Red deploy job.** A failed healthcheck leaves the previous deployment
+   serving (step 4). To stop rollouts set `DEPLOY_TO_RAILWAY=false` (and
+   snooze auto-update in the service settings); to roll back, redeploy the
+   last good deployment from the Railway dashboard.
 
 ## Required environment variables
 

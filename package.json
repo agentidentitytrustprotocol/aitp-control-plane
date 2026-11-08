@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest --passWithNoTests",
     "test:integration": "jest --config jest.integration.config.js --passWithNoTests",
+    "test:integration:local": "bash scripts/integration-local.sh",
     "test:conformance": "jest --config jest.integration.config.js --passWithNoTests --testPathPatterns 'conformance|cp-manifest'",
     "verify:gate": "node scripts/verify-request-gate.mjs --build",
     "verify:image": "node scripts/verify-image.mjs",

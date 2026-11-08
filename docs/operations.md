@@ -130,9 +130,10 @@ back after cutover breaks the same way in the other direction.
 
 - **The published image is `:latest` from `main`.** CI pushes
   `ghcr.io/agentidentitytrustprotocol/aitp-control-plane:latest` on every push
-  to `main`, and a deployment that tracks `:latest` picks it up on its next
-  redeploy or restart. Merging the 0.17 bump is therefore the deploy trigger —
-  merge only inside the coordinated window.
+  to `main`, and CI's `deploy` job then redeploys the Railway service and waits
+  until it runs exactly that digest (Railway's image auto-update would roll it
+  too). Merging the 0.17 bump is therefore the deploy trigger — merge only
+  inside the coordinated window.
 - **Enrollment.** `/enroll` rejects an `aitp/0.2` Manifest as
   `version_unknown`; `POST /api/registry/agents` rejects a non-`aitp/0.3`
   Manifest as `MANIFEST_INVALID`. Agents re-enroll with a 0.17 SDK.

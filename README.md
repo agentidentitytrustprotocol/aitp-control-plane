@@ -239,13 +239,21 @@ where the stream wrote nothing at connect and so sent no HTTP status line at all
 until its 15-second heartbeat — invisible to a unit test of the route, which
 receives a `Response` object and never a socket.
 
-Bring up the test database:
+The one-command way runs the suite against a throwaway Postgres under its own
+docker compose project (random host port, torn down on exit, safe to run twice
+at once):
+
+```bash
+npm run test:integration:local
+```
+
+Or by hand against the dev compose file:
 
 ```bash
 docker compose up -d postgres-test
 ```
 
-The integration suite expects `DATABASE_URL=postgres://postgres:postgres@localhost:5433/aitp_control_plane_test`.
+The integration suite then expects `DATABASE_URL=postgres://postgres:postgres@localhost:5433/aitp_control_plane_test`.
 
 ## Project layout
 
