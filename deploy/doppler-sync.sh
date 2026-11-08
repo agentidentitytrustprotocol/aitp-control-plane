@@ -98,9 +98,11 @@ svc_id="$(jq -r --arg n "$RAILWAY_SERVICE" '.project.services.edges[].node | sel
 scope="$(jq -nc --arg p "$RAILWAY_PROJECT_ID" --arg e "$env_id" --arg s "$svc_id" '{p: $p, e: $e, s: $s}')"
 
 # Raw (unrendered) service variables, so a reference shows up as ${{...}}, not its resolved value.
+# `objects` + -e: anything but a JSON object (null, a missing field) is an error, never an
+# empty set that would make every managed key look "new".
 railway_vars() {
   gql 'query($p: String!, $e: String!, $s: String!){variables(projectId: $p, environmentId: $e, serviceId: $s, unrendered: true)}' \
-    "$scope" | jq -c '.variables'
+    "$scope" | jq -ce '.variables | objects'
 }
 doppler_vars() {
   doppler secrets download --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG" --no-file --format json
@@ -111,7 +113,7 @@ managed_hash() {
   jq -r --argjson k "$keys_json" '. as $v | $k[] as $key | select($v | has($key)) | "\($key)=\($v[$key])"' | LC_ALL=C sort | shasum -a 256 | cut -c1-16
 }
 
-rv="$(railway_vars)"
+rv="$(railway_vars)" || die "Railway returned no variables object for $RAILWAY_SERVICE (bad token or API error); nothing was changed"
 dv="$(doppler_vars)"
 
 # Per key: status only. The comparison happens inside jq; values never leave it.

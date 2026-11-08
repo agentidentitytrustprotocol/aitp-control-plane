@@ -53,7 +53,8 @@ case "$q" in
       services: {edges: [{node: {id: "svc-1", name: "aitp-control-plane"}}, {node: {id: "svc-2", name: "other"}}]}}}}' ;;
   *'variables(projectId'*)
     case "$q" in *'unrendered: true'*) ;; *) echo "curl stub: variables read without unrendered: true" >&2; exit 96 ;; esac
-    jq -c '{data: {variables: .}}' "$STUB/railway.json" ;;
+    # A case may replace the whole response body (e.g. a 200 carrying errors).
+    if [ -e "$STUB/variables-response" ]; then cat "$STUB/variables-response"; else jq -c '{data: {variables: .}}' "$STUB/railway.json"; fi ;;
   *variableUpsert*)
     name="$(jq -r .variables.i.name <<<"$body")"
     [ "$(jq -r .variables.i.skipDeploys <<<"$body")" = true ] || { echo "upsert without skipDeploys" >&2; exit 98; }
@@ -200,6 +201,23 @@ run_sync --apply
 if [ "$RC" != 0 ] && has "hash after apply is"; then ok "lost write: apply dies on the after-apply hash"; else bad "lost write: apply dies on the after-apply hash" "$OUT"; fi
 if ! grep -q redeploy "$CASE/stub/mutations"; then ok "lost write: no redeploy"; else bad "lost write: no redeploy" "mutations: $(cat "$CASE/stub/mutations")"; fi
 check_no_leak "lost write"
+
+# A bad token can still get HTTP 200: errors with null data, or null variables. Both must
+# stop the script before it plans or writes anything.
+for shape in errors:'{"data":null,"errors":[{"message":"Not Authorized"}]}' null-variables:'{"data":{"variables":null}}' no-variables:'{"data":{}}'; do
+  label="${shape%%:*}"
+  new_case "bad-read-$label" "{\"A\":\"old-$S\"}" "{\"A\":\"new-$S\"}" A
+  printf '%s\n' "${shape#*:}" >"$CASE/stub/variables-response"
+  run_sync --apply
+  if [ "$RC" != 0 ] && [ "$(mutations)" = 0 ] && { [ "$label" = errors ] || has "Railway returned no variables object"; }; then ok "railway read $label: --apply exits non-zero, zero mutations"; else bad "railway read $label: --apply exits non-zero, zero mutations" "rc=$RC mutations: $(cat "$CASE/stub/mutations") $OUT"; fi
+  check_no_leak "railway read $label"
+  run_sync
+  if [ "$RC" != 0 ]; then ok "railway read $label: dry run exits non-zero"; else bad "railway read $label: dry run exits non-zero" "$OUT"; fi
+done
+
+new_case empty-railway '{}' "{\"A\":\"a-$S\"}" A
+run_sync
+if [ "$RC" = 0 ] && has $'A\tnew'; then ok "an empty variables object is valid: key reads as new"; else bad "an empty variables object is valid: key reads as new" "$OUT"; fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
