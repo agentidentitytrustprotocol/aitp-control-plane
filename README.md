@@ -143,7 +143,8 @@ and pushed to Railway with `deploy/doppler-sync.sh`; see
 
 See [`docs/`](docs/README.md) for the full documentation set — [`docs/api.md`](docs/api.md) (prose API reference), [`docs/events.md`](docs/events.md) (event types & projections), [`docs/data-model.md`](docs/data-model.md) (Postgres schema), and [`docs/operations.md`](docs/operations.md) (runbook) — plus [`openapi.yaml`](openapi.yaml) for the machine-readable schema. High-level groups:
 
-- Public discovery: `/api/health`, `/api/readyz`, `/api/metrics`, `/.well-known/aitp-manifest`
+- Public discovery: `/api/health`, `/api/readyz`, `/.well-known/aitp-manifest`
+- Metrics: `/api/metrics` (Prometheus text; admin `API_KEYS` key required, not rate-limited)
 - Revocation: `POST /api/revocation/entries` (admin), `GET /api/revocations?iss=<aid>` (admin, or that issuer's `ISSUER_KEYS` key), `GET /api/revocation/issuers` (admin; issuers with entry counts)
 - Registry: `/api/registry/enroll`, `/api/registry/agents`, `/api/registry/agents/:aid`, `/api/registry/agents/:aid/manifest`, `/api/registry/agents/:aid/export`
 - Sessions: `/api/sessions`, `/api/sessions/:sessionId`, `/api/sessions/:sessionId/export`, `/api/sessions/:sessionId/replay`

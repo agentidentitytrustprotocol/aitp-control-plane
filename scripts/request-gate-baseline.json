@@ -13,7 +13,7 @@
     "/api/events/history": "gated",
     "/api/events/stream": "gated",
     "/api/health": "public",
-    "/api/metrics": "public",
+    "/api/metrics": "gated",
     "/api/pinned-keys": "gated",
     "/api/readyz": "public",
     "/api/registry/agents": "public",

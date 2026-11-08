@@ -4,8 +4,8 @@
  *
  * WHY THIS EXISTS (issue #89). The outage this was written for — the route
  * never flushing response headers — was invisible from outside the process for
- * days. `/api/metrics` is public (`src/proxy.ts` `PUBLIC_PATHS`) and
- * rate-limit exempt, so these three series are the only thing that answers
+ * days. `/api/metrics` needs only an admin API key (no log access) and is
+ * rate-limit exempt (`src/proxy.ts`), so these three series are the only thing that answers
  * "is the handler being reached at all, and are streams staying alive?"
  * without log access to the deployment. That capability is the phase's whole
  * point; the counters themselves are trivial.

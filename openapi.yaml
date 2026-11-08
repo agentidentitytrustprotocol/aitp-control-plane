@@ -33,7 +33,9 @@ servers:
 
 tags:
   - name: discovery
-    description: Public unauth endpoints (manifest, health, metrics)
+    description: >-
+      Discovery and probe endpoints (manifest, health, readyz are public;
+      metrics needs an admin API key)
   - name: registry
     description: Agent enrollment and discovery
   - name: events
@@ -997,8 +999,15 @@ paths:
     get:
       tags: [discovery]
       summary: Prometheus metrics
-      security: []
+      description: >-
+        Requires an `API_KEYS` (admin) key; issuer keys are refused. Exempt
+        from rate limiting once authenticated, so a scraper is never throttled.
       responses:
+        "401":
+          description: Missing or unknown API key (`INVALID_API_KEY`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "200":
           description: >-
             Prometheus text format. Also the response when the database is

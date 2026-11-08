@@ -444,8 +444,8 @@
     },
     {
       "path": "middleware/chunks/[root-of-the-server]__1rghbxw4-mj_v._.js",
-      "bytes": 227980,
-      "sha256": "e19f0192a46de6f7b9013e5effd33c6fa6f24a95cab9310f622b78e74726d987"
+      "bytes": 227965,
+      "sha256": "9b2f1fc886264e35b0b3be30e28f50cec6a773199d57a235692a965f3e38c41e"
     },
     {
       "path": "middleware/chunks/[turbopack]_runtime.js",
@@ -484,7 +484,7 @@
   },
   "gateCanonicalFile": "scripts/image-gate-canonical.txt",
   "gateRegion": {
-    "bytes": 3047,
-    "sha256": "2b8f41750bee1bf2d9ed187517677624e723f8fd93df9f13505f59eaf3dc33e2"
+    "bytes": 3032,
+    "sha256": "ae997c18813205b7c10fb0b02fc18ea52f4d9d3d8416d59eccb371064552cdaf"
   }
 }

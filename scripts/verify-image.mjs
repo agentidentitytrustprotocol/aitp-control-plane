@@ -560,7 +560,8 @@ const GATE_CANONICAL_PATH = path.join(ROOT, 'scripts', 'image-gate-canonical.txt
  * OVERCLAIM and this file's history is a record of checks that claimed more than they proved.
  * The gate does more than authenticate. `src/proxy.ts:223` applies rate limiting to public
  * paths too, exempting only `RATE_LIMIT_EXEMPT_PATHS` (`/api/health`, `/api/readyz`,
- * `/api/metrics`), and it is what attaches `x-request-id` and CORS. So a rewrite cleared here
+ * `/api/metrics`; metrics needs an admin key since wave 3, so it is NOT in this clearance
+ * set), and it is what attaches `x-request-id` and CORS. So a rewrite cleared here
  * to one of the OTHER three — `/api/registry/enroll`, `/api/registry/agents`, or
  * `/api/well-known/aitp-manifest` — really does lose rate limiting and request-id observability, and for
  * `/api/registry/enroll` that includes the dedicated bucket `src/proxy.ts:146-160` names for
@@ -600,7 +601,6 @@ const PUBLIC_PATHS_PINNED = [
   '/api/well-known/aitp-manifest',
   '/api/registry/enroll',
   '/api/registry/agents',
-  '/api/metrics',
 ];
 /**
  * The anchor that locates the compiled gate inside the entry module.

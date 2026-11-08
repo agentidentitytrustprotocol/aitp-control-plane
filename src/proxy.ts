@@ -29,7 +29,6 @@ const PUBLIC_PATHS = new Set<string>([
   '/api/well-known/aitp-manifest',
   '/api/registry/enroll',
   '/api/registry/agents',
-  '/api/metrics',
 ]);
 
 // Anonymous discovery: `GET /api/registry/agents/{aid}` and
@@ -54,6 +53,8 @@ export function isPublicRequest(pathname: string, method: string): boolean {
 
 // Paths exempt from rate limiting. Probes and metrics scrape endpoints
 // run on tight intervals; throttling them would mask real outages.
+// /api/metrics is NOT public (it needs an API_KEYS key, so its counts never
+// reach anonymous callers); the exemption applies only after auth passed.
 const RATE_LIMIT_EXEMPT_PATHS = new Set<string>([
   '/api/health',
   '/api/readyz',

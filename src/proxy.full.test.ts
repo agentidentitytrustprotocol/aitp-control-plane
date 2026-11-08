@@ -454,3 +454,82 @@ describe('proxy — issuer keys', () => {
     expect(proxy(req('/api/well-known/aitp-revocation-list')).status).toBe(401);
   });
 });
+
+// Wave 3 (P1): /api/metrics needs an API_KEYS (admin) key. It stays exempt
+// from rate limiting so a scraper is never throttled, but only after auth.
+describe('proxy — /api/metrics requires an admin key', () => {
+  const ADMIN = 'admin-metrics-key-0123456789';
+  const ISSUER_AID = 'aid:pubkey:O4nSX0IWKDbZqISunQN2NnEba2AnDIlxY2jjSmqMCMs';
+  const ISSUER_KEY = 'issuer-metrics-key-0123456789';
+  const cfg = {
+    apiKeys: [`ops:${ADMIN}`],
+    issuerKeys: [`researcher@${ISSUER_AID}=${ISSUER_KEY}`],
+  };
+
+  it('401 INVALID_API_KEY with no key', async () => {
+    const { proxy, check } = load(cfg);
+    const res = proxy(req('/api/metrics'));
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ code: 'INVALID_API_KEY' });
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('401 for HEAD with no key (every method goes through the admin branch)', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req('/api/metrics', { method: 'HEAD' })).status).toBe(401);
+  });
+
+  it('401 with an unknown key', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(
+      req('/api/metrics', { headers: { authorization: 'Bearer not-a-key' } }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('401 with an issuer key (issuer keys only open GET /api/revocations)', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(
+      req('/api/metrics', { headers: { authorization: `Bearer ${ISSUER_KEY}` } }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('admits an admin key, forwards its label and skips the rate limiter', () => {
+    const { proxy, check } = load(cfg);
+    const res = proxy(
+      req('/api/metrics', { headers: { authorization: `Bearer ${ADMIN}` } }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-middleware-request-x-aitp-key-label')).toBe('ops');
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('never 429s an admin scraper even when every bucket is exhausted', () => {
+    const { proxy, check } = load(cfg, {
+      allowed: false,
+      remaining: 0,
+      resetAt: Date.now() + 30_000,
+      limit: 1,
+    });
+    for (let i = 0; i < 100; i++) {
+      const res = proxy(
+        req('/api/metrics', { headers: { authorization: `Bearer ${ADMIN}` } }),
+      );
+      expect(res.status).toBe(200);
+    }
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('503 SERVER_MISCONFIGURED in prod with no API_KEYS', async () => {
+    const { proxy } = load({ apiKeys: [], isProduction: true });
+    const res = proxy(req('/api/metrics'));
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toMatchObject({ code: 'SERVER_MISCONFIGURED' });
+  });
+
+  it('stays open in dev with no API_KEYS', () => {
+    const { proxy } = load({ apiKeys: [], isProduction: false });
+    expect(proxy(req('/api/metrics')).status).toBe(200);
+  });
+});

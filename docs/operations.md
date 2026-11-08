@@ -318,7 +318,8 @@ owns one route's wire behaviour over time in that artifact.
 ## Rate limiting
 
 In-memory, per-process token buckets on every `/api/*` route except the probes
-(`/api/health`, `/api/readyz`, `/api/metrics`). Over-limit → `429 RATE_LIMITED`
+(`/api/health`, `/api/readyz`, `/api/metrics`; metrics still needs an admin
+key first). Over-limit → `429 RATE_LIMITED`
 with `Retry-After` and `X-RateLimit-*` headers.
 
 **`/.well-known/*` is not rate-limited.** `/.well-known/aitp-manifest` is a
@@ -437,8 +438,9 @@ Six behaviours worth knowing before you change it:
 
 ### Is the stream healthy? (three metrics, no log access needed)
 
-`/api/metrics` is public and rate-limit exempt, so these answer the question
-from anywhere — which is the point: they exist because a dead stream endpoint
+`/api/metrics` needs an admin (`API_KEYS`) key and is rate-limit exempt, so
+anyone holding that key can answer the question without log access — which is
+the point: they exist because a dead stream endpoint
 was once undiagnosable from outside the process for days.
 
 | Series (`aitp_control_plane_`…) | Read it as |
@@ -513,8 +515,11 @@ curl -sN -H "Accept: text/event-stream" \
   https://aitp-ui-console.vercel.app/api/cp/events/stream --max-time 45 \
   -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer} total=%{time_total}\n'
 
-# 3. Was the handler even reached? /api/metrics is public and rate-limit exempt.
-curl -s "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
+# 3. Was the handler even reached? /api/metrics needs an admin key; it is
+#    rate-limit exempt. Feed the key from Doppler on stdin, never on the command line.
+doppler secrets get CP_API_KEY_CONSOLE -p aitp-control-plane -c prd --plain \
+  | sed 's/^/Authorization: Bearer /' \
+  | curl -s -H @- "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
 ```
 
 Read the three together:
@@ -672,8 +677,9 @@ What is swept (set any TTL to `0` to keep that table indefinitely):
 
 ## Observability
 
-- **Metrics:** `GET /api/metrics` exposes Prometheus text format (public, exempt
-  from rate limiting). See [Metrics](#metrics) below for the series it emits.
+- **Metrics:** `GET /api/metrics` exposes Prometheus text format (admin
+  `API_KEYS` key required since wave 3; exempt from rate limiting once
+  authenticated). Point a scraper at it with `Authorization: Bearer <key>`. See [Metrics](#metrics) below for the series it emits.
 - **Logs:** via pino. `LOG_LEVEL` ∈ `trace|debug|info|warn|error|fatal`
   defaults to `info` under `NODE_ENV=production` and `debug` otherwise.
   Production logs are structured JSON; outside production they are

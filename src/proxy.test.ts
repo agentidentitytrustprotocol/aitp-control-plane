@@ -19,7 +19,6 @@ describe('isPublicRequest', () => {
       ['/api/registry/enroll', 'POST'],
       ['/api/registry/agents', 'GET'],
       ['/api/registry/agents', 'POST'], // enrollment-token gated inside handler
-      ['/api/metrics', 'GET'],
     ];
     test.each(cases)('%s %s is public', (path, method) => {
       expect(isPublicRequest(path, method)).toBe(true);
@@ -68,6 +67,7 @@ describe('isPublicRequest', () => {
 
   describe('admin collections are NOT public', () => {
     const cases: Array<[string, string]> = [
+      ['/api/metrics', 'GET'], // wave 3: admin key required (counts are operator data)
       ['/api/tcts', 'GET'],
       ['/api/delegations', 'GET'],
       ['/api/trust-anchors', 'GET'],
