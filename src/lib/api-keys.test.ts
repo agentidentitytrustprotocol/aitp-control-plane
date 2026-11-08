@@ -1,4 +1,11 @@
-import { LABEL_RE, issuerKeyIndex, labelIndex, parseApiKeys, parseIssuerKeys } from './api-keys';
+import {
+  LABEL_RE,
+  issuerKeyIndex,
+  labelIndex,
+  parseApiKeys,
+  parseIssuerKeys,
+  parseReadOnlyApiKeys,
+} from './api-keys';
 
 describe('parseApiKeys', () => {
   it('returns no entries for unset or empty input', () => {
@@ -165,5 +172,93 @@ describe('parseIssuerKeys', () => {
     const idx = issuerKeyIndex(parseIssuerKeys(`a@${AID}=k`).entries);
     expect(idx.get('k')).toEqual({ label: 'a', aid: AID, key: 'k' });
     expect(idx.get('a')).toBeUndefined();
+  });
+});
+
+describe('parseReadOnlyApiKeys', () => {
+  const ADMIN = 'admin-key-0123456789abcdef';
+  const ISSUER = 'issuer-key-0123456789abcdef';
+  const RO = 'read-only-key-0123456789abcdef';
+  const RO2 = 'read-only-key-2-0123456789abcdef';
+  const noSecret = (msgs: string[]) => {
+    for (const m of msgs) {
+      for (const k of [ADMIN, ISSUER, RO, RO2]) expect(m).not.toContain(k);
+    }
+  };
+
+  it('parses labelled entries', () => {
+    const r = parseReadOnlyApiKeys(`console-ro:${RO}, viewer:${RO2}`);
+    expect(r.entries).toEqual([
+      { label: 'console-ro', key: RO },
+      { label: 'viewer', key: RO2 },
+    ]);
+    expect(r.warnings).toEqual([]);
+    expect(r.errors).toEqual([]);
+  });
+
+  it('empty / undefined gives no entries', () => {
+    expect(parseReadOnlyApiKeys(undefined).entries).toEqual([]);
+    expect(parseReadOnlyApiKeys(' , ').entries).toEqual([]);
+  });
+
+  it('skips a bare key with a warning (labels are required)', () => {
+    const r = parseReadOnlyApiKeys(`${RO},viewer:${RO2}`);
+    expect(r.entries).toEqual([{ label: 'viewer', key: RO2 }]);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toMatch(/entry 1: not of the form label:key/);
+    noSecret(r.warnings);
+  });
+
+  it('skips an entry whose key is an admin key (admin wins)', () => {
+    const r = parseReadOnlyApiKeys(`ro:${ADMIN}`, [ADMIN]);
+    expect(r.entries).toEqual([]);
+    expect(r.warnings[0]).toMatch(/also an API_KEYS key/);
+    noSecret(r.warnings);
+  });
+
+  it('skips an entry whose key is an issuer key', () => {
+    const r = parseReadOnlyApiKeys(`ro:${ISSUER}`, [ADMIN], [ISSUER]);
+    expect(r.entries).toEqual([]);
+    expect(r.warnings[0]).toMatch(/also an ISSUER_KEYS key/);
+    noSecret(r.warnings);
+  });
+
+  it('skips a duplicate key', () => {
+    const r = parseReadOnlyApiKeys(`a:${RO},b:${RO}`);
+    expect(r.entries).toEqual([{ label: 'a', key: RO }]);
+    expect(r.warnings[0]).toMatch(/entry 2 \(b\): duplicate key/);
+  });
+
+  it('skips a label that is part of a configured key (reversed key:label typo)', () => {
+    // fragment of an admin key
+    const r1 = parseReadOnlyApiKeys(`${ADMIN.slice(0, 20)}:${RO2}`, [ADMIN]);
+    expect(r1.entries).toEqual([]);
+    expect(r1.warnings[0]).toMatch(/label is part of a configured key/);
+    // fragment of another read key in the same list
+    const r2 = parseReadOnlyApiKeys(`${RO.slice(0, 12)}:${RO2},x:${RO}`);
+    expect(r2.entries).toEqual([{ label: 'x', key: RO }]);
+    expect(r2.warnings[0]).toMatch(/entry 1: its label is part of a configured key/);
+    noSecret([...r1.warnings, ...r2.warnings]);
+  });
+
+  it('a label repeated within the list is a boot error', () => {
+    const r = parseReadOnlyApiKeys(`viewer:${RO},viewer:${RO2}`);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatch(/entry 2: label "viewer" is already used by an earlier entry/);
+    noSecret(r.errors);
+  });
+
+  it('a label equal to an API_KEYS label is a boot error', () => {
+    const r = parseReadOnlyApiKeys(`console:${RO}`, [ADMIN], [], ['console']);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatch(/already used by an API_KEYS entry/);
+    noSecret(r.errors);
+  });
+
+  it('parseApiKeys behaviour is unchanged by the shared split', () => {
+    expect(parseApiKeys(`ops:${ADMIN},${ISSUER}`).entries).toEqual([
+      { label: 'ops', key: ADMIN },
+      { label: 'unlabelled-2', key: ISSUER },
+    ]);
   });
 });

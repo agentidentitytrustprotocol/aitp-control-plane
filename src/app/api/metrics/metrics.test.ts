@@ -34,7 +34,7 @@ let droppedCount = 0;
 let eventsDropped = 0;
 let eventsDuplicate = 0;
 let enrollFailures: Record<string, number> = {};
-let sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
+let sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0, readOpen: 0 };
 
 interface Thenable {
   from: () => Thenable;
@@ -105,7 +105,7 @@ beforeEach(() => {
   eventsDropped = 0;
   eventsDuplicate = 0;
   enrollFailures = {};
-  sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0 };
+  sseMetrics = { open: 0, openedTotal: 0, rejectedTotal: 0, readOpen: 0 };
 });
 
 /**
@@ -322,11 +322,12 @@ describe('GET /api/metrics — SSE stream lifecycle', () => {
   });
 
   it('tracks the values the SSE counters report', async () => {
-    sseMetrics = { open: 3, openedTotal: 11, rejectedTotal: 2 };
+    sseMetrics = { open: 3, openedTotal: 11, rejectedTotal: 2, readOpen: 1 };
     const text = await (await GET()).text();
     expect(text).toContain('aitp_control_plane_sse_streams_open 3');
     expect(text).toContain('aitp_control_plane_sse_streams_opened_total 11');
     expect(text).toContain('aitp_control_plane_sse_streams_rejected_total 2');
+    expect(text).toContain('aitp_control_plane_sse_streams_open_read_key 1');
   });
 
   it('takes the snapshot from the REAL module, so the wiring is not tested against a fabricated shape', async () => {
@@ -368,7 +369,7 @@ describe('GET /api/metrics — exposition format', () => {
     dropTotals = { events: 1 };
     breakerSnaps = { wh1: { state: 'open' } };
     enrollFailures = { signature_invalid: 1 };
-    sseMetrics = { open: 1, openedTotal: 1, rejectedTotal: 1 };
+    sseMetrics = { open: 1, openedTotal: 1, rejectedTotal: 1, readOpen: 0 };
 
     const text = await (await GET()).text();
     const names = new Set(sampleNames(text));
@@ -385,7 +386,7 @@ describe('GET /api/metrics — DB unavailable', () => {
     dbFail = true;
     dropTotals = { events: 1 };
     enrollFailures = { signature_invalid: 3, none: 0 };
-    sseMetrics = { open: 4, openedTotal: 9, rejectedTotal: 5 };
+    sseMetrics = { open: 4, openedTotal: 9, rejectedTotal: 5, readOpen: 0 };
     const res = await GET();
     expect(res.status).toBe(200);
     const text = await res.text();
@@ -452,7 +453,7 @@ describe('GET /api/metrics — DB unavailable', () => {
     // outage into a 500 and take the process-local series down with it —
     // exactly the series emitted outside the DB try so they survive an outage.
     dbFail = true;
-    sseMetrics = { open: 2, openedTotal: 3, rejectedTotal: 1 };
+    sseMetrics = { open: 2, openedTotal: 3, rejectedTotal: 1, readOpen: 0 };
     loggerWarnMock.mockImplementation(() => {
       throw new Error('logger is broken');
     });

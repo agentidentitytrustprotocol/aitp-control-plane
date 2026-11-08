@@ -75,6 +75,7 @@ and pushed to Railway with `deploy/doppler-sync.sh`; see
 | `ENROLLMENT_SECRET` | yes | empty | Server-side HMAC secret (**≥ 32 chars**) for minting/verifying one-time enrollment tokens (callers never present it). **Checked at boot: with `NODE_ENV=production` an unset or too-short value makes the process print one fatal line and exit 1** — so a bad value fails the deploy instead of deploying green. Outside production it warns once at boot and starts, and both `POST /api/registry/enroll` and `POST /api/registry/agents` then return 503 for every request. Deliberately not checked by `/api/readyz` — see [operations.md](docs/operations.md#health-readiness--graceful-shutdown). |
 | `CORS_ORIGIN` | **prod** | `http://localhost:3000` | Allowed origin for the JSON API. Defaults to `http://localhost:3000` if unset (including in prod) — set it to the UI plane origin. |
 | `ISSUER_KEYS` | no | empty | Comma-separated `label@aid=key` entries: one key per issuing agent, which opens **only** `GET /api/revocations?iss=<that aid>` (any other `iss` is `403`, any other route `401`). A key that is also in `API_KEYS` is refused. The label names the agent's series in the last-pull metric — see [operations.md](docs/operations.md#revocation-relay). |
+| `READ_ONLY_API_KEYS` | no | empty | Comma-separated `label:key` entries (label required) for read-only consumers: `GET` on a fixed allowlist of dashboard routes only; anything else is `403 READ_ONLY_KEY`. A key also in `API_KEYS`/`ISSUER_KEYS` is skipped; a label reused across lists is fatal — see [api.md](docs/api.md#read-only-keys). |
 | `LOG_LEVEL` | no | `info` in production, `debug` otherwise | Pino log level: trace / debug / info / warn / error / fatal. Outside production logs go through `pino-pretty`; in production they are JSON. |
 | `NODE_ENV` | **prod** | unset (`next start` and the image set `production`) | Every production safeguard keys on the exact (trimmed) value `production`: `API_KEYS` fail-closed, fatal `ENROLLMENT_SECRET` and `CP_AID_SEED_HEX` boot checks, https-only webhook URLs, JSON logs. Any value other than `production`, `development` or `test` logs an error at boot naming what is inactive — set `production` for staging too. See [operations.md](docs/operations.md#authentication--exposure). |
 
@@ -88,6 +89,7 @@ and pushed to Railway with `deploy/doppler-sync.sh`; see
 | `WEBHOOK_URL_ALLOWLIST` | no | empty | Comma-separated host allowlist for webhook targets. Empty = any public host (private/loopback/link-local ranges are always rejected as SSRF). Leading `.` matches subdomains. |
 | `MAX_AUDIT_EVENTS_MEMORY` | no | `500` | Size of the per-process in-memory event backlog. A new `/api/events/stream` subscriber is replayed at most the **last 100** of it (then filtered). Unrelated to `GET /api/sessions/:sessionId/replay`, which reads Postgres (default 1000, max 10000 events). |
 | `MAX_SSE_CONNECTIONS` | no | `500` | Concurrent `/api/events/stream` cap per process; over-limit returns `503 SSE_CAPACITY` |
+| `MAX_SSE_READ_KEY_CONNECTIONS` | no | 80% of `MAX_SSE_CONNECTIONS` | Share of the stream slots read-only keys may hold together (clamped to `1..MAX_SSE_CONNECTIONS`); over it, a read key gets `503 SSE_CAPACITY` |
 | `SSE_HEARTBEAT_MS` | no | `15000` | Interval between `: heartbeat` frames on an open stream, and the `retry:` reconnect hint sent in the connect prelude. Tune below your edge's idle timeout — see [operations.md](docs/operations.md#keepalive-sse_heartbeat_ms). Clamped to 1000-2147483647 ms; read at boot. |
 
 **Rate limiting** (in-memory, per-process — see [operations.md](docs/operations.md#rate-limiting))
@@ -98,6 +100,7 @@ and pushed to Railway with `deploy/doppler-sync.sh`; see
 | `RATE_LIMIT_ENROLLMENT_PER_IP_MIN` | no | `5` | `/api/registry/enroll` per-IP budget |
 | `RATE_LIMIT_PUBLIC_PER_IP_MIN` | no | `60` | Public routes per-IP budget |
 | `RATE_LIMIT_API_KEY_PER_MIN` | no | `600` | Authenticated routes per-key budget |
+| `RATE_LIMIT_READ_KEY_PER_MIN` | no | `1200` | Per-key budget for `READ_ONLY_API_KEYS` keys (own `read-key` bucket) |
 | `RATE_LIMIT_WINDOW_MS` | no | `60000` | Window over which the per-min limits accumulate |
 | `CLIENT_IP_HEADER` | **prod** | empty | Trusted edge header carrying the real client IP (e.g. `cf-connecting-ip`). Takes precedence over `X-Forwarded-For` for rate-limit keying. |
 | `TRUSTED_PROXY_HOPS` | **prod** | `0` | Trusted proxies appending to `X-Forwarded-For`; client IP is read this many entries from the right. `0` = XFF untrusted (leftmost is spoofable). |

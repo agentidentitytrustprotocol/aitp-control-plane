@@ -13,6 +13,7 @@ import {
   acquireSseSlot,
   getSseMetrics,
   getSseOpenCount,
+  getSseReadOpenCount,
   recordSseRejected,
   releaseSseSlot,
   resetSseMetrics,
@@ -36,6 +37,7 @@ describe('SSE metrics — a fresh process, before any request', () => {
       open: 0,
       openedTotal: 0,
       rejectedTotal: 0,
+      readOpen: 0,
     });
     expect(getSseOpenCount()).toBe(0);
   });
@@ -63,6 +65,7 @@ describe('SSE metrics — accounting', () => {
       open: 2,
       openedTotal: 2,
       rejectedTotal: 0,
+      readOpen: 0,
     });
   });
 
@@ -75,6 +78,7 @@ describe('SSE metrics — accounting', () => {
       open: 1,
       openedTotal: 2,
       rejectedTotal: 0,
+      readOpen: 0,
     });
   });
 
@@ -98,6 +102,7 @@ describe('SSE metrics — accounting', () => {
       open: 1,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
   });
 
@@ -109,6 +114,28 @@ describe('SSE metrics — accounting', () => {
       open: 0,
       openedTotal: 0,
       rejectedTotal: 2,
+      readOpen: 0,
     });
+  });
+});
+
+describe('SSE metrics — read-only key sub-count', () => {
+  beforeEach(() => resetSseMetrics());
+
+  it('moves the read count only for a read-key slot, and the global count for both', () => {
+    acquireSseSlot(true);
+    acquireSseSlot(false);
+    expect(getSseReadOpenCount()).toBe(1);
+    expect(getSseMetrics()).toMatchObject({ open: 2, openedTotal: 2, readOpen: 1 });
+    releaseSseSlot(true);
+    expect(getSseMetrics()).toMatchObject({ open: 1, readOpen: 0 });
+    releaseSseSlot(false);
+    expect(getSseMetrics()).toMatchObject({ open: 0, readOpen: 0 });
+  });
+
+  it('floors the read count at zero on an unmatched release', () => {
+    releaseSseSlot(true);
+    expect(getSseReadOpenCount()).toBe(0);
+    expect(getSseMetrics().open).toBe(0);
   });
 });

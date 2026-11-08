@@ -274,3 +274,98 @@ describe('config.sseHeartbeatMs', () => {
     }
   });
 });
+
+describe('config read-only keys', () => {
+  const VARS = [
+    'API_KEYS',
+    'ISSUER_KEYS',
+    'READ_ONLY_API_KEYS',
+    'RATE_LIMIT_READ_KEY_PER_MIN',
+    'MAX_SSE_CONNECTIONS',
+    'MAX_SSE_READ_KEY_CONNECTIONS',
+  ];
+  afterEach(() => {
+    for (const v of VARS) delete process.env[v];
+  });
+  async function load(env: Record<string, string>) {
+    for (const v of VARS) delete process.env[v];
+    Object.assign(process.env, env);
+    jest.resetModules();
+    return (await import('./config')).config;
+  }
+
+  it('parses READ_ONLY_API_KEYS and skips one that repeats an admin key', async () => {
+    const c = await load({
+      API_KEYS: 'ops:admin-0123456789abcdef',
+      READ_ONLY_API_KEYS: 'console-ro:ro-0123456789abcdef,dup:admin-0123456789abcdef',
+    });
+    expect(c.readOnlyKeyEntries).toEqual([
+      { label: 'console-ro', key: 'ro-0123456789abcdef' },
+    ]);
+    expect(c.keyLabelErrors).toEqual([]);
+  });
+
+  it('folds a read-only label clash into keyLabelErrors', async () => {
+    const c = await load({
+      API_KEYS: 'console:admin-0123456789abcdef',
+      READ_ONLY_API_KEYS: 'console:ro-0123456789abcdef',
+    });
+    expect(c.keyLabelErrors).toHaveLength(1);
+    expect(c.keyLabelErrors[0]).toMatch(/READ_ONLY_API_KEYS entry 1/);
+  });
+
+  it('defaults: read-key rate 1200/min, SSE read cap 400 of 500', async () => {
+    const c = await load({});
+    expect(c.rateLimitReadKeyMin).toBe(1200);
+    expect(c.maxSseConnections).toBe(500);
+    expect(c.maxSseReadKeyConnections).toBe(400);
+  });
+
+  it('honours explicit values', async () => {
+    const c = await load({
+      RATE_LIMIT_READ_KEY_PER_MIN: '30',
+      MAX_SSE_CONNECTIONS: '50',
+      MAX_SSE_READ_KEY_CONNECTIONS: '10',
+    });
+    expect(c.rateLimitReadKeyMin).toBe(30);
+    expect(c.maxSseReadKeyConnections).toBe(10);
+  });
+
+  it('scales the default SSE read cap with MAX_SSE_CONNECTIONS', async () => {
+    const c = await load({ MAX_SSE_CONNECTIONS: '10' });
+    expect(c.maxSseReadKeyConnections).toBe(8);
+  });
+});
+
+describe('readSseReadKeyCap', () => {
+  let readSseReadKeyCap: typeof import('./config').readSseReadKeyCap;
+  beforeAll(async () => {
+    jest.resetModules();
+    ({ readSseReadKeyCap } = await import('./config'));
+  });
+
+  it('unset or blank -> 80% of max, no warning', () => {
+    expect(readSseReadKeyCap(undefined, 500)).toEqual({ value: 400, warning: null });
+    expect(readSseReadKeyCap(' ', 500)).toEqual({ value: 400, warning: null });
+    expect(readSseReadKeyCap(undefined, 1)).toEqual({ value: 1, warning: null });
+  });
+
+  it('in range -> as given', () => {
+    expect(readSseReadKeyCap('1', 500)).toEqual({ value: 1, warning: null });
+    expect(readSseReadKeyCap('500', 500)).toEqual({ value: 500, warning: null });
+  });
+
+  it('0, negative or above max is clamped with a warning', () => {
+    expect(readSseReadKeyCap('0', 500).value).toBe(1);
+    expect(readSseReadKeyCap('-3', 500).value).toBe(1);
+    const hi = readSseReadKeyCap('900', 500);
+    expect(hi.value).toBe(500);
+    expect(hi.warning).toMatch(/outside 1\.\.MAX_SSE_CONNECTIONS \(500\)/);
+  });
+
+  it('non-numeric falls back to the default with a warning', () => {
+    const r = readSseReadKeyCap('lots', 500);
+    expect(r.value).toBe(400);
+    expect(r.warning).toMatch(/not a number/);
+  });
+});

@@ -18,7 +18,9 @@ info:
     scheme) require an API key. The gate answers `401 INVALID_API_KEY` for a
     missing or unknown key, and in production `503 SERVER_MISCONFIGURED` when
     `API_KEYS` is empty; in non-production an empty `API_KEYS` disables the
-    check.
+    check. A read-only key (`READ_ONLY_API_KEYS`) is accepted only on the GET
+    operations that list the `readOnlyKey` scheme; on any other operation it
+    gets `403 READ_ONLY_KEY` (an unknown key stays `401`).
 
     Idempotency: a replayed `Idempotency-Key` response carries
     `Idempotency-Replayed: true`. See docs/api.md#idempotency.
@@ -80,6 +82,15 @@ components:
         ONLY on `GET /api/revocations`, and only for `iss` equal to the AID it
         is bound to (else `403 ISSUER_MISMATCH`); on any other route it is an
         unknown key (`401`). Never carries admin rights.
+    readOnlyKey:
+      type: http
+      scheme: bearer
+      description: >-
+        Read-only key from the `READ_ONLY_API_KEYS` env (`label:key`). Accepted
+        ONLY with GET on the operations that list this scheme; any other method
+        (including HEAD) or route answers `403 READ_ONLY_KEY`. Never carries
+        admin rights; `addedBy` fields come back `null`. Rate-limited in its
+        own per-key `read-key` bucket (`RATE_LIMIT_READ_KEY_PER_MIN`).
     enrollmentToken:
       type: http
       scheme: bearer
@@ -129,6 +140,14 @@ components:
         `code` is `INVALID_API_KEY` — the request gate found no API key, or one
         not in `API_KEYS`. Returned before the handler runs. Not returned in
         non-production when `API_KEYS` is empty.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ReadOnlyKey:
+      description: >-
+        `code` is `READ_ONLY_KEY` — a `READ_ONLY_API_KEYS` key was presented on
+        an operation it does not open (read keys open only the GETs that list
+        the `readOnlyKey` scheme). Returned by the gate before the handler runs.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -1003,6 +1022,7 @@ paths:
         Requires an `API_KEYS` (admin) key; issuer keys are refused. Exempt
         from rate limiting once authenticated, so a scraper is never throttled.
       responses:
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "401":
           description: Missing or unknown API key (`INVALID_API_KEY`).
           content:
@@ -1343,6 +1363,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/registry/agents/{aid}/manifest:
@@ -1369,6 +1390,9 @@ paths:
 
   /api/sessions:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [sessions]
       summary: List handshake sessions
       description: >-
@@ -1422,6 +1446,9 @@ paths:
         required: true
         schema: { type: string }
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [sessions]
       summary: Fetch one handshake session
       responses:
@@ -1496,10 +1523,14 @@ paths:
             The body is whatever the framework renders, not the shared `Error`
             shape.
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/events/history:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [events]
       summary: Query persisted audit events
       parameters:
@@ -1543,6 +1574,9 @@ paths:
 
   /api/events/stream:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [events]
       summary: Server-Sent Events live stream (with backlog replay)
       parameters:
@@ -1647,6 +1681,7 @@ paths:
             is whatever the framework renders and is **not** the shared `Error`
             shape, which is why no schema is declared here.
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/revocations:
@@ -1677,7 +1712,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: "`code` is `ISSUER_MISMATCH`: an issuer key asked for another issuer's entries."
+          description: "`code` is `ISSUER_MISMATCH`: an issuer key asked for another issuer's entries; or `READ_ONLY_KEY`: a read-only key, which this route does not open."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1697,6 +1732,9 @@ paths:
 
   /api/revocation/issuers:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [revocation]
       summary: Issuers that have revocation entries, with counts
       description: >-
@@ -1747,6 +1785,7 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Webhook" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     post:
       tags: [webhooks]
@@ -1778,6 +1817,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
@@ -1821,6 +1861,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
@@ -1855,6 +1896,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/audit:
@@ -1880,10 +1922,14 @@ paths:
                     type: integer
                     description: Number of entries in this page (not the total).
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/dashboard/overview:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [dashboard]
       summary: Aggregate counts + recent activity
       parameters:
@@ -1895,6 +1941,9 @@ paths:
 
   /api/dashboard/agents:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [dashboard]
       summary: Per-agent metrics
       responses:
@@ -1904,6 +1953,9 @@ paths:
 
   /api/tcts:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [tcts]
       summary: Query observed TCTs
       description: >-
@@ -1942,6 +1994,9 @@ paths:
 
   /api/delegations:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [delegations]
       summary: Query observed delegation chains
       description: |
@@ -1981,6 +2036,9 @@ paths:
 
   /api/trust-anchors:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [trust]
       summary: List OIDC trust anchors
       parameters:
@@ -2046,6 +2104,7 @@ paths:
                         properties:
                           id: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
@@ -2059,6 +2118,9 @@ paths:
           A non-UUID value is `400 ID_INVALID` (syntax-only check, any UUID
           version), before the database is touched.
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [trust]
       summary: Fetch one trust anchor (without `addedBy`)
       responses:
@@ -2151,6 +2213,7 @@ paths:
                         properties:
                           id: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
@@ -2167,12 +2230,16 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/trust-anchors/{id}/jwks:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [trust]
       summary: CP-cached JWKS for a trust anchor
       description: >-
@@ -2235,6 +2302,9 @@ paths:
 
   /api/pinned-keys:
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [trust]
       summary: List pinned keys (or look up a specific (namespace, aid))
       description: With `?aid=` (and optional `?namespace=`), returns the single matching row.
@@ -2375,6 +2445,7 @@ paths:
             **not** the shared `Error` shape, which is why no schema is
             declared here; the database message never reaches the client.
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
     delete:
       tags: [trust]
@@ -2397,6 +2468,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/sessions/{sessionId}/export:
@@ -2404,6 +2476,9 @@ paths:
       - { name: sessionId, in: path, required: true, schema: { type: string } }
       - { name: format, in: query, schema: { type: string, enum: [json, jsonl], default: json } }
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [sessions]
       summary: Export session bundle (session + events + projected TCTs)
       responses:
@@ -2430,6 +2505,9 @@ paths:
       - { name: until, in: query, schema: { type: string, format: date-time } }
       - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 10000 } }
     get:
+      security:
+        - apiKey: []
+        - readOnlyKey: []
       tags: [sessions]
       summary: Ordered event stream for one session (offline replay)
       description: >-
@@ -2483,6 +2561,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}/circuit-breaker:
@@ -2503,6 +2582,7 @@ paths:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
         "400": { $ref: "#/components/responses/IdInvalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }
 
   /api/webhooks/{id}/circuit-breaker/reset:
@@ -2523,4 +2603,5 @@ paths:
               schema: { $ref: "#/components/schemas/CircuitBreakerSnapshot" }
         "400": { $ref: "#/components/responses/IdInvalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ReadOnlyKey" }
         "503": { $ref: "#/components/responses/GateMisconfigured" }

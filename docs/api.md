@@ -43,7 +43,7 @@ spec rather than restate it.
   envelope, failed signature or proof-of-possession, bad AID), which is broader
   than the registry's schema-validation-only meaning.
 
-  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / unavailable / at capacity). DELETEs do not share one success shape: some answer `204 No Content`, others `200` with a small confirmation body — so check the status per route rather than assuming one shape for "a DELETE on this API". Each DELETE's status and body are stated on that operation in [`openapi.yaml`](../openapi.yaml) (and in the route tables below).
+  HTTP status codes are conventional: `400` (bad body/filter), `401` (auth), `403` (`READ_ONLY_KEY`, or an issuer key on another `iss`), `404` (not found), `405` (wrong method), `409` (conflict), `413` (payload too large), `429` (rate limited), `500` (internal fault), `503` (misconfigured / unavailable / at capacity). DELETEs do not share one success shape: some answer `204 No Content`, others `200` with a small confirmation body — so check the status per route rather than assuming one shape for "a DELETE on this API". Each DELETE's status and body are stated on that operation in [`openapi.yaml`](../openapi.yaml) (and in the route tables below).
 
   A `500` **never** carries the shape above. Its body is whatever the framework renders, so do not parse it and do not branch on it: the status is the whole signal — retry, and if it persists, the server's operator has the detail in their logs. Routes that cannot classify a failure rethrow it on purpose, which keeps internal detail (database messages especially) out of client-facing bodies; [`openapi.yaml`](../openapi.yaml) says on each declared `500` why that route can reach it. Where a route is known to still answer `500` for an input mistake rather than a `400`, it is listed per route below. `POST /api/events` no longer does: an item the database cannot store (including one with a NUL or a lone UTF-16 surrogate in its `jsonb` fields) is dropped and reported instead (see [`POST /api/events` body](#post-apievents-body)); its `500` now means a database fault — in the batch INSERT or, with an `Idempotency-Key`, the key lookup or response re-read.
 
@@ -60,6 +60,7 @@ spec rather than restate it.
 | `POST /api/registry/enroll` | none — caller submits its own **signed manifest**; the CP verifies the signature and issues a one-time token |
 | `POST /api/registry/agents` | `Authorization: Bearer <enrollment-token>` (the token returned by `/enroll`, single-use) |
 | All other gated routes | `Authorization: Bearer <API_KEY>` from the `API_KEYS` allowlist |
+| Read-only GETs (list below) | `API_KEYS` key, **or** a `READ_ONLY_API_KEYS` key — see [Read-only keys](#read-only-keys) |
 
 A gated request with a missing or unknown key is rejected by the gate with `401 { "error": "Unauthorized", "code": "INVALID_API_KEY" }` before it reaches a handler. In production, an empty `API_KEYS` makes every gated route return `503 SERVER_MISCONFIGURED` — fail-safe against accidental exposure. In non-production, an empty `API_KEYS` disables auth on gated routes (a boot-time warning is logged).
 
@@ -79,6 +80,28 @@ API_KEYS=console-20261024:<secret>,playground:<secret>,<legacy-bare-secret>
 - **Rotation without downtime.** Add the new key next to the old one under a **new label** (`console-20261024:<old>,console-20261124:<new>`), move the consumer to it, then remove the old entry; the removed key answers `401 INVALID_API_KEY` from then on. `scripts/handoff/rotate-api-key.sh` does this for the console key (dry run by default; `--apply`, `--rollback`).
 - **Issuer key rotation** (`ISSUER_KEYS`, [Revocation](#revocation)) is the same overlap: one AID may be bound under several labels, so add `researcher-2@<aid>=<new>` next to `researcher-1@<aid>=<old>`, move the agent to the new key, then remove the old entry. Each label has exactly one AID, since a label used twice is fatal at boot; both keys pull the same `iss` meanwhile, and the last-pull metric shows two series for that `aid` until the old entry is removed (a redeploy, which clears its series).
 - **Review.** `scripts/audit-review.ts` is a read-only report over `admin_audit_log`, telemetry and the state tables for a `--since`/`--until` range, grouped by key label, route, source IP and outcome, with unattributed mutations flagged (`npx tsx scripts/audit-review.ts --since 2026-05-23 [--known-actors key:console-*,...] [--json]`; reads `AUDIT_REVIEW_DATABASE_URL` or `DATABASE_URL`, and opens a `default_transaction_read_only` session). Not every row comes from a key: a `webhook.unsubscribed` row (a receiver answered `410 Gone`) has actor `system:webhook-delivery`, so include `system:*` in `--known-actors` to keep those rows out of the flagged list.
+
+### Read-only keys
+
+`READ_ONLY_API_KEYS` is a second key list, for a consumer that only reads (the console's dashboards). Entries are `label:key`, comma-separated; **the label is required** (an unlabelled entry is skipped with a boot warning). Clients send the key the same way: `Authorization: Bearer <secret>`.
+
+A read-only key opens **only `GET`**, and only on these routes (exact paths; `{x}` is one path segment):
+
+- `/api/dashboard/overview`, `/api/dashboard/agents`
+- `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/replay`, `/api/sessions/{id}/export`
+- `/api/events/history`, `/api/events/stream`
+- `/api/tcts`, `/api/delegations`, `/api/pinned-keys`, `/api/revocation/issuers`
+- `/api/trust-anchors`, `/api/trust-anchors/{id}`, `/api/trust-anchors/{id}/jwks`
+- `/api/registry/agents`, `/api/registry/agents/{aid}`, `/api/registry/agents/{aid}/manifest` (already public; listed so the allowlist stays complete if they are ever gated)
+
+On a gated route, any other method (including `HEAD`) or route, such as every gated write, `/api/audit`, `/api/metrics`, `/api/webhooks*`, `/api/revocations` and `/api/registry/agents/{aid}/export`, is refused by the gate with `403 { "error": "Forbidden: read-only key", "code": "READ_ONLY_KEY" }`. Paths match exactly, never by prefix: a different casing or a trailing slash never widens the allowlist. An unknown key is still `401 INVALID_API_KEY`. Public routes ignore the key's kind: they answer a read key exactly as they answer an anonymous caller.
+
+- **Never admin.** A key also listed in `API_KEYS` or `ISSUER_KEYS` is skipped with a boot warning (it keeps its stronger or narrower meaning there). A label that is part of a configured key is skipped too. A label used twice, or already used by an `API_KEYS` entry, is **fatal** at boot.
+- **No admin detail.** Responses that carry an operator identity hide it from read keys: `addedBy` on `/api/pinned-keys` and `/api/trust-anchors` comes back `null`.
+- **Own rate bucket.** Each read key gets a `read-key` bucket (`RATE_LIMIT_READ_KEY_PER_MIN`, default 1200/min), separate from the admin `api-key` buckets, so dashboard traffic cannot starve admin or ingest callers. A read key on an already-public `GET` also counts against its own bucket instead of the caller's IP bucket.
+- **SSE sub-cap.** Read-key streams on `/api/events/stream` share at most `MAX_SSE_READ_KEY_CONNECTIONS` (default 80% of `MAX_SSE_CONNECTIONS`) of the stream slots, so admin streams always have room; over the cap answers `503`.
+- **Kind header.** The gate tells the handler which kind of key passed (`x-aitp-key-kind: admin | read | issuer`); a client-supplied copy is dropped.
+- **Rotation** is the same overlap as admin keys: add the new `label:key` under a new label, move the consumer, remove the old entry. `scripts/handoff/create-read-key.sh` creates one (dry run by default; `--apply`).
 
 `ENROLLMENT_SECRET` is the **server-side** HMAC key the CP uses to mint and verify enrollment tokens. Callers never present it directly. A production server whose value is unset or shorter than 32 characters refuses to start, so the enrollment `503 SERVER_MISCONFIGURED` below is something you should only see from a non-production deployment — see [operations.md](operations.md#authentication--exposure).
 

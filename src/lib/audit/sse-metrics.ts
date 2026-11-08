@@ -51,6 +51,8 @@ declare global {
   var __sseOpenedTotal: number | undefined;
   // eslint-disable-next-line no-var
   var __sseRejectedTotal: number | undefined;
+  // eslint-disable-next-line no-var
+  var __sseReadOpenCount: number | undefined;
 }
 
 /**
@@ -62,9 +64,13 @@ declare global {
  * with no way to tell which is right. Returns the new open count so the caller
  * can log it without re-reading the global.
  */
-export function acquireSseSlot(): number {
+export function acquireSseSlot(readKey = false): number {
   globalThis.__sseOpenCount = (globalThis.__sseOpenCount ?? 0) + 1;
   globalThis.__sseOpenedTotal = (globalThis.__sseOpenedTotal ?? 0) + 1;
+  // A read-only-key stream also holds one slot of the read-key sub-cap
+  // (config.maxSseReadKeyConnections). Same function, so the two counts can
+  // never drift apart; the caller passes the SAME flag to releaseSseSlot.
+  if (readKey) globalThis.__sseReadOpenCount = (globalThis.__sseReadOpenCount ?? 0) + 1;
   return globalThis.__sseOpenCount;
 }
 
@@ -73,8 +79,16 @@ export function acquireSseSlot(): number {
  * slightly stale one, and it would also let the capacity cap over-admit.
  * Call this from ONE place only — the route's idempotent `cleanup()`.
  */
-export function releaseSseSlot(): void {
+export function releaseSseSlot(readKey = false): void {
   globalThis.__sseOpenCount = Math.max(0, (globalThis.__sseOpenCount ?? 0) - 1);
+  if (readKey) {
+    globalThis.__sseReadOpenCount = Math.max(0, (globalThis.__sseReadOpenCount ?? 0) - 1);
+  }
+}
+
+/** Open streams held by READ-ONLY keys right now; what the read sub-cap reads. */
+export function getSseReadOpenCount(): number {
+  return globalThis.__sseReadOpenCount ?? 0;
 }
 
 /** One connection refused by the cap with `503 SSE_CAPACITY`. */
@@ -94,6 +108,8 @@ export interface SseMetricsSnapshot {
   openedTotal: number;
   /** Connections refused by the cap since process start. */
   rejectedTotal: number;
+  /** Of `open`, the streams held by read-only keys. */
+  readOpen: number;
 }
 
 /**
@@ -110,6 +126,7 @@ export function getSseMetrics(): SseMetricsSnapshot {
     open: globalThis.__sseOpenCount ?? 0,
     openedTotal: globalThis.__sseOpenedTotal ?? 0,
     rejectedTotal: globalThis.__sseRejectedTotal ?? 0,
+    readOpen: globalThis.__sseReadOpenCount ?? 0,
   };
 }
 
@@ -118,4 +135,5 @@ export function resetSseMetrics(): void {
   globalThis.__sseOpenCount = 0;
   globalThis.__sseOpenedTotal = 0;
   globalThis.__sseRejectedTotal = 0;
+  globalThis.__sseReadOpenCount = 0;
 }

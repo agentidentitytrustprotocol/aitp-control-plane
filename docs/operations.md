@@ -336,6 +336,12 @@ discovery paths, apply it at the edge.
 | `enroll-ip` | 5/min | `RATE_LIMIT_ENROLLMENT_PER_IP_MIN` | client IP (brute-force guard on enrollment) |
 | `public-ip` | 60/min | `RATE_LIMIT_PUBLIC_PER_IP_MIN` | client IP |
 | `api-key` | 600/min | `RATE_LIMIT_API_KEY_PER_MIN` | API key prefix (per key, not per label) |
+| `read-key` | 1200/min | `RATE_LIMIT_READ_KEY_PER_MIN` | read-only key prefix (`READ_ONLY_API_KEYS`), so dashboard reads never drain an admin bucket |
+
+A recognised admin or read-only key on a **public** `GET` is counted in its
+own key bucket rather than the caller's IP bucket. Unknown keys, issuer keys,
+public writes and enrollment stay on the per-IP buckets, so presenting junk in
+`Authorization` cannot escape the IP limit.
 
 - `RATE_LIMIT_WINDOW_MS` (default 60000) is the accumulation window.
 - `RATE_LIMIT_ENABLED=false` disables the limiter entirely (dev / load tests).
@@ -364,6 +370,10 @@ or are trivially bypassed. Match them to your actual edge.
 
 - **`MAX_SSE_CONNECTIONS`** (default 500) caps concurrent streams per process;
   over the cap returns `503 SSE_CAPACITY`. Clients should back off and retry.
+- **`MAX_SSE_READ_KEY_CONNECTIONS`** (default 80% of `MAX_SSE_CONNECTIONS`)
+  caps how many of those streams read-only keys hold together, so admin
+  streams always have headroom. A read key over it also gets
+  `503 SSE_CAPACITY` (logged with reason `read-key-capacity`).
 - **`MAX_AUDIT_EVENTS_MEMORY`** (default 500) sizes the bus's total in-memory
   retention (older events are evicted and counted as dropped). Each new
   subscriber replays at most the last **100** events before going live,
@@ -448,6 +458,7 @@ was once undiagnosable from outside the process for days.
 | `sse_streams_open` | Streams alive on this replica right now. Flat at `0` while the console claims to be connected means the handler is not being reached — look at the gate, the proxy, or the URL, not at the route. |
 | `sse_streams_opened_total` | Connect *rate*, by differencing. Climbing fast with `sse_streams_open` flat is a reconnect loop: streams are being accepted and dying immediately. Suspect an idle timeout or a function duration cap at the edge rather than the route. |
 | `sse_streams_rejected_total` | Connections refused by the cap. Any movement means `MAX_SSE_CONNECTIONS` is too low for the current client population, or streams are leaking rather than closing. |
+| `sse_streams_open_read_key` | The part of `sse_streams_open` held by read-only keys. Pinned at `MAX_SSE_READ_KEY_CONNECTIONS` while rejections climb means read-key consumers, not admin ones, are what is hitting the cap. |
 
 Both counters are cumulative and per-process, so they reset on restart and on a
 redeploy — normal for a Prometheus counter, and a reset is itself the signal that
@@ -750,7 +761,8 @@ in this table, and conflating them will give you wrong numbers:
 | `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
 | `sse_streams_open` | gauge | — | `/api/events/stream` connections open right now on this replica |
 | `sse_streams_opened_total` | counter | — | Stream connections accepted since process start |
-| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` |
+| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` or `MAX_SSE_READ_KEY_CONNECTIONS` |
+| `sse_streams_open_read_key` | gauge | — | Of `sse_streams_open`, the streams held by read-only keys |
 
 The DB-derived series (`agents_*`, `sessions_total`, `webhook_deliveries`,
 `audit_events`) are **absent** from a scrape taken while the database is

@@ -30,6 +30,10 @@ export function actorIdFromAuthHeader(authHeader: string | null): string | null 
  * - KEY_ISSUER_HEADER: set only when an issuer key (ISSUER_KEYS) authenticated
  *   the request: the AID that key is bound to. A handler that sees it MUST
  *   restrict its answer to that issuer.
+ * - KEY_KIND_HEADER: which list the authenticating key came from —
+ *   `admin` (API_KEYS), `read` (READ_ONLY_API_KEYS) or `issuer` (ISSUER_KEYS).
+ *   Absent on every public route (even with a recognised key) and in dev with no
+ *   API_KEYS. A handler that shows admin-only detail MUST check for `admin`.
  * - CLIENT_IP_FORWARD_HEADER: the client IP as the gate resolved it for rate
  *   limiting. Only as trustworthy as CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS
  *   make it (see src/lib/config.ts); `unknown` is not forwarded.
@@ -37,6 +41,25 @@ export function actorIdFromAuthHeader(authHeader: string | null): string | null 
 export const KEY_LABEL_HEADER = 'x-aitp-key-label';
 export const KEY_ISSUER_HEADER = 'x-aitp-key-issuer';
 export const CLIENT_IP_FORWARD_HEADER = 'x-aitp-client-ip';
+export const KEY_KIND_HEADER = 'x-aitp-key-kind';
+
+/** Values of KEY_KIND_HEADER. */
+export type KeyKind = 'admin' | 'read' | 'issuer';
+
+/**
+ * Whether a response may carry admin-only detail (e.g. `addedBy` key
+ * fingerprints). True only when an API_KEYS key authenticated the request, or
+ * when no API_KEYS are configured at all (dev-open: the gate lets every request
+ * through unauthenticated, and refuses with 503 in production). Fails closed:
+ * a missing or unexpected header is not admin.
+ */
+export function showsAdminDetail(
+  headers: Headers,
+  apiKeysConfigured: boolean,
+): boolean {
+  if (!apiKeysConfigured) return true;
+  return headers.get(KEY_KIND_HEADER) === 'admin';
+}
 
 /** Admin-audit actor for a request authenticated with the key labelled `label`. */
 export function actorIdForKeyLabel(label: string): string {

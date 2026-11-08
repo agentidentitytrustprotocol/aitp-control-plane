@@ -6,8 +6,11 @@ import { keyLabelBootFailure } from './key-labels-config';
 const mutableEnv = process.env as Record<string, string | undefined>;
 const AID = 'aid:pubkey:O4nSX0IWKDbZqISunQN2NnEba2AnDIlxY2jjSmqMCMs';
 
-function withKeys<T>(env: { API_KEYS?: string; ISSUER_KEYS?: string }, fn: () => T): T {
-  const keys = ['API_KEYS', 'ISSUER_KEYS'] as const;
+function withKeys<T>(
+  env: { API_KEYS?: string; ISSUER_KEYS?: string; READ_ONLY_API_KEYS?: string },
+  fn: () => T,
+): T {
+  const keys = ['API_KEYS', 'ISSUER_KEYS', 'READ_ONLY_API_KEYS'] as const;
   const saved = Object.fromEntries(keys.map((k) => [k, mutableEnv[k]]));
   for (const k of keys) {
     if (env[k] === undefined) delete mutableEnv[k];
@@ -49,6 +52,33 @@ describe('keyLabelBootFailure', () => {
     expect(line).toMatch(/API_KEYS entry 2: label "console"/);
     expect(line).toMatch(/ISSUER_KEYS entry 2: label "r"/);
     expect(line).not.toMatch(/k1|k2|i1|i2/);
+  });
+
+  it('refuses a READ_ONLY_API_KEYS label equal to an API_KEYS label', () => {
+    const line = withKeys(
+      { API_KEYS: 'console:adminsecret1', READ_ONLY_API_KEYS: 'console:readsecret1' },
+      () => load().keyLabelBootFailure(),
+    );
+    expect(line).toMatch(/READ_ONLY_API_KEYS entry 1: label "console" is already used by an API_KEYS entry/);
+    expect(line).toMatch(/READ_ONLY_API_KEYS/);
+    expect(line).not.toMatch(/adminsecret1|readsecret1/);
+  });
+
+  it('refuses a READ_ONLY_API_KEYS label repeated in its own list', () => {
+    const line = withKeys(
+      { API_KEYS: 'ops:adminsecret1', READ_ONLY_API_KEYS: 'v:readsecret1,v:readsecret2' },
+      () => load().keyLabelBootFailure(),
+    );
+    expect(line).toMatch(/READ_ONLY_API_KEYS entry 2: label "v"/);
+    expect(line).not.toMatch(/readsecret/);
+  });
+
+  it('accepts distinct admin and read-only labels', () => {
+    const line = withKeys(
+      { API_KEYS: 'console:adminsecret1', READ_ONLY_API_KEYS: 'console-ro:readsecret1' },
+      () => load().keyLabelBootFailure(),
+    );
+    expect(line).toBeNull();
   });
 
   it('accepts unique labels, including one AID under two labels (rotation overlap)', () => {

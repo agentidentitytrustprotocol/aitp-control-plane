@@ -15,7 +15,12 @@ import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { pinnedKeys } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
-import { actorIdFromAuthHeader, auditContext } from '@/lib/audit-log/actor';
+import {
+  actorIdFromAuthHeader,
+  auditContext,
+  showsAdminDetail,
+} from '@/lib/audit-log/actor';
+import { config } from '@/lib/config';
 import { withIdempotency } from '@/lib/idempotency';
 import {
   badRequest,
@@ -101,14 +106,16 @@ interface CreateBody {
   expiresAt?: unknown;
 }
 
-function rowOut(r: typeof pinnedKeys.$inferSelect) {
+// `addedBy` is the admin key fingerprint that pinned the row; only an admin
+// caller sees it (a read-only key gets null).
+function rowOut(r: typeof pinnedKeys.$inferSelect, adminDetail = true) {
   return {
     namespace: r.namespace,
     aid: r.aid,
     pubkey: r.pubkey,
     label: r.label,
     expiresAt: r.expiresAt,
-    addedBy: r.addedBy,
+    addedBy: adminDetail ? r.addedBy : null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -120,6 +127,7 @@ export async function GET(req: NextRequest) {
   if (bad) return bad;
   const namespace = sp.get('namespace');
   const aid = sp.get('aid');
+  const adminDetail = showsAdminDetail(req.headers, config.apiKeys.length > 0);
 
   if (aid) {
     const ns = namespace ?? 'default';
@@ -131,14 +139,14 @@ export async function GET(req: NextRequest) {
     if (!rows[0]) {
       return Response.json({ error: 'not found', code: 'NOT_FOUND' }, { status: 404 });
     }
-    return Response.json(rowOut(rows[0]));
+    return Response.json(rowOut(rows[0], adminDetail));
   }
 
   const query = db.select().from(pinnedKeys);
   const rows = await (
     namespace ? query.where(eq(pinnedKeys.namespace, namespace)) : query
   ).orderBy(desc(pinnedKeys.createdAt));
-  return Response.json({ pinnedKeys: rows.map(rowOut) });
+  return Response.json({ pinnedKeys: rows.map((r) => rowOut(r, adminDetail)) });
 }
 
 export async function POST(req: NextRequest) {

@@ -275,12 +275,18 @@ export async function GET() {
   );
 
   lines.push(
-    '# HELP aitp_control_plane_sse_streams_rejected_total /api/events/stream connections refused by MAX_SSE_CONNECTIONS since process start',
+    '# HELP aitp_control_plane_sse_streams_rejected_total /api/events/stream connections refused by MAX_SSE_CONNECTIONS or MAX_SSE_READ_KEY_CONNECTIONS since process start',
   );
   lines.push('# TYPE aitp_control_plane_sse_streams_rejected_total counter');
   lines.push(
     `aitp_control_plane_sse_streams_rejected_total ${sse.rejectedTotal}`,
   );
+
+  lines.push(
+    '# HELP aitp_control_plane_sse_streams_open_read_key Of sse_streams_open, the streams held by READ_ONLY_API_KEYS keys (capped by MAX_SSE_READ_KEY_CONNECTIONS)',
+  );
+  lines.push('# TYPE aitp_control_plane_sse_streams_open_read_key gauge');
+  lines.push(`aitp_control_plane_sse_streams_open_read_key ${sse.readOpen}`);
 
   return new Response(lines.join('\n') + '\n', {
     headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },

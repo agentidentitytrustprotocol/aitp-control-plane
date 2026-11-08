@@ -51,6 +51,16 @@ jest.mock('@/lib/audit-log/service', () => ({
   writeAdminAudit: (e: unknown) => writeAdminAuditMock(e),
 }));
 
+// API_KEYS as the route sees it, switchable per test: empty is dev-open (admin
+// detail shown to everyone); non-empty means only kind=admin sees it.
+let mockApiKeys: string[] = [];
+jest.mock('@/lib/config', () => {
+  const actual = jest.requireActual<typeof import('@/lib/config')>('@/lib/config');
+  const config = { ...actual.config };
+  Object.defineProperty(config, 'apiKeys', { get: () => mockApiKeys });
+  return { config };
+});
+
 import { GET, POST, DELETE } from './route';
 import { NextRequest } from 'next/server';
 
@@ -75,6 +85,7 @@ function keyRow(over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  mockApiKeys = [];
   selectResults = [];
   deleteReturning = [];
   insertedValues.length = 0;
@@ -107,6 +118,39 @@ describe('GET /api/pinned-keys', () => {
     const res = await GET(makeReq('/api/pinned-keys?aid=aid%3Apubkey%3Amissing'));
     expect(res.status).toBe(404);
     expect(((await res.json()) as { code: string }).code).toBe('NOT_FOUND');
+  });
+});
+
+describe('GET /api/pinned-keys — addedBy is admin-only', () => {
+  const FP = 'apikey:0123456789abcdef';
+  const withKind = (path: string, kind?: string) =>
+    makeReq(path, kind ? { headers: { 'x-aitp-key-kind': kind } } : undefined);
+
+  it.each([
+    ['read', null],
+    [undefined, null],
+    ['issuer', null],
+    ['admin', FP],
+  ])('kind=%s with API_KEYS set sees addedBy=%s, on the list and the ?aid lookup', async (kind, want) => {
+    mockApiKeys = ['k'];
+    selectResults = [[keyRow({ addedBy: FP })], [keyRow({ addedBy: FP })]];
+    const list = (await (await GET(withKind('/api/pinned-keys', kind))).json()) as {
+      pinnedKeys: Array<{ addedBy: unknown; aid: unknown }>;
+    };
+    expect(list.pinnedKeys[0].addedBy).toBe(want);
+    expect(list.pinnedKeys[0].aid).toBe('aid:pubkey:abc');
+    const one = (await (
+      await GET(withKind('/api/pinned-keys?aid=aid%3Apubkey%3Aabc', kind))
+    ).json()) as { addedBy: unknown };
+    expect(one.addedBy).toBe(want);
+  });
+
+  it('shows addedBy to everyone when no API_KEYS are configured (dev-open)', async () => {
+    selectResults = [[keyRow({ addedBy: FP })]];
+    const body = (await (await GET(withKind('/api/pinned-keys'))).json()) as {
+      pinnedKeys: Array<{ addedBy: unknown }>;
+    };
+    expect(body.pinnedKeys[0].addedBy).toBe(FP);
   });
 });
 

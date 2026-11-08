@@ -17,7 +17,12 @@ import { randomUUID } from 'node:crypto';
 import { db } from '@/lib/db';
 import { trustAnchors } from '@/lib/db/schema';
 import { writeAdminAudit } from '@/lib/audit-log/service';
-import { actorIdFromAuthHeader, auditContext } from '@/lib/audit-log/actor';
+import {
+  actorIdFromAuthHeader,
+  auditContext,
+  showsAdminDetail,
+} from '@/lib/audit-log/actor';
+import { config } from '@/lib/config';
 import { withIdempotency } from '@/lib/idempotency';
 import {
   badRequest,
@@ -37,7 +42,9 @@ import { alreadyExistsBody, findAnchorIdByIssuer } from '@/lib/trust-anchors/exi
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function rowOut(r: typeof trustAnchors.$inferSelect) {
+// `addedBy` is the admin key fingerprint that added the anchor; only an admin
+// caller sees it (a read-only key gets null).
+function rowOut(r: typeof trustAnchors.$inferSelect, adminDetail = true) {
   return {
     id: r.id,
     namespace: r.namespace,
@@ -45,7 +52,7 @@ function rowOut(r: typeof trustAnchors.$inferSelect) {
     jwksUrl: r.jwksUrl,
     label: r.label,
     jwksCachedAt: r.jwksCachedAt,
-    addedBy: r.addedBy,
+    addedBy: adminDetail ? r.addedBy : null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -59,7 +66,10 @@ export async function GET(req: NextRequest) {
   const rows = await (
     namespace ? query.where(eq(trustAnchors.namespace, namespace)) : query
   ).orderBy(desc(trustAnchors.createdAt));
-  return Response.json({ trustAnchors: rows.map(rowOut) });
+  const adminDetail = showsAdminDetail(req.headers, config.apiKeys.length > 0);
+  return Response.json({
+    trustAnchors: rows.map((r) => rowOut(r, adminDetail)),
+  });
 }
 
 export async function POST(req: NextRequest) {

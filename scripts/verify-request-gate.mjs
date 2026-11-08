@@ -54,6 +54,9 @@ const RUNTIME_ORIGIN = 'https://runtime-probe.invalid';
 // token.slice(0, 24), so the first 24 characters must differ.
 const KEY_PRIMARY = 'harness-primary-000000000000';
 const KEY_BURST = 'harness-ratelimit-1111111111';
+// A READ_ONLY_API_KEYS key: every built route is also probed with it (check 10's
+// `read` column) and check 16 drives its write refusal.
+const KEY_READ = 'harness-readonly-2222222222';
 
 const LIMIT_PUBLIC = 3;
 const LIMIT_ENROLL = 5;
@@ -196,6 +199,7 @@ async function boot(extraEnv = {}) {
       PORT: String(port),
       CORS_ORIGIN: RUNTIME_ORIGIN,
       API_KEYS: `${KEY_PRIMARY},${KEY_BURST}`,
+      READ_ONLY_API_KEYS: `harness-ro:${KEY_READ}`,
       CLIENT_IP_HEADER: IP_HEADER,
       RATE_LIMIT_PUBLIC_PER_IP_MIN: String(LIMIT_PUBLIC),
       RATE_LIMIT_ENROLLMENT_PER_IP_MIN: String(LIMIT_ENROLL),
@@ -372,6 +376,31 @@ async function probe(base, route) {
 }
 
 /**
+ * Probe one route with the READ_ONLY_API_KEYS key (GET), never throwing:
+ * `denied` = the gate's 403 READ_ONLY_KEY; `allowed` = the request reached the
+ * handler, whatever it answered (a timeout here means it reached the SSE stream
+ * handler, which is allowed for a read key — /api/events/stream is on its
+ * allowlist). `gated` would mean the read key was not recognised at all.
+ */
+async function probeRead(base, route) {
+  try {
+    const r = await req(base, materialize(route), { key: KEY_READ, timeoutMs: 5000 });
+    if (r.status === 403 && r.body?.code === 'READ_ONLY_KEY') return 'denied';
+    const anon = classify(r);
+    return anon === 'public' ? 'allowed' : anon;
+  } catch (err) {
+    return err?.name === 'AbortError' || /abort/i.test(err?.message ?? '')
+      ? 'allowed'
+      : `probe-error:${err?.message ?? 'unknown'}`;
+  }
+}
+
+/** Both columns of the baseline for one route. */
+async function probeBoth(base, route) {
+  return { anon: await probe(base, route), read: await probeRead(base, route) };
+}
+
+/**
  * Classify one unauthenticated probe as gated / gate-misconfigured / public.
  *
  * Classify on the GATE'S OWN SIGNATURE (the `code` in the body), never on the
@@ -525,11 +554,12 @@ function buildChecks(base, gate, baseline) {
       }
     }),
 
-    check(10, 'the effective public route set matches the committed baseline', async () => {
+    check(10, 'the effective public and read-only route sets match the committed baseline', async () => {
       const observed = {};
       for (const route of builtRoutes()) {
-        observed[route] = await probe(base, route);
+        observed[route] = await probeBoth(base, route);
       }
+      const show = (v) => (typeof v === 'string' ? v : `anon=${v.anon} read=${v.read}`);
       const diffs = [];
       for (const route of new Set([
         ...Object.keys(observed),
@@ -537,11 +567,11 @@ function buildChecks(base, gate, baseline) {
       ])) {
         const was = baseline.routes[route] ?? '(absent from baseline)';
         const now = observed[route] ?? '(no longer built)';
-        if (was !== now) diffs.push(`  ${route}: ${was} -> ${now}`);
+        if (show(was) !== show(now)) diffs.push(`  ${route}: ${show(was)} -> ${show(now)}`);
       }
       if (diffs.length) {
         fail(
-          'the effective public route set changed:\n' +
+          'the effective public / read-only route set changed:\n' +
             diffs.join('\n') +
             '\n\nIf this is intended, review each line above carefully, then ' +
             'regenerate with `node scripts/verify-request-gate.mjs --update-baseline`.',
@@ -596,6 +626,27 @@ function buildChecks(base, gate, baseline) {
   ];
 }
 
+// ── read-only key: allowlist reads pass, every write and admin read is 403 ──
+function readOnlyCheck(base) {
+  return check(16, 'a read-only key cannot write or read admin routes', async () => {
+    for (const [method, route] of [
+      ['POST', '/api/pinned-keys'],
+      ['DELETE', '/api/pinned-keys'],
+      ['POST', '/api/webhooks'],
+      ['POST', '/api/events'],
+      ['HEAD', '/api/tcts'],
+      ['GET', '/api/audit'],
+      ['GET', '/api/metrics'],
+    ]) {
+      const r = await req(base, route, { method, key: KEY_READ });
+      eq(r.status, 403, `${method} ${route} status with a read-only key`);
+      if (method !== 'HEAD') eq(r.body?.code, 'READ_ONLY_KEY', `${method} ${route} code`);
+    }
+    const res = await req(base, '/api/tcts', { key: KEY_READ });
+    ok(res.status !== 401 && res.status !== 403, `GET /api/tcts reaches the handler (got ${res.status})`);
+  });
+}
+
 // ── SERVER_MISCONFIGURED needs its own boot, with API_KEYS unset ────────────
 async function checkMisconfigured() {
   const server = await boot({ API_KEYS: '' });
@@ -619,13 +670,15 @@ async function main() {
     try {
       const routes = {};
       for (const route of builtRoutes()) {
-        routes[route] = await probe(server.base, route);
+        routes[route] = await probeBoth(server.base, route);
       }
       const baseline = {
         _comment:
           'Effective request-gate contract, derived from a RUNNING built server ' +
           '(never from src/proxy.ts). Review every "public" entry by hand: each ' +
-          'one is a route reachable with no credentials.',
+          'one is a route reachable with no credentials. `read` is the same probe with ' +
+          'a READ_ONLY_API_KEYS key: review every "allowed" entry — each one is ' +
+          'readable by anonymous console visitors.',
         gate: {
           matcherSource: gate.matchers[0]?.originalSource,
           matcherRegexp: gate.matchers[0]?.regexp,
@@ -633,9 +686,14 @@ async function main() {
         routes,
       };
       writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + '\n');
-      const pub = Object.entries(routes).filter(([, v]) => v === 'public');
-      console.log(`baseline written: ${Object.keys(routes).length} routes, ${pub.length} public`);
+      const pub = Object.entries(routes).filter(([, v]) => v.anon === 'public');
+      const rd = Object.entries(routes).filter(([, v]) => v.anon !== 'public' && v.read === 'allowed');
+      console.log(
+        `baseline written: ${Object.keys(routes).length} routes, ${pub.length} public, ` +
+          `${rd.length} more readable with a read-only key`,
+      );
       for (const [r] of pub) console.log(`  public: ${r}`);
+      for (const [r] of rd) console.log(`  read:   ${r}`);
     } finally {
       await shutdown(server);
     }
@@ -650,7 +708,7 @@ async function main() {
   const server = await boot();
   let failures = 0;
   try {
-    for (const c of buildChecks(server.base, gate, baseline)) {
+    for (const c of [...buildChecks(server.base, gate, baseline), readOnlyCheck(server.base)]) {
       currentCheck = c;
       try {
         await c.fn();

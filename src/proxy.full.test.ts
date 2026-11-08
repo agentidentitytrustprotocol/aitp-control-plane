@@ -4,13 +4,20 @@
 // deterministically without env juggling or a real bucket store.
 import { jest } from '@jest/globals';
 import { NextRequest } from 'next/server';
-import { parseApiKeys, parseIssuerKeys, type ApiKeyEntry } from './lib/api-keys';
+import {
+  parseApiKeys,
+  parseIssuerKeys,
+  parseReadOnlyApiKeys,
+  type ApiKeyEntry,
+} from './lib/api-keys';
 
 interface MockConfig {
   /** Raw API_KEYS entries (`key` or `label:key`), parsed like config.ts does. */
   apiKeys: string[];
   /** Raw ISSUER_KEYS entries (`label@aid=key`). */
   issuerKeys: string[];
+  /** Raw READ_ONLY_API_KEYS entries (`label:key`). */
+  readOnlyKeys: string[];
   isProduction: boolean;
   rateLimitEnabled: boolean;
   rateLimitWindowMs: number;
@@ -19,12 +26,14 @@ interface MockConfig {
   rateLimitEnrollPerIpMin: number;
   rateLimitPublicPerIpMin: number;
   rateLimitApiKeyMin: number;
+  rateLimitReadKeyMin: number;
   corsOrigin: string;
 }
 
 const DEFAULTS: MockConfig = {
   apiKeys: [],
   issuerKeys: [],
+  readOnlyKeys: [],
   isProduction: false,
   rateLimitEnabled: true,
   rateLimitWindowMs: 60_000,
@@ -33,6 +42,7 @@ const DEFAULTS: MockConfig = {
   rateLimitEnrollPerIpMin: 5,
   rateLimitPublicPerIpMin: 60,
   rateLimitApiKeyMin: 600,
+  rateLimitReadKeyMin: 1200,
   corsOrigin: 'https://console.example.com',
 };
 
@@ -55,13 +65,20 @@ function load(
   // Same parse as src/lib/config.ts, so `label:key` entries are exercised
   // through the real parser rather than a hand-built entries list.
   const apiKeyEntries: ApiKeyEntry[] = parseApiKeys(merged.apiKeys.join(',')).entries;
+  const issuerKeyEntries = parseIssuerKeys(
+    merged.issuerKeys.join(','),
+    apiKeyEntries.map((e) => e.key),
+  ).entries;
   const config = {
     ...merged,
     apiKeys: apiKeyEntries.map((e) => e.key),
     apiKeyEntries,
-    issuerKeyEntries: parseIssuerKeys(
-      merged.issuerKeys.join(','),
+    issuerKeyEntries,
+    readOnlyKeyEntries: parseReadOnlyApiKeys(
+      merged.readOnlyKeys.join(','),
       apiKeyEntries.map((e) => e.key),
+      issuerKeyEntries.map((e) => e.key),
+      apiKeyEntries.map((e) => e.label),
     ).entries,
   };
   const check =
@@ -531,5 +548,202 @@ describe('proxy — /api/metrics requires an admin key', () => {
   it('stays open in dev with no API_KEYS', () => {
     const { proxy } = load({ apiKeys: [], isProduction: false });
     expect(proxy(req('/api/metrics')).status).toBe(200);
+  });
+});
+
+// Wave 3 (P2): READ_ONLY_API_KEYS. A read key opens GET on an anchored
+// allowlist only; everything else it presents is a 403 READ_ONLY_KEY. It has its
+// own per-key rate bucket so visitor reads never drain an admin key's budget.
+describe('proxy — read-only keys', () => {
+  const ISSUER_AID = 'aid:pubkey:O4nSX0IWKDbZqISunQN2NnEba2AnDIlxY2jjSmqMCMs';
+  const ADMIN_KEY = 'admin-key-0123456789abcdef';
+  const READ_KEY = 'read-key-0123456789abcdefgh';
+  const ISSUER_KEY = 'issuer-key-0123456789abcdef';
+  const cfg = {
+    apiKeys: [`ops:${ADMIN_KEY}`],
+    readOnlyKeys: [`console-ro:${READ_KEY}`],
+    issuerKeys: [`researcher@${ISSUER_AID}=${ISSUER_KEY}`],
+  };
+  const bearer = (key: string) => ({ authorization: `Bearer ${key}` });
+  const forwarded = (res: Response, name: string) =>
+    res.headers.get(`x-middleware-request-${name}`);
+  const DENY: Decision = { allowed: false, remaining: 0, resetAt: Date.now() + 30_000, limit: 1200 };
+  const ALLOW: Decision = { allowed: true, remaining: 9, resetAt: 0, limit: 600 };
+
+  const ALLOWED = [
+    '/api/dashboard/agents',
+    '/api/dashboard/overview',
+    '/api/delegations',
+    '/api/events/history',
+    '/api/events/stream',
+    '/api/pinned-keys',
+    '/api/revocation/issuers',
+    '/api/sessions',
+    '/api/sessions/s-1',
+    '/api/sessions/s-1/replay',
+    '/api/sessions/s-1/export',
+    '/api/tcts',
+    '/api/trust-anchors',
+    '/api/trust-anchors/ta-1',
+    '/api/trust-anchors/ta-1/jwks',
+  ];
+
+  it.each(ALLOWED)('admits GET %s and forwards label + kind=read', (path) => {
+    const { proxy, check } = load(cfg);
+    const res = proxy(req(path, { headers: bearer(READ_KEY) }));
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-label')).toBe('console-ro');
+    expect(forwarded(res, 'x-aitp-key-kind')).toBe('read');
+    expect(check).toHaveBeenCalledWith('read-key', READ_KEY.slice(0, 24), 1200, 60_000);
+  });
+
+  it.each(['POST', 'PATCH', 'PUT', 'DELETE', 'HEAD'])(
+    'refuses %s on an allowlisted path with 403 READ_ONLY_KEY, before the limiter',
+    async (method) => {
+      const { proxy, check } = load(cfg);
+      const res = proxy(req('/api/pinned-keys', { method, headers: bearer(READ_KEY) }));
+      expect(res.status).toBe(403);
+      if (method !== 'HEAD') {
+        expect(await res.json()).toEqual({
+          error: 'Forbidden: read-only key',
+          code: 'READ_ONLY_KEY',
+        });
+      }
+      expect(check).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    '/api/audit',
+    '/api/metrics',
+    '/api/webhooks',
+    '/api/webhooks/x/circuit-breaker',
+    `/api/revocations?iss=${encodeURIComponent(ISSUER_AID)}`,
+    '/api/registry/agents/a/export',
+    '/api/revocation/entries',
+    '/api/pinned-keys/',
+    '/api/Pinned-Keys',
+    '/api/sessions/s-1/replay/extra',
+    '/api/trust-anchors/ta-1/jwks/x',
+  ])('refuses GET %s with 403 READ_ONLY_KEY', async (path) => {
+    const { proxy } = load(cfg);
+    const res = proxy(req(path, { headers: bearer(READ_KEY) }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('READ_ONLY_KEY');
+  });
+
+  it('accepts a raw (no Bearer) read key like Bearer, and refuses lowercase bearer as unknown', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req('/api/tcts', { headers: { authorization: READ_KEY } })).status).toBe(200);
+    expect(
+      proxy(req('/api/tcts', { headers: { authorization: `bearer ${READ_KEY}` } })).status,
+    ).toBe(401);
+  });
+
+  it('keeps an unknown key a 401 (not 403) on allowlisted and forbidden routes', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req('/api/tcts', { headers: bearer('nope-nope-nope') })).status).toBe(401);
+    expect(proxy(req('/api/audit', { headers: bearer('nope-nope-nope') })).status).toBe(401);
+  });
+
+  it('does not let an issuer key use the read allowlist', () => {
+    const { proxy } = load(cfg);
+    expect(proxy(req('/api/tcts', { headers: bearer(ISSUER_KEY) })).status).toBe(401);
+  });
+
+  it('forwards kind=admin for an admin key and kind=issuer for an issuer key', () => {
+    const { proxy } = load(cfg);
+    const admin = proxy(req('/api/audit', { headers: bearer(ADMIN_KEY) }));
+    expect(forwarded(admin, 'x-aitp-key-kind')).toBe('admin');
+    const issuer = proxy(
+      req(`/api/revocations?iss=${encodeURIComponent(ISSUER_AID)}`, {
+        headers: bearer(ISSUER_KEY),
+      }),
+    );
+    expect(forwarded(issuer, 'x-aitp-key-kind')).toBe('issuer');
+  });
+
+  it('strips a client-supplied kind header everywhere, including public routes', () => {
+    const { proxy } = load(cfg);
+    const gated = proxy(
+      req('/api/tcts', { headers: { ...bearer(READ_KEY), 'x-aitp-key-kind': 'admin' } }),
+    );
+    expect(forwarded(gated, 'x-aitp-key-kind')).toBe('read');
+    const pub = proxy(req('/api/health', { headers: { 'x-aitp-key-kind': 'admin' } }));
+    expect(forwarded(pub, 'x-aitp-key-kind')).toBeNull();
+    const pubKeyed = proxy(
+      req('/api/registry/agents', { headers: { ...bearer(ADMIN_KEY), 'x-aitp-key-kind': 'x' } }),
+    );
+    expect(forwarded(pubKeyed, 'x-aitp-key-kind')).toBeNull();
+    expect(forwarded(pubKeyed, 'x-aitp-key-label')).toBeNull();
+  });
+
+  it('a 429 on the read-key bucket does not throttle the admin key', async () => {
+    const { proxy, check } = load(cfg);
+    check.mockImplementation((bucket) => (bucket === 'read-key' ? DENY : ALLOW));
+    const read = proxy(req('/api/tcts', { headers: bearer(READ_KEY) }));
+    expect(read.status).toBe(429);
+    expect(read.headers.get('Retry-After')).toBeTruthy();
+    expect((await read.json()).bucket).toBe('read-key');
+    const admin = proxy(req('/api/tcts', { headers: bearer(ADMIN_KEY) }));
+    expect(admin.status).toBe(200);
+    expect(check).toHaveBeenLastCalledWith('api-key', ADMIN_KEY.slice(0, 24), 600, 60_000);
+  });
+
+  it('puts a keyed public GET in that key bucket, never public-ip', () => {
+    const { proxy, check } = load({ ...cfg, rateLimitPublicPerIpMin: 5 });
+    check.mockImplementation((bucket) => (bucket === 'public-ip' ? DENY : ALLOW));
+    for (let i = 0; i < 100; i++) {
+      expect(
+        proxy(req('/api/registry/agents', { headers: bearer(READ_KEY) })).status,
+      ).toBe(200);
+    }
+    expect(check).toHaveBeenCalledWith('read-key', READ_KEY.slice(0, 24), 1200, 60_000);
+    expect(check).not.toHaveBeenCalledWith('public-ip', expect.anything(), 5, 60_000);
+    proxy(req('/api/registry/agents/aid:x', { headers: bearer(ADMIN_KEY) }));
+    expect(check).toHaveBeenLastCalledWith('api-key', ADMIN_KEY.slice(0, 24), 600, 60_000);
+  });
+
+  it('keeps junk keys, issuer keys, public writes and enroll on the per-IP buckets', () => {
+    const { proxy, check } = load(cfg);
+    proxy(req('/api/registry/agents', { headers: bearer('junk-junk-junk') }));
+    expect(check).toHaveBeenLastCalledWith('public-ip', 'unknown', 60, 60_000);
+    proxy(req('/api/registry/agents', { headers: bearer(ISSUER_KEY) }));
+    expect(check).toHaveBeenLastCalledWith('public-ip', 'unknown', 60, 60_000);
+    proxy(req('/api/registry/agents', { method: 'POST', headers: bearer(READ_KEY) }));
+    expect(check).toHaveBeenLastCalledWith('public-ip', 'unknown', 60, 60_000);
+    proxy(req('/api/registry/agents', { method: 'POST', headers: bearer(ADMIN_KEY) }));
+    expect(check).toHaveBeenLastCalledWith('public-ip', 'unknown', 60, 60_000);
+    proxy(req('/api/registry/enroll', { method: 'POST', headers: bearer(ADMIN_KEY) }));
+    expect(check).toHaveBeenLastCalledWith('enroll-ip', 'unknown', 5, 60_000);
+  });
+
+  it('treats a read key on a public route as public (POST /api/registry/agents still reaches the handler)', () => {
+    const { proxy } = load(cfg);
+    const res = proxy(req('/api/registry/agents', { method: 'POST', headers: bearer(READ_KEY) }));
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-label')).toBeNull();
+  });
+
+  it('drops a read entry that reuses an admin key: that key stays admin', () => {
+    const { proxy } = load({ ...cfg, readOnlyKeys: [`dup:${ADMIN_KEY}`] });
+    const res = proxy(req('/api/audit', { headers: bearer(ADMIN_KEY) }));
+    expect(res.status).toBe(200);
+    expect(forwarded(res, 'x-aitp-key-kind')).toBe('admin');
+  });
+
+  it('in dev with no API_KEYS stays open, and read keys alone do not close it', () => {
+    const { proxy } = load({ apiKeys: [], readOnlyKeys: [`console-ro:${READ_KEY}`] });
+    expect(proxy(req('/api/audit')).status).toBe(200);
+    expect(proxy(req('/api/audit', { method: 'POST' })).status).toBe(200);
+  });
+
+  it('in prod with no API_KEYS answers 503 even to a read key', () => {
+    const { proxy } = load({
+      apiKeys: [],
+      readOnlyKeys: [`console-ro:${READ_KEY}`],
+      isProduction: true,
+    });
+    expect(proxy(req('/api/tcts', { headers: bearer(READ_KEY) })).status).toBe(503);
   });
 });
