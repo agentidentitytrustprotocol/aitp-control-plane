@@ -25,11 +25,10 @@ cancelled when a new commit lands):
    don't block merges. The allowlist in `audit-ci.jsonc` is currently empty
    (the steady state; fixable advisories are fixed via `overrides` in
    `package.json` instead).
-3. **docker-build-check** (PRs only) — builds the image single-arch
-   (`linux/amd64`, no push) with the shared GHA layer cache, so Dockerfile
-   or standalone-output breakage is caught before merge.
-   **docker-build-check-arm64** does the same for `linux/arm64` under QEMU,
-   only on PRs carrying the `arch:arm64` label (informational).
+3. **docker-build-check-arm64** — builds the image for `linux/arm64` under
+   QEMU, only on PRs carrying the `arch:arm64` label (informational). There
+   is no separate amd64 build-only job: `verify-image` builds the same amd64
+   image and then boots and probes it, so it is the required image check.
 4. **verify-image** (every run, no `if:`) — `npm run verify:image` against
    the amd64 image, then `npm run verify:sse` against the same image.
    **verify-image-arm64** repeats both under QEMU, only on a manual dispatch
