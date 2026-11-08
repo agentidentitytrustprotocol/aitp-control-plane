@@ -364,6 +364,19 @@ you tell the CP which hop to trust:
 Misconfigure these and per-IP limits either bucket every request under one key
 or are trivially bypassed. Match them to your actual edge.
 
+**On Railway, `TRUSTED_PROXY_HOPS=1`** (Doppler `aitp-control-plane/prd`, synced
+by `deploy/doppler-sync.sh`). Railway's edge is the one proxy in front of the
+service and puts the address it saw last in `X-Forwarded-For`, so the
+rightmost entry is the real client and anything a client sends to the left is
+ignored. With `0`, the CP fell back to `x-real-ip`, which a 2026-11-08
+production probe showed the edge overwrites (a spoofed `x-real-ip` stayed in
+the exhausted bucket) — that probe says nothing about `X-Forwarded-For`, which
+`0` ignores, so the spoof probe below is what confirms `1` after it is
+deployed. Re-check it after any change in front of the service (a CDN or
+second proxy adds a hop: raise the number, or use `CLIENT_IP_HEADER`): exhaust
+the `public-ip` bucket on a public route, then send a spoofed
+`X-Forwarded-For` — it must still be `429`.
+
 ## SSE capacity
 
 `GET /api/events/stream` holds an in-process subscription per open stream.

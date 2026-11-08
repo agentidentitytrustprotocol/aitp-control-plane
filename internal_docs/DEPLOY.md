@@ -134,6 +134,7 @@ Prereqs: `railway login` (interactive browser auth), the `railway` CLI
 | `ENROLLMENT_SECRET`| yes                 | ≥ 32 chars. HMAC secret for enrollment tokens. **Validated at boot: the image runs with `NODE_ENV=production`, so an unset/short value prints one `[aitp-cp] FATAL:` line and exits 1** — the healthcheck never passes, the Railway deploy fails, and the previous deployment keeps serving. (A bad value no longer deploys green; before this it 503'd `/api/registry/enroll` **and** `/api/registry/agents` on every request for as long as the release ran.) Still smoke-test an enrollment *and* a registration after changing it: boot proves the secret is usable, not that it matches the one existing tokens were minted under. |
 | `API_KEYS`         | yes (prod)          | Comma-separated allowlist. Empty ⇒ API fails closed (503).         |
 | `READ_ONLY_API_KEYS` | no                | `label:key` list of read-only keys (GET on the dashboard allowlist only; `403 READ_ONLY_KEY` elsewhere). Doppler-managed. |
+| `TRUSTED_PROXY_HOPS` | yes (Railway: `1`) | Proxies appending to `X-Forwarded-For`; the client IP is read this many entries from the right. Railway's edge is one hop. Doppler-managed. |
 | `CORS_ORIGIN`      | yes (prod)          | UI plane origin. Defaults to `http://localhost:3000` if unset.     |
 | `CP_BASE_URL`      | recommended         | Public `https://` base URL, embedded in the CP's manifest as `<CP_BASE_URL>/api/aitp/handshake/hello` — a spec-required field for a route the CP does not serve (it is not a handshake peer). Unset (defaults to `http://localhost:4000`), loopback or non-https logs a boot warning; not fatal. |
 | `PORT`             | auto                | Set by Railway; server defaults to 4000.                           |
@@ -163,7 +164,8 @@ flowchart LR
 
 **Managed keys** are exactly the ones in `deploy/doppler-keys.txt`:
 `API_KEYS`, `CORS_ORIGIN`, `CP_AID_SEED_HEX`, `CP_BASE_URL`,
-`ENROLLMENT_SECRET`, `HOSTNAME`, `PORT`. `DATABASE_URL` is a Railway reference
+`ENROLLMENT_SECRET`, `HOSTNAME`, `PORT`, `READ_ONLY_API_KEYS`,
+`TRUSTED_PROXY_HOPS`. `DATABASE_URL` is a Railway reference
 and stays Railway-managed. `RAILWAY_*` system variables are never managed.
 
 **Change a value:** set it in Doppler `prd`, then
@@ -186,15 +188,24 @@ Rules the script enforces:
   managed-key hash equals Doppler's.
 
 **Add a key:** set it in Doppler `prd`, add the name to
-`deploy/doppler-keys.txt`, commit, then dry-run and `--apply`.
+`deploy/doppler-keys.txt`, commit, then dry-run and `--apply`. Order matters:
+the sync refuses an allowlisted key that is missing from Doppler, so the value
+must be in Doppler **before** a sync runs with the new allowlist entry —
+for `READ_ONLY_API_KEYS` run `scripts/handoff/create-read-key.sh --apply`
+(dry run without `--apply`; mints the key in memory, appends `label:key`, and
+copies the key to `CP_API_KEY_CONSOLE_RO` for the console, printing sha256
+prefixes only), and for `TRUSTED_PROXY_HOPS` set `1` (see
+[operations.md](../docs/operations.md#client-ip-trust-important-behind-a-proxy)).
+Offline tests: `bash scripts/handoff/test-create-read-key.sh` (runs in CI).
 
 **Do not edit managed keys in the Railway UI** — the next `--apply` overwrites
 them. A dry run is safe at any time and doubles as a drift check: anything but
 `unchanged` and `match` means someone changed one side.
 
 Doppler `prd` also holds `CP_API_KEY_CONSOLE` and `CP_API_KEY_PLAYGROUND` (the
-key halves of `API_KEYS`' `console-…` and `playground-…` entries) and
-`CONSOLE_PASSWORD`. The control plane reads none of them, so they are not in
+key halves of `API_KEYS`' `console-…` and `playground-…` entries),
+`CP_API_KEY_CONSOLE_RO` (the key half of the console's `READ_ONLY_API_KEYS`
+entry; not used by the console yet) and `CONSOLE_PASSWORD`. The control plane reads none of them, so they are not in
 the allowlist; when rotating a consumer key, update both the component key and
 its `API_KEYS` entry (rotation: `scripts/handoff/rotate-api-key.sh`).
 
