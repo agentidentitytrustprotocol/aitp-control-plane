@@ -36,6 +36,14 @@ set -euo pipefail
 for a in "$@"; do
   case "$a" in *SENTINEL*) echo "curl stub: a value reached argv" >&2; echo leak >>"$STUB/argv-leak"; exit 97 ;; esac
 done
+# The token must arrive in a -K config (a pipe), carrying the Authorization header.
+auth=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = -K ] && auth="$(cat "$a")"
+  prev="$a"
+done
+case "$auth" in *'Authorization: Bearer tok-SENTINEL'*) ;; *) echo "curl stub: no Authorization header via -K" >&2; exit 95 ;; esac
 body="$(cat)"
 q="$(jq -r .query <<<"$body")"
 case "$q" in
@@ -44,12 +52,15 @@ case "$q" in
       environments: {edges: [{node: {id: "env-1", name: "production"}}]},
       services: {edges: [{node: {id: "svc-1", name: "aitp-control-plane"}}, {node: {id: "svc-2", name: "other"}}]}}}}' ;;
   *'variables(projectId'*)
+    case "$q" in *'unrendered: true'*) ;; *) echo "curl stub: variables read without unrendered: true" >&2; exit 96 ;; esac
     jq -c '{data: {variables: .}}' "$STUB/railway.json" ;;
   *variableUpsert*)
     name="$(jq -r .variables.i.name <<<"$body")"
     [ "$(jq -r .variables.i.skipDeploys <<<"$body")" = true ] || { echo "upsert without skipDeploys" >&2; exit 98; }
-    jq --arg n "$name" --arg v "$(jq -r .variables.i.value <<<"$body")" '.[$n] = $v' "$STUB/railway.json" >"$STUB/railway.json.new"
-    mv "$STUB/railway.json.new" "$STUB/railway.json"
+    if [ ! -e "$STUB/drop-upserts" ]; then
+      jq --arg n "$name" --arg v "$(jq -r .variables.i.value <<<"$body")" '.[$n] = $v' "$STUB/railway.json" >"$STUB/railway.json.new"
+      mv "$STUB/railway.json.new" "$STUB/railway.json"
+    fi
     echo "upsert $name" >>"$STUB/mutations"
     echo '{"data":{"variableUpsert":true}}' ;;
   *serviceInstanceRedeploy*)
@@ -89,7 +100,7 @@ new_case() {
 # run_sync <args...>: sets RC and OUT (stdout+stderr).
 run_sync() {
   set +e
-  OUT="$(STUB="$CASE/stub" PATH="$work/bin:$PATH" RAILWAY_API_TOKEN=test-token \
+  OUT="$(STUB="$CASE/stub" PATH="$work/bin:$PATH" RAILWAY_API_TOKEN="tok-$S" \
     bash "$CASE/repo/deploy/doppler-sync.sh" "$@" 2>&1)"
   RC=$?
   set -e
@@ -181,6 +192,14 @@ new_case special "{\"A\":\"line1\\nline2 \\\"q\\\" \$x $S\"}" "{\"A\":\"line1\\n
 run_sync --apply
 if [ "$RC" = 0 ] && [ "$(jq -c .A "$CASE/stub/railway.json")" = "$(jq -c .A "$CASE/stub/doppler.json")" ]; then ok "multi-line and quoted value is copied byte for byte"; else bad "multi-line and quoted value is copied byte for byte" "$OUT"; fi
 check_no_leak "multi-line value"
+
+# Railway accepts the upsert but does not keep the value: the re-read hash must catch it.
+new_case lost-write "{\"A\":\"old-$S\"}" "{\"A\":\"new-$S\"}" A
+: >"$CASE/stub/drop-upserts"
+run_sync --apply
+if [ "$RC" != 0 ] && has "hash after apply is"; then ok "lost write: apply dies on the after-apply hash"; else bad "lost write: apply dies on the after-apply hash" "$OUT"; fi
+if ! grep -q redeploy "$CASE/stub/mutations"; then ok "lost write: no redeploy"; else bad "lost write: no redeploy" "mutations: $(cat "$CASE/stub/mutations")"; fi
+check_no_leak "lost write"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

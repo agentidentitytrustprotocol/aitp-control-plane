@@ -77,9 +77,11 @@ railway_token="${RAILWAY_API_TOKEN:-$(jq -r '.user.accessToken // .user.token //
 [ -n "$railway_token" ] || die "no Railway token: log in with the railway CLI or set RAILWAY_API_TOKEN"
 
 # POST a GraphQL request whose JSON body arrives on stdin, so values never reach argv.
+# The token goes in a curl config read from a pipe (printf is a builtin), not argv.
 railway_gql() {
   curl -fsS https://backboard.railway.com/graphql/v2 \
-    -H "Authorization: Bearer $railway_token" -H 'content-type: application/json' --data-binary @- |
+    -K <(printf 'header = "Authorization: Bearer %s"\n' "$railway_token") \
+    -H 'content-type: application/json' --data-binary @- |
     jq -e 'if .errors then error("railway: \(.errors | map(.message) | join("; "))") else .data end'
 }
 gql() { jq -nc --arg q "$1" --argjson v "${2:-{\}}" '{query: $q, variables: $v}' | railway_gql; }
@@ -122,15 +124,16 @@ plan="$(printf '%s\n%s\n' "$dv" "$rv" | jq -sc --argjson k "$keys_json" '
 
 say "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG -> Railway $RAILWAY_SERVICE ($RAILWAY_ENVIRONMENT), ${#keys[@]} managed key(s):"
 jq -r '.[] | "  \(.key)\t\(.status)"' <<<"$plan" >&2
-unmanaged="$(jq -r --argjson k "$keys_json" 'keys - $k | join(" ")' <<<"$rv")"
+unmanaged="$(printf '%s' "$rv" | jq -r --argjson k "$keys_json" 'keys - $k | join(" ")')"
 [ -z "$unmanaged" ] || say "  left alone (not in doppler-keys.txt): $unmanaged"
 
 bad="$(jq -r '[.[] | select(.status | IN("missing-in-doppler", "doppler-value-is-a-reference", "railway-reference")) | .key] | join(" ")' <<<"$plan")"
 [ -z "$bad" ] || die "refusing: $bad (see status above: missing-in-doppler means set it in $DOPPLER_PROJECT/$DOPPLER_CONFIG first; a reference on either side must stay Railway-managed, so drop it from doppler-keys.txt)"
 todo="$(jq -r '.[] | select(.status | IN("new", "changed")) | .key' <<<"$plan")"
 
-before="$(managed_hash <<<"$rv")"
-want="$(managed_hash <<<"$dv")"
+# Pipes, not here-strings: bash 3.2 backs a here-string with a temp file.
+before="$(printf '%s' "$rv" | managed_hash)"
+want="$(printf '%s' "$dv" | managed_hash)"
 say "hash: railway $before, doppler $want ($([ "$before" = "$want" ] && echo match || echo differ))"
 
 if [ "$mode" = dry-run ]; then

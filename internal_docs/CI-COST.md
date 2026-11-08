@@ -34,9 +34,10 @@ below is about queue time and duplicated work, not money.
   the same linux/amd64 image cold on every event and then boots and probes it,
   so the build-only job was a strict subset. In 30 days it never failed when
   `verify-image` passed (41 both passed, 15 both failed, 7 only `verify-image`
-  failed). Done fail-closed: `Verify shipped image (amd64)` was added as a
-  required check first, and the old check was removed from the required set
-  only once this change was ready to merge. Saves ~133 min / 30 days (~14%).
+  failed). Done fail-closed, in this order: `Verify shipped image (amd64)` was
+  added to branch protection's required checks first; the old context was
+  dropped from the required set only after `verify-image` passed on this PR,
+  immediately before merging it. Saves ~133 min / 30 days (~14%).
 - **Required checks are now** `Build, typecheck, lint, test`,
   `Dependency audit (prod, high+)` and `Verify shipped image (amd64)` — the
   last one is stronger than the build-only check it replaces, so the PR bar
