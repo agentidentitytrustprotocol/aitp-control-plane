@@ -58,8 +58,11 @@ below is about queue time and duplicated work, not money.
   push (publishing must finish).
 - **Audit on push:** kept (~34 min). It catches an advisory published between
   the PR run and the merge.
-- **Deploy path untouched:** `docker-publish` and its `needs:
+- **Deploy path:** `docker-publish` and its `needs:
   [build-and-test, verify-image]` on push are the release gate and stay as-is.
+  Wave 4 added a `deploy` job after it (main push only, gated on the repo
+  variable `DEPLOY_TO_RAILWAY`): one small ubuntu job of curl + jq that polls
+  Railway for at most 20 minutes, typically a few. No cache, no build.
 
 ## Rules
 

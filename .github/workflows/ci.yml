@@ -73,7 +73,7 @@ jobs:
       # default, no deletes, no RAILWAY_*/${{ }} keys, redeploy only on change, values
       # never in argv or output) are pinned by offline tests with stubbed curl/doppler.
       - name: Deploy scripts (shellcheck + offline tests)
-        run: shellcheck deploy/*.sh scripts/handoff/*.sh && bash deploy/test-doppler-sync.sh && bash scripts/handoff/test-create-read-key.sh
+        run: shellcheck deploy/*.sh scripts/handoff/*.sh && bash deploy/test-doppler-sync.sh && bash deploy/test-railway-release.sh && bash scripts/handoff/test-create-read-key.sh
 
       # Migrations run BEFORE any test step so unit tests that
       # accidentally touch the DB don't fail against an unmigrated schema.
@@ -463,6 +463,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      # The pushed image INDEX digest; the deploy job proves Railway runs exactly this.
+      digest: ${{ steps.build.outputs.digest }}
 
     env:
       IMAGE: ghcr.io/${{ github.repository }}
@@ -497,6 +500,7 @@ jobs:
       # prebuilt binaries for both linux/amd64 (x64-gnu) and linux/arm64
       # (arm64-gnu), so the image builds cleanly on both platforms.
       - name: Build and push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -507,3 +511,45 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Railway + prove the running digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Off until the repo variable DEPLOY_TO_RAILWAY is 'true'; the image still publishes.
+    # Railway's own image auto-update stays on as a backstop: if it already rolled this
+    # digest, the script sees it live and does not redeploy. Main runs are serialised by
+    # the workflow concurrency group (no cancel on push), so a newer release can never
+    # be overtaken by an older deploy.
+    needs: docker-publish
+    if: vars.DEPLOY_TO_RAILWAY == 'true' && github.event_name != 'pull_request' && needs.docker-publish.outputs.digest != ''
+    # Secret + ids live in the `production` GitHub Environment (deployment branches: main).
+    environment: production
+    concurrency:
+      group: railway-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Migrations are manual and must be applied BEFORE merge (expand-only; see
+      # internal_docs/DEPLOY.md step 5). Auto-update rolls new images regardless, so
+      # blocking here would add no safety; make the schema change loud instead.
+      - name: Schema change reminder
+        run: |
+          if git diff --name-only HEAD^1 HEAD -- 'drizzle/*.sql' 'drizzle/manual/*.sql' | grep -q .; then
+            echo "::warning title=Schema change::this release changes drizzle/*.sql; it must already be applied to production (npm run db:migrate) and be expand-only"
+          fi
+
+      - name: Redeploy and wait for SUCCESS on the pushed digest
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+          DIGEST: ${{ needs.docker-publish.outputs.digest }}
+        run: bash deploy/railway-release.sh deploy --digest "$DIGEST"
