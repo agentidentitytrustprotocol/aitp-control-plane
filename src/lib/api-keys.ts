@@ -62,13 +62,21 @@ export function unlabelledLabel(position: number): string {
   return `unlabelled-${position}`;
 }
 
-export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
-  const items = (raw ?? '')
+/** Split a comma-separated env list into trimmed, non-empty items. */
+function listItems(raw: string | undefined): string[] {
+  return (raw ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+}
 
-  const split = items.map((item) => {
+/**
+ * Split each item on its first `:` into `{label, key}`. The prefix is only a
+ * label when it matches LABEL_RE and a non-empty key follows; otherwise the
+ * whole item is the key and `label` is null. Shared by every `label:key` list.
+ */
+function splitLabelled(items: readonly string[]): { label: string | null; key: string }[] {
+  return items.map((item) => {
     const idx = item.indexOf(':');
     if (idx > 0) {
       const label = item.slice(0, idx);
@@ -77,6 +85,10 @@ export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
     }
     return { label: null as string | null, key: item };
   });
+}
+
+export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
+  const split = splitLabelled(listItems(raw));
 
   const allKeys = split.map((s) => s.key);
   const warnings: string[] = [];
@@ -107,6 +119,97 @@ export function parseApiKeys(raw: string | undefined): ParsedApiKeys {
       errors.push(
         `API_KEYS entry ${position}: label "${label}" is already used by an earlier entry; ` +
           'labels must be unique, or their audit rows cannot be told apart',
+      );
+    }
+    seenKeys.add(s.key);
+    seenLabels.add(label);
+    entries.push({ label, key: s.key });
+  });
+
+  return { entries, warnings, errors };
+}
+
+/**
+ * Read-only keys (`READ_ONLY_API_KEYS`): comma-separated `label:key` entries.
+ * A read-only key may only GET an explicit allowlist of read routes
+ * (`isReadOnlyRoute` in src/proxy.ts); every other route answers
+ * `403 READ_ONLY_KEY`. Intended for a viewer such as the public console, whose
+ * traffic is anonymous visitors: it must never be able to write.
+ *
+ * Kept in a list SEPARATE from `API_KEYS` for the same reason as `ISSUER_KEYS`:
+ * no entry here can ever open an admin route, and a typo cannot turn a
+ * read-only key into an admin one.
+ *
+ * Stricter than `API_KEYS`, because every read-key request is anonymous
+ * traffic that must stay attributable:
+ *   - a label is REQUIRED; a bare key is skipped with a warning;
+ *   - an entry whose key is also an `API_KEYS` or `ISSUER_KEYS` key is skipped
+ *     with a warning (the admin/issuer meaning wins, never the narrower one);
+ *   - a duplicate key, or a label that is part of a configured key, is skipped;
+ *   - a label used twice in this list, or equal to an `API_KEYS` label, is a
+ *     boot ERROR: labels are one actor namespace.
+ * Messages carry positions and labels only, never a key.
+ */
+export function parseReadOnlyApiKeys(
+  raw: string | undefined,
+  adminKeys: readonly string[] = [],
+  issuerKeys: readonly string[] = [],
+  adminLabels: readonly string[] = [],
+): ParsedApiKeys {
+  const split = splitLabelled(listItems(raw));
+  const allKeys = [...split.map((s) => s.key), ...adminKeys, ...issuerKeys];
+  const adminLabelSet = new Set(adminLabels);
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  const entries: ApiKeyEntry[] = [];
+  const seenKeys = new Set<string>();
+  const seenLabels = new Set<string>();
+
+  split.forEach((s, i) => {
+    const position = i + 1;
+    const label = s.label;
+    if (label === null) {
+      warnings.push(
+        `READ_ONLY_API_KEYS entry ${position}: not of the form label:key ` +
+          '(a read-only key must be labelled); skipped',
+      );
+      return;
+    }
+    if (looksLikeSecret(label, allKeys)) {
+      warnings.push(
+        `READ_ONLY_API_KEYS entry ${position}: its label is part of a configured key; skipped`,
+      );
+      return;
+    }
+    if (adminKeys.includes(s.key)) {
+      warnings.push(
+        `READ_ONLY_API_KEYS entry ${position} (${label}): its key is also an API_KEYS key; ` +
+          'skipped (it stays an admin key)',
+      );
+      return;
+    }
+    if (issuerKeys.includes(s.key)) {
+      warnings.push(
+        `READ_ONLY_API_KEYS entry ${position} (${label}): its key is also an ISSUER_KEYS key; ` +
+          'skipped',
+      );
+      return;
+    }
+    if (seenKeys.has(s.key)) {
+      warnings.push(
+        `READ_ONLY_API_KEYS entry ${position} (${label}): duplicate key; skipped`,
+      );
+      return;
+    }
+    if (adminLabelSet.has(label)) {
+      errors.push(
+        `READ_ONLY_API_KEYS entry ${position}: label "${label}" is already used by an ` +
+          'API_KEYS entry; labels must be unique across both lists',
+      );
+    } else if (seenLabels.has(label)) {
+      errors.push(
+        `READ_ONLY_API_KEYS entry ${position}: label "${label}" is already used by an ` +
+          'earlier entry; labels must be unique',
       );
     }
     seenKeys.add(s.key);
@@ -161,10 +264,7 @@ export function parseIssuerKeys(
   raw: string | undefined,
   adminKeys: readonly string[] = [],
 ): ParsedIssuerKeys {
-  const items = (raw ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const items = listItems(raw);
   const entries: IssuerKeyEntry[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];

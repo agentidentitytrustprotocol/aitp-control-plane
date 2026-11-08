@@ -1,5 +1,5 @@
 import { isProductionNodeEnv } from './node-env';
-import { parseApiKeys, parseIssuerKeys } from './api-keys';
+import { parseApiKeys, parseIssuerKeys, parseReadOnlyApiKeys } from './api-keys';
 
 function readNumber(name: string, def: number): number {
   const v = process.env[name];
@@ -97,6 +97,56 @@ const parsedIssuerKeys = parseIssuerKeys(
   process.env.ISSUER_KEYS,
   parsedApiKeys.entries.map((e) => e.key),
 );
+// `label:key` entries that may only GET the read-route allowlist (src/proxy.ts).
+const parsedReadOnlyKeys = parseReadOnlyApiKeys(
+  process.env.READ_ONLY_API_KEYS,
+  parsedApiKeys.entries.map((e) => e.key),
+  parsedIssuerKeys.entries.map((e) => e.key),
+  parsedApiKeys.entries.map((e) => e.label),
+);
+
+/** Share of MAX_SSE_CONNECTIONS read-only keys may hold when the cap is unset. */
+const SSE_READ_KEY_DEFAULT_SHARE = 0.8;
+
+/**
+ * Per-process cap on SSE streams opened with a READ-ONLY key, so anonymous
+ * console viewers can never take the last slots from admin callers. Must sit in
+ * [1, max]. Unset -> 80% of max (400 of the default 500), at least 1. A set
+ * value outside the range, or non-numeric, is clamped into it with a boot
+ * warning (exported for tests).
+ */
+export function readSseReadKeyCap(
+  raw: string | undefined,
+  max: number,
+): { value: number; warning: string | null } {
+  const ceiling = Math.max(1, Math.floor(max));
+  const fallback = Math.max(1, Math.floor(ceiling * SSE_READ_KEY_DEFAULT_SHARE));
+  if (raw === undefined || raw.trim() === '') return { value: fallback, warning: null };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    return {
+      value: fallback,
+      warning: `MAX_SSE_READ_KEY_CONNECTIONS is not a number; using ${fallback}`,
+    };
+  }
+  const v = Math.floor(n);
+  if (v < 1 || v > ceiling) {
+    const clamped = Math.min(ceiling, Math.max(1, v));
+    return {
+      value: clamped,
+      warning:
+        `MAX_SSE_READ_KEY_CONNECTIONS=${v} is outside 1..MAX_SSE_CONNECTIONS (${ceiling}); ` +
+        `using ${clamped}`,
+    };
+  }
+  return { value: v, warning: null };
+}
+
+const maxSseConnections = readNumber('MAX_SSE_CONNECTIONS', 500);
+const sseReadKeyCap = readSseReadKeyCap(
+  process.env.MAX_SSE_READ_KEY_CONNECTIONS,
+  maxSseConnections,
+);
 
 export const config = {
   isProduction: isProductionNodeEnv(),
@@ -116,9 +166,17 @@ export const config = {
   // One key per issuing agent, bound to that agent's AID. Accepted ONLY by
   // `GET /api/revocations`, and only for `iss=<its aid>` (src/proxy.ts).
   issuerKeyEntries: parsedIssuerKeys.entries,
-  // Label problems that refuse boot (a label used twice in either list); see
-  // src/lib/key-labels-config.ts. Labels and positions only, never a key.
-  keyLabelErrors: [...parsedApiKeys.errors, ...parsedIssuerKeys.errors],
+  // Read-only keys: GET on the read-route allowlist only (src/proxy.ts
+  // `isReadOnlyRoute`); everything else is 403 READ_ONLY_KEY.
+  readOnlyKeyEntries: parsedReadOnlyKeys.entries,
+  // Label problems that refuse boot (a label used twice in a list, or a
+  // read-only label equal to an admin one); see src/lib/key-labels-config.ts.
+  // Labels and positions only, never a key.
+  keyLabelErrors: [
+    ...parsedApiKeys.errors,
+    ...parsedIssuerKeys.errors,
+    ...parsedReadOnlyKeys.errors,
+  ],
   enrollmentSecret: process.env.ENROLLMENT_SECRET ?? '',
   maxAuditEventsInMemory: readNumber('MAX_AUDIT_EVENTS_MEMORY', 500),
   // Per-process cap on concurrent /api/events/stream connections.
@@ -126,7 +184,9 @@ export const config = {
   // so unbounded growth would leak memory under a misbehaving client.
   // The default is generous; raise it if you front this with a fan-out
   // proxy that opens its own pool of upstream streams.
-  maxSseConnections: readNumber('MAX_SSE_CONNECTIONS', 500),
+  maxSseConnections,
+  // Sub-cap inside maxSseConnections for streams opened with a read-only key.
+  maxSseReadKeyConnections: sseReadKeyCap.value,
   // Interval between `: heartbeat` comment frames on an open SSE stream, and
   // the `retry:` reconnect hint the route advertises in its prelude.
   //
@@ -149,6 +209,9 @@ export const config = {
   rateLimitEnrollPerIpMin: readNumber('RATE_LIMIT_ENROLLMENT_PER_IP_MIN', 5),
   rateLimitPublicPerIpMin: readNumber('RATE_LIMIT_PUBLIC_PER_IP_MIN', 60),
   rateLimitApiKeyMin: readNumber('RATE_LIMIT_API_KEY_PER_MIN', 600),
+  // Per read-only key. Its own bucket, so viewer traffic can never consume an
+  // admin key's budget (or the per-IP public bucket of the viewer's egress).
+  rateLimitReadKeyMin: readNumber('RATE_LIMIT_READ_KEY_PER_MIN', 1200),
   rateLimitWindowMs: readNumber('RATE_LIMIT_WINDOW_MS', 60_000),
   // Client-IP resolution for rate limiting. `X-Forwarded-For` is
   // client-controllable: the leftmost entry is whatever the caller sent,
@@ -227,7 +290,12 @@ if (!config.isProduction && config.apiKeys.length === 0 && !process.env.JEST_WOR
 // label refused for containing a secret); a duplicate LABEL refuses boot instead.
 // The messages name entry positions and labels only, never a key.
 if (!process.env.JEST_WORKER_ID) {
-  for (const w of [...parsedApiKeys.warnings, ...parsedIssuerKeys.warnings]) {
+  for (const w of [
+    ...parsedApiKeys.warnings,
+    ...parsedIssuerKeys.warnings,
+    ...parsedReadOnlyKeys.warnings,
+    ...(sseReadKeyCap.warning ? [sseReadKeyCap.warning] : []),
+  ]) {
     // eslint-disable-next-line no-console
     console.warn(`[aitp-cp] ${w}`);
   }

@@ -1,5 +1,5 @@
 /**
- * Boot check for key labels in `API_KEYS` and `ISSUER_KEYS`.
+ * Boot check for key labels in `API_KEYS`, `ISSUER_KEYS` and `READ_ONLY_API_KEYS`.
  *
  * A label is the audit actor (`key:<label>`) and the revocation last-pull
  * series name, so two keys sharing one make their traffic indistinguishable.
@@ -21,7 +21,8 @@ export function keyLabelBootFailure(
   if (errors.length === 0) return null;
   return (
     `[aitp-cp] FATAL: ${errors.join('; ')}. ` +
-    'Refusing to start: give every key in API_KEYS and in ISSUER_KEYS its own label ' +
+    'Refusing to start: give every key in API_KEYS, ISSUER_KEYS and READ_ONLY_API_KEYS ' +
+    'its own label (a READ_ONLY_API_KEYS label must not repeat an API_KEYS one) ' +
     '(a rotation adds the new key under a new label) and redeploy.'
   );
 }

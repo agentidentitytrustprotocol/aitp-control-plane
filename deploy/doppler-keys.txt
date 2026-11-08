@@ -11,3 +11,5 @@ CP_BASE_URL        # public base URL the control plane advertises
 ENROLLMENT_SECRET  # HMAC secret for enrollment tokens (>= 32 chars)
 HOSTNAME           # bind address for the Next.js server
 PORT               # listen port
+READ_ONLY_API_KEYS # read-only bearer keys, `label:key` entries (docs/api.md#read-only-keys); scripts/handoff/create-read-key.sh adds one
+TRUSTED_PROXY_HOPS # `1` on Railway: its edge is the one proxy appending to X-Forwarded-For (docs/operations.md)

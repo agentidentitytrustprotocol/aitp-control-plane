@@ -73,7 +73,11 @@ jest.mock('@/lib/audit/stream', () => ({
   },
 }));
 
-const configMock = { maxSseConnections: 500, sseHeartbeatMs: 15_000 };
+const configMock = {
+  maxSseConnections: 500,
+  maxSseReadKeyConnections: 400,
+  sseHeartbeatMs: 15_000,
+};
 jest.mock('@/lib/config', () => ({ config: configMock }));
 
 // The logger is a real pino instance that is silent under NODE_ENV=test, so a
@@ -134,12 +138,12 @@ function prelude(): string {
   return `retry: ${configMock.sseHeartbeatMs}\n: connected\n\n`;
 }
 
-function makeReq(qs = '', signal?: AbortSignal): NextRequest {
+function makeReq(qs = '', signal?: AbortSignal, keyKind?: string): NextRequest {
+  const init: RequestInit = {};
+  if (signal) init.signal = signal;
+  if (keyKind) init.headers = { 'x-aitp-key-kind': keyKind };
   return new NextRequest(
-    new Request(
-      `http://localhost:4000/api/events/stream${qs}`,
-      signal ? { signal } : undefined,
-    ),
+    new Request(`http://localhost:4000/api/events/stream${qs}`, init),
   );
 }
 
@@ -190,6 +194,7 @@ beforeEach(() => {
   subscribeMock.mockClear();
   getBacklogMock.mockClear();
   configMock.maxSseConnections = 500;
+  configMock.maxSseReadKeyConnections = 400;
   configMock.sseHeartbeatMs = 15_000;
   resetSseMetrics();
   logInfo.mockClear();
@@ -392,6 +397,64 @@ describe('GET /api/events/stream — capacity gate', () => {
   });
 });
 
+describe('GET /api/events/stream — read-only key sub-cap', () => {
+  it('refuses a read-key stream at the read sub-cap with 503 SSE_CAPACITY, while global slots remain', async () => {
+    configMock.maxSseConnections = 10;
+    configMock.maxSseReadKeyConnections = 2;
+    globalThis.__sseOpenCount = 2;
+    globalThis.__sseReadOpenCount = 2;
+    const res = GET(makeReq('', undefined, 'read'));
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe('SSE_CAPACITY');
+    expect(subscribeMock).not.toHaveBeenCalled();
+    expect(getSseMetrics().rejectedTotal).toBe(1);
+    expect(globalThis.__sseOpenCount).toBe(2);
+    expect(globalThis.__sseReadOpenCount).toBe(2);
+    expect(logWarn).toHaveBeenCalledTimes(1);
+    expect(logWarn.mock.calls[0][0]).toEqual({ reason: 'read-key-capacity', open: 2, cap: 2 });
+  });
+
+  it('still admits an admin (and an unkeyed dev) stream when the read sub-cap is full', async () => {
+    configMock.maxSseConnections = 10;
+    configMock.maxSseReadKeyConnections = 2;
+    globalThis.__sseOpenCount = 2;
+    globalThis.__sseReadOpenCount = 2;
+    const admin = GET(makeReq('', undefined, 'admin'));
+    expect(admin.status).toBe(200);
+    const unkeyed = GET(makeReq());
+    expect(unkeyed.status).toBe(200);
+    expect(globalThis.__sseOpenCount).toBe(4);
+    expect(globalThis.__sseReadOpenCount).toBe(2);
+    await admin.body!.cancel();
+    await unkeyed.body!.cancel();
+    expect(globalThis.__sseOpenCount).toBe(2);
+    expect(globalThis.__sseReadOpenCount).toBe(2);
+  });
+
+  it('counts a read-key stream in both counters and releases both exactly once on close', async () => {
+    const res = GET(makeReq('', undefined, 'read'));
+    expect(res.status).toBe(200);
+    expect(globalThis.__sseOpenCount).toBe(1);
+    expect(globalThis.__sseReadOpenCount).toBe(1);
+    expect(getSseMetrics().readOpen).toBe(1);
+    await res.body!.cancel();
+    await res.body!.cancel().catch(() => undefined);
+    expect(globalThis.__sseOpenCount).toBe(0);
+    expect(globalThis.__sseReadOpenCount).toBe(0);
+  });
+
+  it('applies the global cap to a read key too', () => {
+    configMock.maxSseConnections = 1;
+    configMock.maxSseReadKeyConnections = 1;
+    globalThis.__sseOpenCount = 1;
+    globalThis.__sseReadOpenCount = 0;
+    const res = GET(makeReq('', undefined, 'read'));
+    expect(res.status).toBe(503);
+    expect(logWarn.mock.calls[0][0]).toMatchObject({ reason: 'capacity' });
+    expect(globalThis.__sseReadOpenCount).toBe(0);
+  });
+});
+
 // Frame index == enqueue order: readFrames() pushes one decoded string per
 // read() and each ctrl.enqueue() is exactly one chunk. The #89 prelude is
 // frame 0 on every accepted connection, so every replayed event below sits at
@@ -488,6 +551,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 1,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
     await res.body!.cancel();
     // open falls back to 0; opened_total is cumulative and must NOT.
@@ -495,6 +559,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 0,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
   });
 
@@ -507,6 +572,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 1,
       openedTotal: 0,
       rejectedTotal: 1,
+      readOpen: 0,
     });
   });
 
@@ -593,6 +659,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 0,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
   });
 
@@ -627,6 +694,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
         open: 0,
         openedTotal: 1,
         rejectedTotal: 0,
+        readOpen: 0,
       });
 
       // Further ticks are a no-op: the interval is cleared, and even if it were
@@ -795,6 +863,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 0,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
     expect(listeners).toHaveLength(0);
     await reader.cancel();
@@ -841,6 +910,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 0,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
     expect(listeners).toHaveLength(0);
   });
@@ -886,6 +956,7 @@ describe('GET /api/events/stream — metrics and lifecycle logging', () => {
       open: 0,
       openedTotal: 1,
       rejectedTotal: 0,
+      readOpen: 0,
     });
     expect(listeners).toHaveLength(0);
   });

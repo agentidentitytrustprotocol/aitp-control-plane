@@ -48,6 +48,16 @@ jest.mock('@/lib/audit-log/service', () => ({
   writeAdminAudit: (e: unknown) => writeAdminAuditMock(e),
 }));
 
+// API_KEYS as the route sees it, switchable per test: empty is dev-open (admin
+// detail shown to everyone); non-empty means only kind=admin sees it.
+let mockApiKeys: string[] = [];
+jest.mock('@/lib/config', () => {
+  const actual = jest.requireActual<typeof import('@/lib/config')>('@/lib/config');
+  const config = { ...actual.config };
+  Object.defineProperty(config, 'apiKeys', { get: () => mockApiKeys });
+  return { config };
+});
+
 import { GET, POST } from './route';
 import { NextRequest } from 'next/server';
 
@@ -71,6 +81,7 @@ function anchorRow(over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  mockApiKeys = [];
   selectResults = [];
   whereCalls.length = 0;
   insertedValues.length = 0;
@@ -96,6 +107,32 @@ describe('GET /api/trust-anchors', () => {
     const res = await GET(makeReq('/api/trust-anchors?namespace=prod'));
     expect(res.status).toBe(200);
     expect(whereCalls).toHaveLength(1);
+  });
+});
+
+describe('GET /api/trust-anchors — addedBy is admin-only', () => {
+  const FP = 'apikey:0123456789abcdef';
+  it.each([
+    ['read', null],
+    [undefined, null],
+    ['admin', FP],
+  ])('kind=%s with API_KEYS set sees addedBy=%s', async (kind, want) => {
+    mockApiKeys = ['k'];
+    selectResults = [[anchorRow({ addedBy: FP })]];
+    const res = await GET(
+      makeReq('/api/trust-anchors', kind ? { headers: { 'x-aitp-key-kind': kind } } : undefined),
+    );
+    const body = (await res.json()) as { trustAnchors: Array<{ addedBy: unknown; id: unknown }> };
+    expect(body.trustAnchors[0].addedBy).toBe(want);
+    expect(body.trustAnchors[0].id).toBe('ta-1');
+  });
+
+  it('shows addedBy when no API_KEYS are configured (dev-open)', async () => {
+    selectResults = [[anchorRow({ addedBy: FP })]];
+    const body = (await (await GET(makeReq('/api/trust-anchors'))).json()) as {
+      trustAnchors: Array<{ addedBy: unknown }>;
+    };
+    expect(body.trustAnchors[0].addedBy).toBe(FP);
   });
 });
 

@@ -1,41 +1,137 @@
 {
-  "_comment": "Effective request-gate contract, derived from a RUNNING built server (never from src/proxy.ts). Review every \"public\" entry by hand: each one is a route reachable with no credentials.",
+  "_comment": "Effective request-gate contract, derived from a RUNNING built server (never from src/proxy.ts). Review every \"public\" entry by hand: each one is a route reachable with no credentials. `read` is the same probe with a READ_ONLY_API_KEYS key: review every \"allowed\" entry — each one is readable by anonymous console visitors.",
   "gate": {
     "matcherSource": "/api/:path*",
     "matcherRegexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?\\/api(?:\\/((?:[^\\/#\\?]+?)(?:\\/(?:[^\\/#\\?]+?))*))?(\\.json|\\.rsc|\\.segments\\/.+\\.segment\\.rsc)?[\\/#\\?]?$"
   },
   "routes": {
-    "/api/audit": "gated",
-    "/api/dashboard/agents": "gated",
-    "/api/dashboard/overview": "gated",
-    "/api/delegations": "gated",
-    "/api/events": "gated",
-    "/api/events/history": "gated",
-    "/api/events/stream": "gated",
-    "/api/health": "public",
-    "/api/metrics": "public",
-    "/api/pinned-keys": "gated",
-    "/api/readyz": "public",
-    "/api/registry/agents": "public",
-    "/api/registry/agents/[aid]": "public",
-    "/api/registry/agents/[aid]/export": "gated",
-    "/api/registry/agents/[aid]/manifest": "public",
-    "/api/registry/enroll": "public",
-    "/api/revocation/entries": "gated",
-    "/api/revocation/issuers": "gated",
-    "/api/revocations": "gated",
-    "/api/sessions": "gated",
-    "/api/sessions/[sessionId]": "gated",
-    "/api/sessions/[sessionId]/export": "gated",
-    "/api/sessions/[sessionId]/replay": "gated",
-    "/api/tcts": "gated",
-    "/api/trust-anchors": "gated",
-    "/api/trust-anchors/[id]": "gated",
-    "/api/trust-anchors/[id]/jwks": "gated",
-    "/api/webhooks": "gated",
-    "/api/webhooks/[id]": "gated",
-    "/api/webhooks/[id]/circuit-breaker": "gated",
-    "/api/webhooks/[id]/circuit-breaker/reset": "gated",
-    "/api/well-known/aitp-manifest": "public"
+    "/api/audit": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/dashboard/agents": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/dashboard/overview": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/delegations": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/events": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/events/history": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/events/stream": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/health": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/metrics": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/pinned-keys": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/readyz": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/registry/agents": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/registry/agents/[aid]": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/registry/agents/[aid]/export": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/registry/agents/[aid]/manifest": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/registry/enroll": {
+      "anon": "public",
+      "read": "allowed"
+    },
+    "/api/revocation/entries": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/revocation/issuers": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/revocations": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/sessions": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/sessions/[sessionId]": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/sessions/[sessionId]/export": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/sessions/[sessionId]/replay": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/tcts": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/trust-anchors": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/trust-anchors/[id]": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/trust-anchors/[id]/jwks": {
+      "anon": "gated",
+      "read": "allowed"
+    },
+    "/api/webhooks": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/webhooks/[id]": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/webhooks/[id]/circuit-breaker": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/webhooks/[id]/circuit-breaker/reset": {
+      "anon": "gated",
+      "read": "denied"
+    },
+    "/api/well-known/aitp-manifest": {
+      "anon": "public",
+      "read": "allowed"
+    }
   }
 }

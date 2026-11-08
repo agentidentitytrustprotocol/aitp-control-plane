@@ -5,13 +5,19 @@ import { issuerKeyIndex, labelIndex, type IssuerKeyEntry } from './lib/api-keys'
 import {
   CLIENT_IP_FORWARD_HEADER,
   KEY_ISSUER_HEADER,
+  KEY_KIND_HEADER,
   KEY_LABEL_HEADER,
+  type KeyKind,
 } from './lib/audit-log/actor';
 
 // key -> non-secret label, built once from the boot-time config.
 const KEY_LABELS = labelIndex(appConfig.apiKeyEntries);
 // issuer key -> {label, aid}. Never consulted outside ISSUER_KEY_ROUTE.
 const ISSUER_KEYS = issuerKeyIndex(appConfig.issuerKeyEntries);
+// read-only key -> label. Consulted only after the admin lookup missed, and it
+// opens nothing but GET on isReadOnlyRoute(). The parser already dropped any
+// entry whose key is also an admin or issuer key.
+const READ_ONLY_KEYS = labelIndex(appConfig.readOnlyKeyEntries);
 
 // The ONLY route an issuer key (ISSUER_KEYS) opens, and only for GET. On every
 // other path such a key is not in KEY_LABELS, so it is a 401 like any unknown
@@ -29,7 +35,6 @@ const PUBLIC_PATHS = new Set<string>([
   '/api/well-known/aitp-manifest',
   '/api/registry/enroll',
   '/api/registry/agents',
-  '/api/metrics',
 ]);
 
 // Anonymous discovery: `GET /api/registry/agents/{aid}` and
@@ -52,8 +57,51 @@ export function isPublicRequest(pathname: string, method: string): boolean {
   return false;
 }
 
+// The ONLY routes a read-only key (READ_ONLY_API_KEYS) opens, and only for GET
+// (HEAD is refused too: Next answers HEAD with the GET handler, so a HEAD on
+// the stream would open a real SSE stream). An anchored allowlist, not a
+// method gate: several GET routes are admin-only — the admin audit log
+// (/api/audit), /api/metrics, webhook subscriber URLs and breaker state
+// (/api/webhooks*), the issuer relay (/api/revocations) and the agent export
+// bundle (/api/registry/agents/{aid}/export, which carries admin audit rows).
+// Fail closed: a new route is unreachable with a read key until it is listed
+// here, and the route-inventory test in proxy.test.ts fails until every
+// (route, method) pair is classified.
+const READ_ONLY_PATHS = new Set<string>([
+  '/api/dashboard/agents',
+  '/api/dashboard/overview',
+  '/api/delegations',
+  '/api/events/history',
+  '/api/events/stream',
+  '/api/pinned-keys',
+  '/api/registry/agents',
+  '/api/revocation/issuers',
+  '/api/sessions',
+  '/api/tcts',
+  '/api/trust-anchors',
+]);
+
+const READ_ONLY_PATTERNS: RegExp[] = [
+  /^\/api\/registry\/agents\/[^/]+$/,
+  /^\/api\/registry\/agents\/[^/]+\/manifest$/,
+  /^\/api\/sessions\/[^/]+$/,
+  /^\/api\/sessions\/[^/]+\/replay$/,
+  /^\/api\/sessions\/[^/]+\/export$/,
+  /^\/api\/trust-anchors\/[^/]+$/,
+  /^\/api\/trust-anchors\/[^/]+\/jwks$/,
+];
+
+/** Exported for unit testing; do not import from production code. Whether a
+ * read-only key may GET this path. The method check lives in the gate. */
+export function isReadOnlyRoute(pathname: string): boolean {
+  if (READ_ONLY_PATHS.has(pathname)) return true;
+  return READ_ONLY_PATTERNS.some((re) => re.test(pathname));
+}
+
 // Paths exempt from rate limiting. Probes and metrics scrape endpoints
 // run on tight intervals; throttling them would mask real outages.
+// /api/metrics is NOT public (it needs an API_KEYS key, so its counts never
+// reach anonymous callers); the exemption applies only after auth passed.
 const RATE_LIMIT_EXEMPT_PATHS = new Set<string>([
   '/api/health',
   '/api/readyz',
@@ -128,15 +176,18 @@ function passThrough(
   request: NextRequest,
   keyLabel: string | null = null,
   keyIssuer: string | null = null,
+  keyKind: KeyKind | null = null,
 ): NextResponse {
   const requestId = resolveRequestId(request);
   const forwarded = new Headers(request.headers);
   forwarded.set('x-request-id', requestId);
   forwarded.delete(KEY_LABEL_HEADER);
   forwarded.delete(KEY_ISSUER_HEADER);
+  forwarded.delete(KEY_KIND_HEADER);
   forwarded.delete(CLIENT_IP_FORWARD_HEADER);
   if (keyLabel) forwarded.set(KEY_LABEL_HEADER, keyLabel);
   if (keyIssuer) forwarded.set(KEY_ISSUER_HEADER, keyIssuer);
+  if (keyKind) forwarded.set(KEY_KIND_HEADER, keyKind);
   const ip = getClientIp(request);
   if (ip !== 'unknown') forwarded.set(CLIENT_IP_FORWARD_HEADER, ip);
   const response = NextResponse.next({ request: { headers: forwarded } });
@@ -167,14 +218,23 @@ interface RateLimitChoice {
 
 /** Pick a rate-limit bucket for the request. Order:
  *  - enrollment endpoint gets its own strict per-IP bucket (token brute force)
- *  - other public routes share a per-IP bucket
- *  - authenticated routes use per-API-key
+ *  - a public GET carrying a key the gate resolved as admin or read-only uses
+ *    that key's bucket (a server-side console proxies every visitor from one
+ *    egress IP, so the per-IP bucket would throttle them all together)
+ *  - other public routes share a per-IP bucket — including public writes and
+ *    junk or issuer keys, so a key never makes registration cheaper and an
+ *    unknown key cannot dodge the per-IP limit
+ *  - a read-only key uses its own per-key `read-key` bucket, so visitor reads
+ *    can never drain an admin key's budget
+ *  - other authenticated routes use per-API-key
  */
 function chooseRateLimit(
   request: NextRequest,
   pathname: string,
   token: string | null,
   isPublic: boolean,
+  publicKeyKind: KeyKind | null,
+  keyKind: KeyKind | null,
 ): RateLimitChoice {
   const ip = getClientIp(request);
   if (pathname === '/api/registry/enroll') {
@@ -184,7 +244,17 @@ function chooseRateLimit(
       limit: appConfig.rateLimitEnrollPerIpMin,
     };
   }
-  if (isPublic || !token) {
+  // On a public route the effective kind is what the key WOULD be, resolved
+  // only for a GET; on a gated route it is what authenticated the request.
+  const kind = isPublic ? publicKeyKind : keyKind;
+  if (token && kind === 'read') {
+    return {
+      bucketName: 'read-key',
+      key: token.slice(0, 24),
+      limit: appConfig.rateLimitReadKeyMin,
+    };
+  }
+  if (!token || (isPublic && kind !== 'admin')) {
     return {
       bucketName: 'public-ip',
       key: ip,
@@ -230,9 +300,15 @@ export function proxy(request: NextRequest) {
   // Set only when an issuer key authenticated the request: the AID the route
   // must restrict the answer to.
   let issuerKey: IssuerKeyEntry | undefined;
+  // Which list authenticated the request (forwarded as KEY_KIND_HEADER). Null
+  // on public routes and in dev with no API_KEYS.
+  let keyKind: KeyKind | null = null;
   if (pathname === ISSUER_KEY_ROUTE && method === 'GET' && token) {
     issuerKey = ISSUER_KEYS.get(token);
-    if (issuerKey) keyLabel = issuerKey.label;
+    if (issuerKey) {
+      keyLabel = issuerKey.label;
+      keyKind = 'issuer';
+    }
   }
   if (!isPublic && !issuerKey) {
     const keys = appConfig.apiKeys;
@@ -250,20 +326,51 @@ export function proxy(request: NextRequest) {
       // Dev: fall through to rate limit + handler with no auth.
     } else {
       const label = token ? KEY_LABELS.get(token) : undefined;
-      if (!label) {
+      const readLabel =
+        !label && token ? READ_ONLY_KEYS.get(token) : undefined;
+      if (label) {
+        keyLabel = label;
+        keyKind = 'admin';
+      } else if (readLabel) {
+        // A known read-only key: 403, not 401, outside its allowlist — that
+        // says only "this key is read-only", nothing about the route.
+        if (method !== 'GET' || !isReadOnlyRoute(pathname)) {
+          return deny(
+            request,
+            { error: 'Forbidden: read-only key', code: 'READ_ONLY_KEY' },
+            403,
+          );
+        }
+        keyLabel = readLabel;
+        keyKind = 'read';
+      } else {
         return deny(
           request,
           { error: 'Unauthorized', code: 'INVALID_API_KEY' },
           401,
         );
       }
-      keyLabel = label;
     }
+  }
+
+  // On a public GET, resolve the key only to pick its rate-limit bucket. It is
+  // NOT forwarded: public routes carry no label and no kind.
+  let publicKeyKind: KeyKind | null = null;
+  if (isPublic && method === 'GET' && token && appConfig.apiKeys.length > 0) {
+    if (KEY_LABELS.has(token)) publicKeyKind = 'admin';
+    else if (READ_ONLY_KEYS.has(token)) publicKeyKind = 'read';
   }
 
   // ── Rate limit ─────────────────────────────────────────────────────
   if (appConfig.rateLimitEnabled && !RATE_LIMIT_EXEMPT_PATHS.has(pathname)) {
-    const choice = chooseRateLimit(request, pathname, token, isPublic);
+    const choice = chooseRateLimit(
+      request,
+      pathname,
+      token,
+      isPublic,
+      publicKeyKind,
+      keyKind,
+    );
     const decision = rateLimiter.check(
       choice.bucketName,
       choice.key,
@@ -293,7 +400,7 @@ export function proxy(request: NextRequest) {
     }
   }
 
-  return passThrough(request, keyLabel, issuerKey?.aid ?? null);
+  return passThrough(request, keyLabel, issuerKey?.aid ?? null, keyKind);
 }
 
 export const config = {

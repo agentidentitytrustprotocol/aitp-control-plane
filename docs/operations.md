@@ -318,7 +318,8 @@ owns one route's wire behaviour over time in that artifact.
 ## Rate limiting
 
 In-memory, per-process token buckets on every `/api/*` route except the probes
-(`/api/health`, `/api/readyz`, `/api/metrics`). Over-limit → `429 RATE_LIMITED`
+(`/api/health`, `/api/readyz`, `/api/metrics`; metrics still needs an admin
+key first). Over-limit → `429 RATE_LIMITED`
 with `Retry-After` and `X-RateLimit-*` headers.
 
 **`/.well-known/*` is not rate-limited.** `/.well-known/aitp-manifest` is a
@@ -335,6 +336,12 @@ discovery paths, apply it at the edge.
 | `enroll-ip` | 5/min | `RATE_LIMIT_ENROLLMENT_PER_IP_MIN` | client IP (brute-force guard on enrollment) |
 | `public-ip` | 60/min | `RATE_LIMIT_PUBLIC_PER_IP_MIN` | client IP |
 | `api-key` | 600/min | `RATE_LIMIT_API_KEY_PER_MIN` | API key prefix (per key, not per label) |
+| `read-key` | 1200/min | `RATE_LIMIT_READ_KEY_PER_MIN` | read-only key prefix (`READ_ONLY_API_KEYS`), so dashboard reads never drain an admin bucket |
+
+A recognised admin or read-only key on a **public** `GET` is counted in its
+own key bucket rather than the caller's IP bucket. Unknown keys, issuer keys,
+public writes and enrollment stay on the per-IP buckets, so presenting junk in
+`Authorization` cannot escape the IP limit.
 
 - `RATE_LIMIT_WINDOW_MS` (default 60000) is the accumulation window.
 - `RATE_LIMIT_ENABLED=false` disables the limiter entirely (dev / load tests).
@@ -357,12 +364,29 @@ you tell the CP which hop to trust:
 Misconfigure these and per-IP limits either bucket every request under one key
 or are trivially bypassed. Match them to your actual edge.
 
+**On Railway, `TRUSTED_PROXY_HOPS=1`** (Doppler `aitp-control-plane/prd`, synced
+by `deploy/doppler-sync.sh`). Railway's edge is the one proxy in front of the
+service and puts the address it saw last in `X-Forwarded-For`, so the
+rightmost entry is the real client and anything a client sends to the left is
+ignored. With `0`, the CP fell back to `x-real-ip`, which a 2026-11-08
+production probe showed the edge overwrites (a spoofed `x-real-ip` stayed in
+the exhausted bucket) — that probe says nothing about `X-Forwarded-For`, which
+`0` ignores, so the spoof probe below is what confirms `1` after it is
+deployed. Re-check it after any change in front of the service (a CDN or
+second proxy adds a hop: raise the number, or use `CLIENT_IP_HEADER`): exhaust
+the `public-ip` bucket on a public route, then send a spoofed
+`X-Forwarded-For` — it must still be `429`.
+
 ## SSE capacity
 
 `GET /api/events/stream` holds an in-process subscription per open stream.
 
 - **`MAX_SSE_CONNECTIONS`** (default 500) caps concurrent streams per process;
   over the cap returns `503 SSE_CAPACITY`. Clients should back off and retry.
+- **`MAX_SSE_READ_KEY_CONNECTIONS`** (default 80% of `MAX_SSE_CONNECTIONS`)
+  caps how many of those streams read-only keys hold together, so admin
+  streams always have headroom. A read key over it also gets
+  `503 SSE_CAPACITY` (logged with reason `read-key-capacity`).
 - **`MAX_AUDIT_EVENTS_MEMORY`** (default 500) sizes the bus's total in-memory
   retention (older events are evicted and counted as dropped). Each new
   subscriber replays at most the last **100** events before going live,
@@ -437,8 +461,9 @@ Six behaviours worth knowing before you change it:
 
 ### Is the stream healthy? (three metrics, no log access needed)
 
-`/api/metrics` is public and rate-limit exempt, so these answer the question
-from anywhere — which is the point: they exist because a dead stream endpoint
+`/api/metrics` needs an admin (`API_KEYS`) key and is rate-limit exempt, so
+anyone holding that key can answer the question without log access — which is
+the point: they exist because a dead stream endpoint
 was once undiagnosable from outside the process for days.
 
 | Series (`aitp_control_plane_`…) | Read it as |
@@ -446,6 +471,7 @@ was once undiagnosable from outside the process for days.
 | `sse_streams_open` | Streams alive on this replica right now. Flat at `0` while the console claims to be connected means the handler is not being reached — look at the gate, the proxy, or the URL, not at the route. |
 | `sse_streams_opened_total` | Connect *rate*, by differencing. Climbing fast with `sse_streams_open` flat is a reconnect loop: streams are being accepted and dying immediately. Suspect an idle timeout or a function duration cap at the edge rather than the route. |
 | `sse_streams_rejected_total` | Connections refused by the cap. Any movement means `MAX_SSE_CONNECTIONS` is too low for the current client population, or streams are leaking rather than closing. |
+| `sse_streams_open_read_key` | The part of `sse_streams_open` held by read-only keys. Pinned at `MAX_SSE_READ_KEY_CONNECTIONS` while rejections climb means read-key consumers, not admin ones, are what is hitting the cap. |
 
 Both counters are cumulative and per-process, so they reset on restart and on a
 redeploy — normal for a Prometheus counter, and a reset is itself the signal that
@@ -513,8 +539,11 @@ curl -sN -H "Accept: text/event-stream" \
   https://aitp-ui-console.vercel.app/api/cp/events/stream --max-time 45 \
   -o - -w '\nhttp=%{http_code} starttransfer=%{time_starttransfer} total=%{time_total}\n'
 
-# 3. Was the handler even reached? /api/metrics is public and rate-limit exempt.
-curl -s "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
+# 3. Was the handler even reached? /api/metrics needs an admin key; it is
+#    rate-limit exempt. Feed the key from Doppler on stdin, never on the command line.
+doppler secrets get CP_API_KEY_CONSOLE -p aitp-control-plane -c prd --plain \
+  | sed 's/^/Authorization: Bearer /' \
+  | curl -s -H @- "$CP_URL/api/metrics" | grep aitp_control_plane_sse_streams
 ```
 
 Read the three together:
@@ -672,8 +701,9 @@ What is swept (set any TTL to `0` to keep that table indefinitely):
 
 ## Observability
 
-- **Metrics:** `GET /api/metrics` exposes Prometheus text format (public, exempt
-  from rate limiting). See [Metrics](#metrics) below for the series it emits.
+- **Metrics:** `GET /api/metrics` exposes Prometheus text format (admin
+  `API_KEYS` key required since wave 3; exempt from rate limiting once
+  authenticated). Point a scraper at it with `Authorization: Bearer <key>`. See [Metrics](#metrics) below for the series it emits.
 - **Logs:** via pino. `LOG_LEVEL` ∈ `trace|debug|info|warn|error|fatal`
   defaults to `info` under `NODE_ENV=production` and `debug` otherwise.
   Production logs are structured JSON; outside production they are
@@ -744,7 +774,8 @@ in this table, and conflating them will give you wrong numbers:
 | `enroll_verification_failures` | counter | `code` | Failed enrollment manifest verifications |
 | `sse_streams_open` | gauge | — | `/api/events/stream` connections open right now on this replica |
 | `sse_streams_opened_total` | counter | — | Stream connections accepted since process start |
-| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` |
+| `sse_streams_rejected_total` | counter | — | Stream connections refused by `MAX_SSE_CONNECTIONS` or `MAX_SSE_READ_KEY_CONNECTIONS` |
+| `sse_streams_open_read_key` | gauge | — | Of `sse_streams_open`, the streams held by read-only keys |
 
 The DB-derived series (`agents_*`, `sessions_total`, `webhook_deliveries`,
 `audit_events`) are **absent** from a scrape taken while the database is

@@ -3,9 +3,11 @@ import { eventBus, type AuditEventRecord } from '@/lib/audit/stream';
 import {
   acquireSseSlot,
   getSseOpenCount,
+  getSseReadOpenCount,
   recordSseRejected,
   releaseSseSlot,
 } from '@/lib/audit/sse-metrics';
+import { KEY_KIND_HEADER } from '@/lib/audit-log/actor';
 import { config } from '@/lib/config';
 import { childLogger } from '@/lib/logger';
 
@@ -74,17 +76,33 @@ export function GET(req: NextRequest) {
     log = childLogger(requestId ? { requestId } : {});
   });
 
-  if (getSseOpenCount() >= config.maxSseConnections) {
+  // Read ONCE, here, and kept in the closure: the slot this stream takes in the
+  // read-key sub-cap must be released with the same flag it was acquired with.
+  // The header is gate-set (src/proxy.ts deletes any client copy).
+  const readKey = req.headers.get(KEY_KIND_HEADER) === 'read';
+  // A read-only key (anonymous console viewers) may hold at most
+  // maxSseReadKeyConnections of the global slots, so it can never take the last
+  // ones from an admin caller. Check and acquire below run with no await in
+  // between, so concurrent opens cannot both pass the check.
+  const overGlobal = getSseOpenCount() >= config.maxSseConnections;
+  const overRead = readKey && getSseReadOpenCount() >= config.maxSseReadKeyConnections;
+  if (overGlobal || overRead) {
     recordSseRejected();
     // warn, not info: at the cap the console is being actively refused, which
     // is the one SSE lifecycle event an operator should be paged-adjacent to.
     safely(() =>
       log.warn(
-        {
-          reason: 'capacity',
-          open: getSseOpenCount(),
-          cap: config.maxSseConnections,
-        },
+        overGlobal
+          ? {
+              reason: 'capacity',
+              open: getSseOpenCount(),
+              cap: config.maxSseConnections,
+            }
+          : {
+              reason: 'read-key-capacity',
+              open: getSseReadOpenCount(),
+              cap: config.maxSseReadKeyConnections,
+            },
         'sse stream rejected',
       ),
     );
@@ -129,7 +147,7 @@ export function GET(req: NextRequest) {
   let closed = false;
   // Reserve a slot for this connection; release it in cleanup so the
   // count tracks live streams 1:1. Also counts the open.
-  const openCount = acquireSseSlot();
+  const openCount = acquireSseSlot(readKey);
   const openedAt = Date.now();
   safely(() =>
     log.info(
@@ -156,7 +174,7 @@ export function GET(req: NextRequest) {
   const cleanup = (reason: 'cancel' | 'abort' | 'enqueue-failed') => {
     if (closed) return;
     closed = true;
-    releaseSseSlot();
+    releaseSseSlot(readKey);
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
