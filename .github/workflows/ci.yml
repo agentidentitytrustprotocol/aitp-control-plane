@@ -73,7 +73,7 @@ jobs:
       # default, no deletes, no RAILWAY_*/${{ }} keys, redeploy only on change, values
       # never in argv or output) are pinned by offline tests with stubbed curl/doppler.
       - name: Deploy scripts (shellcheck + offline tests)
-        run: shellcheck deploy/*.sh scripts/handoff/*.sh && bash deploy/test-doppler-sync.sh && bash deploy/test-railway-release.sh && bash scripts/handoff/test-create-read-key.sh
+        run: shellcheck deploy/*.sh scripts/handoff/*.sh scripts/integration-local.sh && bash deploy/test-doppler-sync.sh && bash deploy/test-railway-release.sh && bash scripts/handoff/test-create-read-key.sh
 
       # Migrations run BEFORE any test step so unit tests that
       # accidentally touch the DB don't fail against an unmigrated schema.

@@ -1,0 +1,20 @@
+# Throwaway Postgres for scripts/integration-local.sh. No container_name and an
+# ephemeral host port (127.0.0.1::5432), so every run gets its own compose project
+# and two runs can coexist. Data lives in tmpfs and dies with the container.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aitp_control_plane_test
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1: answer only once the TCP listener is up, not the init-time socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d aitp_control_plane_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
