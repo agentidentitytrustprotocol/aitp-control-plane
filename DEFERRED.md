@@ -1,0 +1,1 @@
+- 2026-11-08 Pin Railway source image to `:sha-<40>` per release (serviceInstanceUpdate) instead of :latest + digest proof — only if a :latest race is ever observed.
