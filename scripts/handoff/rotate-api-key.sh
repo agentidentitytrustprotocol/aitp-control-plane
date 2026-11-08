@@ -4,15 +4,18 @@
 #   O = the key the console uses today   (Doppler secret CP_API_KEY_CONSOLE)
 #   N = the key that replaces it          (Doppler secret CP_API_KEY_NEW)
 #
-#   1. CP (Railway):  API_KEYS gains `<label>:N` next to O       (both work)
+#   1. CP (Doppler, then Railway):  API_KEYS gains `<label>:N` next to O       (both work)
 #   2. Console (Vercel): CP_API_KEY=N, then a production redeploy
 #   3. Verify: N -> 200 at the CP; the console reaches the CP with N
-#   4. CP (Railway):  O is removed from API_KEYS
+#   4. CP (Doppler, then Railway):  O is removed from API_KEYS
 #   5. Verify: O -> 401, N -> 200
 #
 # Every other API_KEYS entry (for example the playground's key) is left as it
-# is. Keys are labelled (`label:key`, see docs/api.md), so admin audit rows made
-# with N carry actor `key:<label>`.
+# is. API_KEYS is owned by Doppler (deploy/doppler-keys.txt), so every API_KEYS
+# write goes to --doppler-project/--doppler-config first (aitp-control-plane/prd
+# in production), keeping deploy/doppler-sync.sh in agreement. Keys are
+# labelled (`label:key`, see docs/api.md), so admin audit rows made with N
+# carry actor `key:<label>`.
 #
 # MODES
 #   (default)    dry run: read-only preflight, then print the plan. Changes nothing.
@@ -60,7 +63,7 @@ DOPPLER_CONFIG=""
 LABEL="console-$(date -u +%Y%m%d)"
 ASSUME_YES=0
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -114,6 +117,10 @@ current_api_keys() {
   rw variables --json -s "$RAILWAY_SERVICE" -e "$RAILWAY_ENV" | jq -r '.API_KEYS // ""'
 }
 set_api_keys() { # value on $1, sent on stdin
+  # Doppler owns API_KEYS (deploy/doppler-keys.txt): write it there FIRST, so a
+  # failure between the two writes leaves Doppler ahead, never behind. Behind
+  # would make the next deploy/doppler-sync.sh --apply silently undo this step.
+  printf '%s' "$1" | doppler_set_stdin API_KEYS
   printf '%s' "$1" | rw variable set API_KEYS --stdin -s "$RAILWAY_SERVICE" -e "$RAILWAY_ENV" >/dev/null
 }
 

@@ -57,6 +57,10 @@ All settings are environment variables. `.env.example` is the canonical list;
 [`docs/operations.md`](docs/operations.md) is the runbook explaining how the
 rate-limit, retention, and telemetry subsystems behave.
 
+In production these variables are owned by Doppler (`aitp-control-plane/prd`)
+and pushed to Railway with `deploy/doppler-sync.sh`; see
+[internal_docs/DEPLOY.md](internal_docs/DEPLOY.md#configuration-source-of-truth-doppler).
+
 **Core**
 
 | Variable | Required | Default | Purpose |
